@@ -6,6 +6,7 @@ A comprehensive car market intelligence tool that scrapes OLX.ba daily to track 
 
 - **Daily Data Collection**: Automated scraping of all passenger car listings from OLX.ba
 - **Modern React Dashboard**: Interactive web dashboard with market trends and insights
+- **Real-time Data Refresh**: Manual refresh button to pull latest listings from OLX
 - **Price Analysis**: Advanced filtering and price comparison tools
 - **Data Export**: CSV export functionality for further analysis
 - **Automated Operation**: Scheduled daily scraping without manual intervention
@@ -138,6 +139,12 @@ python utils/scheduler.py --mode manual
 - Average market price and most viewed car
 - Top makes and models by listing count
 - Interactive charts and metrics
+
+### 🔄 Real-time Data Refresh
+- **Refresh Button**: Manually trigger data updates from OLX.ba
+- **Last Updated Display**: Shows when data was last refreshed
+- **Progress Indicators**: Visual feedback during refresh process
+- **Auto-reload**: Dashboard automatically updates after refresh completes
 
 ### 🔥 Hot Cars
 - Cars with highest views in the last 7 days
