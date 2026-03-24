@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>YouTube Transcript Analyzer</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #0f0f0f;
+    color: #e1e1e1;
+    min-height: 100vh;
+    padding: 16px;
+    padding-bottom: 60px;
+  }
+  .header {
+    text-align: center;
+    margin-bottom: 24px;
+    padding-top: 12px;
+  }
+  .header h1 {
+    font-size: 1.5rem;
+    color: #fff;
+    margin-bottom: 4px;
+  }
+  .header h1 span { color: #ff4444; }
+  .header p {
+    font-size: 0.82rem;
+    color: #666;
+  }
+  .input-row {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 20px;
+  }
+  input[type="text"] {
+    flex: 1;
+    padding: 14px 12px;
+    border-radius: 12px;
+    border: 2px solid #222;
+    background: #1a1a1a;
+    color: #fff;
+    font-size: 16px;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+  input[type="text"]::placeholder { color: #555; }
+  input[type="text"]:focus { border-color: #ff4444; }
+  button {
+    padding: 14px 24px;
+    border-radius: 12px;
+    border: none;
+    background: #ff4444;
+    color: #fff;
+    font-size: 16px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.2s;
+  }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  button:active:not(:disabled) { background: #cc3333; }
+
+  .loader {
+    text-align: center;
+    padding: 50px 0;
+    display: none;
+  }
+  .loader.active { display: block; }
+  .spinner {
+    width: 40px; height: 40px;
+    border: 3px solid #222;
+    border-top-color: #ff4444;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    margin: 0 auto 14px;
+  }
+  .loader p { color: #888; font-size: 0.9rem; }
+  .loader .substatus { color: #555; font-size: 0.78rem; margin-top: 6px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .error-box {
+    background: #2a1111;
+    border: 1px solid #ff444488;
+    border-radius: 12px;
+    padding: 14px 16px;
+    margin-bottom: 16px;
+    display: none;
+    font-size: 0.9rem;
+    color: #ff8888;
+  }
+  .error-box.active { display: block; }
+
+  .results { display: none; }
+  .results.active { display: block; }
+
+  .stats {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin-bottom: 16px;
+  }
+  .stat-box {
+    background: #1a1a1a;
+    border-radius: 12px;
+    padding: 16px 12px;
+    text-align: center;
+  }
+  .stat-box .value {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: #ff4444;
+  }
+  .stat-box .label {
+    font-size: 0.72rem;
+    color: #666;
+    margin-top: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .card {
+    background: #1a1a1a;
+    border-radius: 14px;
+    padding: 18px;
+    margin-bottom: 14px;
+  }
+  .card h2 {
+    font-size: 0.85rem;
+    color: #ff4444;
+    margin-bottom: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .card p {
+    font-size: 0.92rem;
+    line-height: 1.6;
+    color: #ccc;
+  }
+  .card ul {
+    padding-left: 0;
+    list-style: none;
+  }
+  .card li {
+    font-size: 0.9rem;
+    line-height: 1.5;
+    color: #ccc;
+    padding: 10px 0;
+    border-bottom: 1px solid #222;
+    padding-left: 20px;
+    position: relative;
+  }
+  .card li:last-child { border-bottom: none; }
+  .card li::before {
+    content: "→";
+    position: absolute;
+    left: 0;
+    color: #ff4444;
+    font-weight: bold;
+  }
+
+  .topics {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .topic-tag {
+    background: #2a1515;
+    border: 1px solid #ff444444;
+    color: #ff9999;
+    padding: 6px 14px;
+    border-radius: 20px;
+    font-size: 0.82rem;
+  }
+
+  .transcript-preview {
+    font-size: 0.82rem;
+    color: #777;
+    line-height: 1.7;
+    max-height: 250px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .copy-btn {
+    background: #222;
+    color: #999;
+    border: 1px solid #333;
+    padding: 8px 14px;
+    border-radius: 8px;
+    font-size: 0.78rem;
+    cursor: pointer;
+    margin-top: 10px;
+  }
+  .copy-btn:active { background: #333; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>YouTube <span>Transcript</span> Analyzer</h1>
+  <p>Paste a video link, get key takeaways instantly</p>
+</div>
+
+<div class="input-row">
+  <input type="text" id="urlInput" placeholder="Paste YouTube URL..." autocomplete="off">
+  <button id="analyzeBtn" onclick="analyze()">Go</button>
+</div>
+
+<div class="error-box" id="errorBox"></div>
+
+<div class="loader" id="loader">
+  <div class="spinner"></div>
+  <p>Analyzing video...</p>
+  <p class="substatus" id="substatus">Fetching transcript</p>
+</div>
+
+<div class="results" id="results">
+  <div class="stats" id="statsGrid"></div>
+
+  <div class="card">
+    <h2>Summary</h2>
+    <p id="summary"></p>
+  </div>
+
+  <div class="card">
+    <h2>Key Takeaways</h2>
+    <ul id="takeaways"></ul>
+  </div>
+
+  <div class="card">
+    <h2>Topics</h2>
+    <div class="topics" id="topics"></div>
+  </div>
+
+  <div class="card">
+    <h2>Transcript</h2>
+    <div class="transcript-preview" id="preview"></div>
+    <button class="copy-btn" onclick="copyTranscript()">Copy full transcript</button>
+  </div>
+</div>
+
+<script>
+// ==========================================
+// YouTube Transcript Fetcher (client-side)
+// ==========================================
+
+function extractVideoId(url) {
+  url = url.trim();
+  // Direct ID
+  if (/^[a-zA-Z0-9_-]{11}$/.test(url)) return url;
+
+  try {
+    const u = new URL(url);
+    // youtube.com/watch?v=
+    if (u.hostname.includes('youtube.com') && u.searchParams.has('v'))
+      return u.searchParams.get('v');
+    // youtube.com/embed/ or /v/ or /shorts/
+    const m = u.pathname.match(/\/(embed|v|shorts)\/([a-zA-Z0-9_-]{11})/);
+    if (m) return m[2];
+    // youtu.be/ID
+    if (u.hostname.includes('youtu.be')) {
+      const id = u.pathname.slice(1);
+      if (/^[a-zA-Z0-9_-]{11}$/.test(id)) return id;
+    }
+  } catch(e) {}
+  return null;
+}
+
+async function fetchTranscript(videoId) {
+  // Use YouTube's innertube API via a CORS proxy to get captions
+  const watchUrl = `https://www.youtube.com/watch?v=${videoId}`;
+
+  // Try multiple CORS proxies for reliability
+  const proxies = [
+    (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
+    (url) => `https://corsproxy.io/?url=${encodeURIComponent(url)}`,
+  ];
+
+  let html = null;
+  for (const proxy of proxies) {
+    try {
+      const res = await fetch(proxy(watchUrl), { signal: AbortSignal.timeout(15000) });
+      if (res.ok) {
+        html = await res.text();
+        if (html.includes('captionTracks')) break;
+        html = null; // got response but no captions data, try next
+      }
+    } catch(e) { continue; }
+  }
+
+  if (!html) throw new Error('Could not fetch video page. The video may be private or region-locked.');
+
+  // Extract captions data from page source
+  const captionMatch = html.match(/"captionTracks":\s*(\[.*?\])/);
+  if (!captionMatch) throw new Error('No captions/subtitles available for this video.');
+
+  let captionTracks;
+  try {
+    captionTracks = JSON.parse(captionMatch[1]);
+  } catch(e) {
+    throw new Error('Failed to parse caption data.');
+  }
+
+  if (!captionTracks.length) throw new Error('No caption tracks found.');
+
+  // Prefer English, then any track
+  let track = captionTracks.find(t => t.languageCode === 'en')
+           || captionTracks.find(t => t.languageCode?.startsWith('en'))
+           || captionTracks[0];
+
+  let captionUrl = track.baseUrl;
+  if (!captionUrl) throw new Error('No caption URL found.');
+
+  // Fetch the captions XML
+  let xml = null;
+  for (const proxy of proxies) {
+    try {
+      const res = await fetch(proxy(captionUrl), { signal: AbortSignal.timeout(10000) });
+      if (res.ok) {
+        xml = await res.text();
+        if (xml.includes('<text')) break;
+        xml = null;
+      }
+    } catch(e) { continue; }
+  }
+
+  if (!xml) throw new Error('Could not fetch caption data.');
+
+  // Parse XML captions
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(xml, 'text/xml');
+  const textNodes = doc.querySelectorAll('text');
+
+  const segments = [];
+  let fullText = '';
+
+  textNodes.forEach(node => {
+    const text = decodeHTMLEntities(node.textContent || '');
+    const start = parseFloat(node.getAttribute('start') || '0');
+    const dur = parseFloat(node.getAttribute('dur') || '0');
+    segments.push({ text, start, duration: dur });
+    fullText += text + ' ';
+  });
+
+  fullText = fullText.replace(/\s+/g, ' ').trim();
+
+  const lastSeg = segments[segments.length - 1];
+  const durationSeconds = lastSeg ? lastSeg.start + lastSeg.duration : 0;
+
+  return { videoId, segments, fullText, durationSeconds };
+}
+
+function decodeHTMLEntities(str) {
+  const ta = document.createElement('textarea');
+  ta.innerHTML = str;
+  return ta.value;
+}
+
+// ==========================================
+// Transcript Analyzer (client-side NLP)
+// ==========================================
+
+function analyzeTranscript(fullText, durationSeconds) {
+  const words = fullText.split(/\s+/).filter(w => w);
+  const wordCount = words.length;
+  const readingTime = Math.round(wordCount / 200 * 10) / 10;
+
+  // Split into sentences
+  let sentences = fullText.split(/(?<=[.!?])\s+/);
+  sentences = sentences.filter(s => s.trim().length > 20);
+
+  // If transcript has no punctuation (auto-generated), split by segments
+  if (sentences.length < 3) {
+    // Split on natural pauses / every ~50 words
+    sentences = [];
+    const ws = fullText.split(/\s+/);
+    for (let i = 0; i < ws.length; i += 40) {
+      const chunk = ws.slice(i, i + 40).join(' ');
+      if (chunk.length > 20) sentences.push(chunk);
+    }
+  }
+
+  const importancePatterns = [
+    /\b(important|key|crucial|essential|must|need to|remember|note that)\b/i,
+    /\b(first|second|third|finally|in conclusion|to summarize|takeaway)\b/i,
+    /\b(the main|the biggest|the most|number one|top)\b/i,
+    /\b(tip|trick|strategy|technique|method|approach|step)\b/i,
+    /\b(because|therefore|as a result|this means|so basically)\b/i,
+    /\b(don't|never|always|avoid|make sure)\b/i,
+  ];
+
+  const scored = sentences.map((sentence, i) => {
+    let score = 0;
+    const lower = sentence.toLowerCase();
+
+    for (const pat of importancePatterns) {
+      if (pat.test(lower)) score += 2;
+    }
+
+    // Position bias
+    const pos = i / Math.max(sentences.length, 1);
+    if (pos < 0.15 || pos > 0.85) score += 1.5;
+
+    // Good sentence length
+    const wLen = sentence.split(/\s+/).length;
+    if (wLen >= 10 && wLen <= 40) score += 1;
+
+    // Numbers = facts
+    if (/\d+/.test(sentence)) score += 0.5;
+
+    return { sentence, score };
+  });
+
+  scored.sort((a, b) => b.score - a.score);
+
+  // Deduplicate
+  const takeaways = [];
+  const seenWords = new Set();
+  for (const { sentence } of scored) {
+    const sw = new Set(sentence.toLowerCase().split(/\s+/));
+    let overlap = 0;
+    for (const w of sw) { if (seenWords.has(w)) overlap++; }
+    if (overlap / Math.max(sw.size, 1) < 0.5) {
+      takeaways.push(sentence);
+      for (const w of sw) seenWords.add(w);
+    }
+    if (takeaways.length >= 8) break;
+  }
+
+  // Extract topics
+  const stopWords = new Set([
+    'the','a','an','is','are','was','were','be','been','being','have','has','had',
+    'do','does','did','will','would','could','should','may','might','shall','can',
+    'need','dare','ought','used','to','of','in','for','on','with','at','by','from',
+    'as','into','through','during','before','after','above','below','between','out',
+    'off','over','under','again','further','then','once','here','there','when','where',
+    'why','how','all','both','each','few','more','most','other','some','such','no',
+    'nor','not','only','own','same','so','than','too','very','just','don','now','and',
+    'but','or','if','it','its','this','that','these','those','me','my','we','our',
+    'you','your','he','him','his','she','her','they','them','their','what','which',
+    'who','whom','about','up','like','also','really','going','think','know','get',
+    'got','thing','things','say','said','one','two','much','many','well','right',
+    'because','even','still','way','want','look','make','go','see','come','take',
+    'good','new','people','time','back','lot','kind','actually','yeah','okay','gonna',
+    'just','like','thats','dont','youre','were','weve','theyre','heres','theres',
+  ]);
+
+  const freq = {};
+  for (const w of words) {
+    const clean = w.replace(/[^a-zA-Z]/g, '').toLowerCase();
+    if (clean.length > 3 && !stopWords.has(clean)) {
+      freq[clean] = (freq[clean] || 0) + 1;
+    }
+  }
+
+  const topics = Object.entries(freq)
+    .sort((a, b) => b[1] - a[1])
+    .filter(([, c]) => c >= 3)
+    .slice(0, 10)
+    .map(([w]) => w);
+
+  const summary = takeaways.slice(0, 3).join(' ') || 'No summary could be generated.';
+  const durationMin = Math.round(durationSeconds / 60 * 10) / 10;
+
+  return {
+    summary,
+    keyTakeaways: takeaways,
+    topics,
+    wordCount,
+    readingTime,
+    durationMin,
+  };
+}
+
+// ==========================================
+// UI Logic
+// ==========================================
+
+let lastFullText = '';
+
+async function analyze() {
+  const url = document.getElementById('urlInput').value.trim();
+  if (!url) return;
+
+  const btn = document.getElementById('analyzeBtn');
+  const loader = document.getElementById('loader');
+  const results = document.getElementById('results');
+  const errorBox = document.getElementById('errorBox');
+  const substatus = document.getElementById('substatus');
+
+  btn.disabled = true;
+  loader.classList.add('active');
+  results.classList.remove('active');
+  errorBox.classList.remove('active');
+
+  try {
+    const videoId = extractVideoId(url);
+    if (!videoId) throw new Error('Invalid YouTube URL. Try pasting the full link.');
+
+    substatus.textContent = 'Fetching transcript...';
+    const data = await fetchTranscript(videoId);
+
+    if (!data.fullText.trim()) throw new Error('Transcript is empty — video may not have captions.');
+
+    substatus.textContent = 'Analyzing content...';
+    const analysis = analyzeTranscript(data.fullText, data.durationSeconds);
+    lastFullText = data.fullText;
+
+    renderResults(analysis, data.fullText);
+  } catch(e) {
+    errorBox.textContent = e.message;
+    errorBox.classList.add('active');
+  } finally {
+    btn.disabled = false;
+    loader.classList.remove('active');
+  }
+}
+
+function renderResults(analysis, fullText) {
+  document.getElementById('statsGrid').innerHTML = `
+    <div class="stat-box"><div class="value">${analysis.durationMin}m</div><div class="label">Video Length</div></div>
+    <div class="stat-box"><div class="value">${analysis.wordCount.toLocaleString()}</div><div class="label">Words</div></div>
+    <div class="stat-box"><div class="value">${analysis.readingTime}m</div><div class="label">Read Time</div></div>
+    <div class="stat-box"><div class="value">${analysis.keyTakeaways.length}</div><div class="label">Takeaways</div></div>
+  `;
+
+  document.getElementById('summary').textContent = analysis.summary;
+
+  document.getElementById('takeaways').innerHTML = analysis.keyTakeaways
+    .map(t => `<li>${esc(t)}</li>`).join('');
+
+  document.getElementById('topics').innerHTML = analysis.topics
+    .map(t => `<span class="topic-tag">${esc(t)}</span>`).join('');
+
+  const preview = fullText.length > 800 ? fullText.slice(0, 800) + '...' : fullText;
+  document.getElementById('preview').textContent = preview;
+
+  document.getElementById('results').classList.add('active');
+
+  // Scroll to results
+  document.getElementById('statsGrid').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function esc(str) {
+  const d = document.createElement('div');
+  d.textContent = str;
+  return d.innerHTML;
+}
+
+function copyTranscript() {
+  if (!lastFullText) return;
+  navigator.clipboard.writeText(lastFullText).then(() => {
+    const btn = document.querySelector('.copy-btn');
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = 'Copy full transcript'; }, 2000);
+  });
+}
+
+// Enter key
+document.getElementById('urlInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter') analyze();
+});
+</script>
+
+</body>
+</html>
