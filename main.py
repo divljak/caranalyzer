@@ -29,6 +29,8 @@ except ImportError as e:
     print("Current working directory:", os.getcwd())
     raise
 
+from utils.youtube_transcript import extract_video_id, fetch_transcript, analyze_transcript
+
 app = FastAPI(
     title="Car Flipper Dashboard API",
     description="REST API for car market analysis and flipping intelligence",
@@ -850,6 +852,102 @@ async def run_scraper_background(project_root: Path):
         
     except Exception as e:
         print(f"Background scraper error: {e}")
+
+# --- YouTube Transcript Analyzer ---
+
+class TranscriptRequest(BaseModel):
+    url: str
+
+class TranscriptSegment(BaseModel):
+    text: str
+    start: float
+    duration: float
+
+class TranscriptResponse(BaseModel):
+    video_id: str
+    full_text: str
+    segment_count: int
+    duration_seconds: float
+
+class AnalysisResponse(BaseModel):
+    video_id: str
+    summary: str
+    key_takeaways: List[str]
+    topics: List[str]
+    word_count: int
+    estimated_reading_time_min: float
+    video_duration_min: float
+
+class FullAnalysisResponse(BaseModel):
+    video_id: str
+    transcript_preview: str
+    summary: str
+    key_takeaways: List[str]
+    topics: List[str]
+    word_count: int
+    estimated_reading_time_min: float
+    video_duration_min: float
+
+
+@app.post("/youtube/transcript", response_model=TranscriptResponse)
+async def get_youtube_transcript(request: TranscriptRequest):
+    """Fetch the transcript for a YouTube video."""
+    video_id = extract_video_id(request.url)
+    if not video_id:
+        raise HTTPException(status_code=400, detail="Invalid YouTube URL or video ID")
+
+    try:
+        data = fetch_transcript(video_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching transcript: {e}")
+
+    return TranscriptResponse(
+        video_id=data["video_id"],
+        full_text=data["full_text"],
+        segment_count=len(data["segments"]),
+        duration_seconds=data["duration_seconds"],
+    )
+
+
+@app.post("/youtube/analyze", response_model=FullAnalysisResponse)
+async def analyze_youtube_video(request: TranscriptRequest):
+    """
+    Fetch transcript from a YouTube video, analyze it, and return key takeaways.
+    This is the main endpoint — paste a YouTube URL and get insights.
+    """
+    video_id = extract_video_id(request.url)
+    if not video_id:
+        raise HTTPException(status_code=400, detail="Invalid YouTube URL or video ID")
+
+    try:
+        data = fetch_transcript(video_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching transcript: {e}")
+
+    full_text = data["full_text"]
+    if not full_text or not full_text.strip():
+        raise HTTPException(status_code=422, detail="Transcript is empty — video may not have captions")
+
+    analysis = analyze_transcript(full_text, data["duration_seconds"])
+
+    # Show first 500 chars as preview
+    preview = full_text[:500] + ("..." if len(full_text) > 500 else "")
+
+    return FullAnalysisResponse(
+        video_id=data["video_id"],
+        transcript_preview=preview,
+        summary=analysis["summary"],
+        key_takeaways=analysis["key_takeaways"],
+        topics=analysis["topics"],
+        word_count=analysis["word_count"],
+        estimated_reading_time_min=analysis["estimated_reading_time_min"],
+        video_duration_min=analysis["video_duration_min"],
+    )
+
 
 if __name__ == "__main__":
     import uvicorn
