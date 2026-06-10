@@ -108,6 +108,16 @@ class TrendingModel(BaseModel):
     trend_text: str
     trend_type: str  # "views_up", "days_down", "general"
 
+class PopularModel(BaseModel):
+    rank: int
+    model: str
+    listings_count: int
+    total_views: int
+    avg_views: float
+    avg_price: float
+    avg_days_on_market: float
+    search_url: str
+
 class ScatterPoint(BaseModel):
     price: float
     days_on_market: float
@@ -120,6 +130,7 @@ class DashboardData(BaseModel):
     price_brackets: List[PriceBracket]
     fastest_selling: List[FastestSellingModel]
     trending_models: List[TrendingModel]
+    popular_models: List[PopularModel]
     scatter_data: List[ScatterPoint]
     stats: Dict[str, Any]
 
@@ -303,6 +314,45 @@ def analyze_price_ranges(listings: List[CarListing]) -> Dict[str, Dict]:
             }
     
     return range_analysis
+
+def calculate_popular_models(listings: List[CarListing], limit: int = 10) -> List[PopularModel]:
+    """Rank models by market popularity: listing volume first, buyer views as tiebreaker"""
+    groups = defaultdict(list)
+    for car in listings:
+        if car.make and car.model:
+            groups[f"{car.make} {car.model}".strip()].append(car)
+
+    ranked = []
+    for model, cars in groups.items():
+        prices = [c.price for c in cars if c.price and c.price > 0]
+        if not prices:
+            continue
+        days = [(date.today() - c.posted_date).days for c in cars if c.posted_date]
+        total_views = sum(c.views or 0 for c in cars)
+        ranked.append({
+            'model': model,
+            'listings_count': len(cars),
+            'total_views': total_views,
+            'avg_views': total_views / len(cars),
+            'avg_price': sum(prices) / len(prices),
+            'avg_days_on_market': sum(days) / len(days) if days else 0.0,
+        })
+
+    ranked.sort(key=lambda r: (r['listings_count'], r['total_views']), reverse=True)
+
+    return [
+        PopularModel(
+            rank=i + 1,
+            model=r['model'],
+            listings_count=r['listings_count'],
+            total_views=r['total_views'],
+            avg_views=round(r['avg_views'], 1),
+            avg_price=round(r['avg_price']),
+            avg_days_on_market=round(r['avg_days_on_market'], 1),
+            search_url=f"https://olx.ba/pretraga?category_id=18&trazilica={urllib.parse.quote(r['model'])}",
+        )
+        for i, r in enumerate(ranked[:limit])
+    ]
 
 def create_scatter_data(listings: List[CarListing]) -> List[Dict]:
     """Create scatter plot data"""
@@ -559,6 +609,7 @@ async def get_dashboard_data(
                 price_brackets=[],
                 fastest_selling=[],
                 trending_models=[],
+                popular_models=[],
                 scatter_data=[],
                 stats={
                     "total_listings": 0,
@@ -587,6 +638,12 @@ async def get_dashboard_data(
         except Exception as e:
             print(f"Error in scatter data: {e}")
             scatter_data = []
+
+        try:
+            popular_models = calculate_popular_models(listings)
+        except Exception as e:
+            print(f"Error in popular models: {e}")
+            popular_models = []
         
         # Build opportunities
         opportunities = []
@@ -671,7 +728,7 @@ async def get_dashboard_data(
                 model=model_data['model'],
                 year=model_data['avg_year'],
                 avg_days_on_market=days,
-                avg_price=model_data['avg_price'],
+                avg_price=round(model_data['avg_price']),
                 demand_level=demand_level
             ))
         
@@ -726,10 +783,13 @@ async def get_dashboard_data(
             price_brackets=price_brackets,
             fastest_selling=fastest_selling,
             trending_models=trending_models,
+            popular_models=popular_models,
             scatter_data=scatter_points,
             stats=stats
         )
         
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing dashboard data: {str(e)}")
 
@@ -779,6 +839,8 @@ async def analyze_car_flipping(
         
         analysis = analyze_flipping_opportunities(budget_min, budget_max)
         return analysis
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error analyzing flipping opportunities: {str(e)}")
 
@@ -805,6 +867,8 @@ async def refresh_data():
             started_at=started_at
         )
         
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error starting data refresh: {str(e)}")
 
@@ -844,8 +908,8 @@ async def get_last_update():
 async def run_scraper_background(project_root: Path):
     """Run scraper in background with timeout"""
     try:
-        # Create command to run scraper with timeout  
-        cmd = f"cd '{project_root}' && python run_scraper.py"
+        # Run with the same interpreter/venv as the API
+        cmd = f"cd '{project_root}' && '{sys.executable}' run_scraper.py"
         
         # Run in background
         process = await asyncio.create_subprocess_shell(
