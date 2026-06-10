@@ -6,6 +6,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { TrendingUp, DollarSign, Clock, BarChart3, Filter, RefreshCw } from "lucide-react";
 import { FastestSellingTable } from "@/components/dashboard/FastestSellingTable";
+import { PopularModelsTable } from "@/components/dashboard/PopularModelsTable";
 import { useDashboard } from "@/hooks/useDashboard";
 import { type DashboardFilters, refreshData, getLastUpdate } from "@/lib/api";
 import { useState, useEffect } from "react";
@@ -218,10 +219,15 @@ const Dashboard = () => {
           )}
         </div>
 
+        {/* Most Popular Models - the core market view */}
+        {dashboardData?.popular_models && (
+          <PopularModelsTable models={dashboardData.popular_models} />
+        )}
+
         {/* Fastest Selling Models - Limited to Top 6 */}
         {dashboardData?.fastest_selling && (
-          <FastestSellingTable 
-            models={dashboardData.fastest_selling.slice(0, 6)} 
+          <FastestSellingTable
+            models={dashboardData.fastest_selling.slice(0, 6)}
             filters={{
               price_min: filters.price_min,
               max_price: filters.max_price,

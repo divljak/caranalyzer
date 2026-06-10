@@ -57,6 +57,17 @@ export interface TrendingModel {
   trend_type: "views_up" | "days_down" | "general";
 }
 
+export interface PopularModel {
+  rank: number;
+  model: string;
+  listings_count: number;
+  total_views: number;
+  avg_views: number;
+  avg_price: number;
+  avg_days_on_market: number;
+  search_url: string;
+}
+
 export interface ScatterPoint {
   price: number;
   days_on_market: number;
@@ -78,6 +89,7 @@ export interface DashboardData {
   price_brackets: PriceBracket[];
   fastest_selling: FastestSellingModel[];
   trending_models: TrendingModel[];
+  popular_models: PopularModel[];
   scatter_data: ScatterPoint[];
   stats: DashboardStats;
 }
