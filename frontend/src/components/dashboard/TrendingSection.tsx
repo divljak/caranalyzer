@@ -63,7 +63,7 @@ export const TrendingSection = ({ trendingModels }: TrendingSectionProps) => {
             <TrendingItem 
               key={index} 
               model={item.model} 
-              status={'trend_text' in item ? item.trend_text : item.status} 
+              status={item.trend_text}
               metric={metric} 
               isSuccess={isSuccess} 
             />

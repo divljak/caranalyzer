@@ -43,10 +43,8 @@ source venv/bin/activate
 
 # Start API Backend
 echo "🖥️  Starting API Backend (Port 8000)..."
-cd api
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload &
 API_PID=$!
-cd ..
 
 # Wait for API to start
 echo "⏳ Waiting for API to start..."

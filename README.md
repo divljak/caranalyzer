@@ -42,9 +42,7 @@ olx-car-scraper/
 │   ├── src/
 │   ├── package.json
 │   └── vite.config.ts
-├── api/                      # FastAPI backend
-│   ├── main.py
-│   └── requirements.txt
+├── main.py                   # FastAPI backend
 ├── utils/
 │   ├── __init__.py
 │   ├── scheduler.py          # Automated running
@@ -97,6 +95,11 @@ olx-car-scraper/
    export DB_NAME=olx_cars
    export DB_USER=olx_user
    export DB_PASSWORD=your_password
+   ```
+   Alternatively set a single connection string (takes precedence; used by
+   Railway/Heroku-style deployments):
+   ```bash
+   export DATABASE_URL=postgresql://olx_user:your_password@localhost:5432/olx_cars
    ```
 
 6. **Setup database tables:**

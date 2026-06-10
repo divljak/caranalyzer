@@ -4,7 +4,7 @@ Serves car market analysis data via REST API
 """
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
@@ -12,8 +12,7 @@ from datetime import datetime, date, timedelta
 import sys
 import os
 import urllib.parse
-from collections import Counter, defaultdict
-import subprocess
+from collections import defaultdict
 import asyncio
 from pathlib import Path
 
@@ -23,7 +22,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 try:
     from database.db_manager import db_manager
     from database.models import create_engine_and_session, CarListing
-    from sqlalchemy import desc, func, and_
+    from sqlalchemy import desc, func
 except ImportError as e:
     print(f"Import error: {e}")
     print("Make sure you're running from the project root directory")
@@ -38,11 +37,14 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Enable CORS for React frontend
+# Enable CORS for React frontend.
+# Origins are configurable for production; credentials must stay off with a
+# wildcard origin or browsers reject the response.
+cors_origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",")]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=cors_origins,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -160,8 +162,10 @@ class LastUpdateResponse(BaseModel):
     total_listings: int
     new_today: int
 
+CURRENT_YEAR = date.today().year
+
 # Helper functions
-def load_flipper_data(timeframe_days: int, max_price: int, price_min: int = 0, year_min: int = 2000, year_max: int = 2024, transmission: str = "Any") -> List[CarListing]:
+def load_flipper_data(timeframe_days: int, max_price: int, price_min: int = 0, year_min: int = 2000, year_max: int = CURRENT_YEAR, transmission: str = "Any") -> List[CarListing]:
     """Load car data with filters"""
     try:
         engine, SessionLocal = create_engine_and_session()
@@ -331,7 +335,7 @@ def analyze_flipping_opportunities(budget_min: float, budget_max: float) -> Flip
     """Analyze market for car flipping opportunities within budget"""
     try:
         # Get recent market data (30 days for faster analysis) - use max budget as upper limit
-        listings = load_flipper_data(30, int(budget_max), 0, 2015, 2024)  # Focus on budget range
+        listings = load_flipper_data(30, int(budget_max), 0, 2015, CURRENT_YEAR)  # Focus on budget range
         
         if not listings:
             return FlippingAnalysisResponse(
@@ -532,8 +536,8 @@ async def get_dashboard_data(
     max_price: int = Query(25000, ge=1000, le=200000, description="Maximum price filter"),
     price_min: int = Query(0, ge=0, le=100000, description="Minimum price filter"),
     min_listings: int = Query(5, ge=2, le=20, description="Minimum listings per model"),
-    year_min: int = Query(2000, ge=1990, le=2024, description="Minimum year filter"),
-    year_max: int = Query(2024, ge=1990, le=2024, description="Maximum year filter"),
+    year_min: int = Query(2000, ge=1990, le=CURRENT_YEAR, description="Minimum year filter"),
+    year_max: int = Query(CURRENT_YEAR, ge=1990, le=CURRENT_YEAR, description="Maximum year filter"),
     transmission: str = Query("Any", description="Transmission type: Any, Auto, Manual")
 ):
     """Get complete dashboard data"""
@@ -735,8 +739,8 @@ async def get_listings(
     timeframe_days: int = Query(60, ge=7, le=365),
     max_price: int = Query(25000, ge=1000, le=200000),
     price_min: int = Query(0, ge=0, le=100000),
-    year_min: int = Query(2000, ge=1990, le=2024),
-    year_max: int = Query(2024, ge=1990, le=2024),
+    year_min: int = Query(2000, ge=1990, le=CURRENT_YEAR),
+    year_max: int = Query(CURRENT_YEAR, ge=1990, le=CURRENT_YEAR),
     transmission: str = Query("Any")
 ):
     """Get car listings with filters"""
@@ -785,7 +789,6 @@ async def refresh_data():
         # Get project root directory (current directory)
         project_root = Path(__file__).parent
         run_scraper_path = project_root / "run_scraper.py"
-        venv_activate = project_root / "venv" / "bin" / "activate"
         
         if not run_scraper_path.exists():
             raise HTTPException(status_code=500, detail="Scraper script not found")

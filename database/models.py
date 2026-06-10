@@ -57,7 +57,13 @@ class ScrapingLog(Base):
         return f"<ScrapingLog(session_id='{self.session_id}', status='{self.status}', total_listings={self.total_listings_found})>"
 
 def get_database_url():
-    """Get database URL from settings"""
+    """Get database URL from DATABASE_URL env var (e.g. Railway/Heroku) or settings"""
+    url = os.getenv('DATABASE_URL')
+    if url:
+        # SQLAlchemy dropped support for the legacy postgres:// scheme
+        if url.startswith('postgres://'):
+            url = url.replace('postgres://', 'postgresql://', 1)
+        return url
     db_config = DATABASE
     return f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
 

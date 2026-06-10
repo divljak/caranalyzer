@@ -2,6 +2,7 @@
 Configuration settings for OLX Car Scraper
 """
 import os
+from datetime import date
 
 # Database settings
 DATABASE = {
@@ -37,7 +38,7 @@ VALIDATION = {
     'min_price': 500,       # Minimum realistic price in KM
     'max_price': 200000,    # Maximum realistic price in KM
     'min_year': 1990,       # Oldest realistic year
-    'max_year': 2025,       # Current year
+    'max_year': date.today().year + 1,  # Allow next model year
     'max_mileage': 500000   # Maximum realistic mileage in km
 }
 

@@ -11,13 +11,15 @@ import { type DashboardFilters, refreshData, getLastUpdate } from "@/lib/api";
 import { useState, useEffect } from "react";
 import { toast } from "sonner";
 
+const CURRENT_YEAR = new Date().getFullYear();
+
 const Dashboard = () => {
   const [filters, setFilters] = useState<Partial<DashboardFilters>>({
     timeframe_days: 60,
     max_price: 25000,
     price_min: 0,
     year_min: 2000,
-    year_max: 2024,
+    year_max: CURRENT_YEAR,
     transmission: 'Any',
     min_listings: 5
   });
@@ -113,8 +115,8 @@ const Dashboard = () => {
               </div>
               <div>
                 <Label htmlFor="yearRange">Year Range</Label>
-                <Select 
-                  value={`${filters.year_min || 2000}-${filters.year_max || 2024}`}
+                <Select
+                  value={`${filters.year_min || 2000}-${filters.year_max || CURRENT_YEAR}`}
                   onValueChange={(value) => {
                     const [min, max] = value.split('-').map(Number);
                     setFilters({...filters, year_min: min, year_max: max});
@@ -124,11 +126,11 @@ const Dashboard = () => {
                     <SelectValue placeholder="Select year range" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="2020-2024">2020 - 2024 (Newest)</SelectItem>
-                    <SelectItem value="2015-2024">2015 - 2024 (Modern)</SelectItem>
-                    <SelectItem value="2010-2024">2010 - 2024 (Recent)</SelectItem>
-                    <SelectItem value="2005-2024">2005 - 2024 (Reliable)</SelectItem>
-                    <SelectItem value="2000-2024">2000 - 2024 (All)</SelectItem>
+                    <SelectItem value={`${CURRENT_YEAR - 4}-${CURRENT_YEAR}`}>{CURRENT_YEAR - 4} - {CURRENT_YEAR} (Newest)</SelectItem>
+                    <SelectItem value={`2015-${CURRENT_YEAR}`}>2015 - {CURRENT_YEAR} (Modern)</SelectItem>
+                    <SelectItem value={`2010-${CURRENT_YEAR}`}>2010 - {CURRENT_YEAR} (Recent)</SelectItem>
+                    <SelectItem value={`2005-${CURRENT_YEAR}`}>2005 - {CURRENT_YEAR} (Reliable)</SelectItem>
+                    <SelectItem value={`2000-${CURRENT_YEAR}`}>2000 - {CURRENT_YEAR} (All)</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
