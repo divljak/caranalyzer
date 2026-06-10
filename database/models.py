@@ -34,6 +34,7 @@ class CarListing(Base):
     description = Column(Text)
     scraped_at = Column(DateTime, default=datetime.utcnow)
     is_active = Column(Boolean, default=True)
+    delisted_at = Column(DateTime)  # When the listing disappeared from OLX (proxy for sold date)
     
     def __repr__(self):
         return f"<CarListing(id='{self.listing_id}', make='{self.make}', model='{self.model}', year={self.year}, price={self.price})>"
@@ -73,10 +74,21 @@ def create_engine_and_session():
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     return engine, SessionLocal
 
+def ensure_schema(engine):
+    """Apply lightweight in-place migrations for columns added after initial deployments"""
+    from sqlalchemy import inspect, text
+    inspector = inspect(engine)
+    if 'car_listings' in inspector.get_table_names():
+        columns = [c['name'] for c in inspector.get_columns('car_listings')]
+        if 'delisted_at' not in columns:
+            with engine.begin() as conn:
+                conn.execute(text('ALTER TABLE car_listings ADD COLUMN delisted_at TIMESTAMP'))
+
 def create_tables():
     """Create all tables in the database"""
     engine, _ = create_engine_and_session()
     Base.metadata.create_all(bind=engine)
+    ensure_schema(engine)
     print("Database tables created successfully!")
 
 if __name__ == "__main__":

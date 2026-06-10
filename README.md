@@ -137,6 +137,12 @@ python utils/scheduler.py --mode manual
 
 ## 📊 Dashboard Features
 
+### 🏆 Most Popular Cars & Sold Tracking
+- Market Popularity Ranking: models with the most listings and buyer views
+- Sold tracking: after each complete scrape, listings that disappeared from
+  OLX.ba are marked as delisted, giving real "sold" counts and actual average
+  time-to-sell per model (partial crawls via `--max-pages` skip this sweep)
+
 ### 📈 Market Overview
 - Total active listings and new listings today
 - Average market price and most viewed car

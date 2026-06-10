@@ -13,7 +13,7 @@ import logging
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from database.models import CarListing, ScrapingLog, create_engine_and_session
+from database.models import CarListing, ScrapingLog, create_engine_and_session, ensure_schema
 from config.settings import VALIDATION
 
 # Set up logging
@@ -25,6 +25,10 @@ class DatabaseManager:
     
     def __init__(self):
         self.engine, self.SessionLocal = create_engine_and_session()
+        try:
+            ensure_schema(self.engine)
+        except Exception as e:
+            logger.warning(f"Could not verify/migrate schema (DB may be unavailable): {e}")
     
     def get_session(self) -> Session:
         """Get a new database session"""
@@ -44,6 +48,9 @@ class DatabaseManager:
                     if hasattr(existing_listing, key):
                         setattr(existing_listing, key, value)
                 existing_listing.scraped_at = datetime.utcnow()
+                # Seen on OLX again, so it's live (handles relisted cars)
+                existing_listing.is_active = True
+                existing_listing.delisted_at = None
                 logger.info(f"Updated existing listing: {listing_data['listing_id']}")
                 session.commit()
                 return False  # Not a new listing
@@ -247,13 +254,41 @@ class DatabaseManager:
         try:
             count = session.query(CarListing).filter(
                 CarListing.listing_id.in_(listing_ids)
-            ).update({CarListing.is_active: False}, synchronize_session=False)
+            ).update(
+                {CarListing.is_active: False, CarListing.delisted_at: datetime.utcnow()},
+                synchronize_session=False
+            )
             session.commit()
             logger.info(f"Marked {count} listings as inactive")
             return count
         except Exception as e:
             session.rollback()
             logger.error(f"Error marking listings inactive: {str(e)}")
+            return 0
+        finally:
+            session.close()
+
+    def mark_missing_listings_inactive(self, seen_listing_ids: List[str]) -> int:
+        """Mark active listings that were NOT seen in a complete scrape as
+        delisted (sold/removed). Only call this after a full-coverage scrape,
+        otherwise unseen listings are just beyond the pages that were crawled."""
+        if not seen_listing_ids:
+            return 0
+        session = self.get_session()
+        try:
+            count = session.query(CarListing).filter(
+                CarListing.is_active == True,
+                ~CarListing.listing_id.in_(seen_listing_ids)
+            ).update(
+                {CarListing.is_active: False, CarListing.delisted_at: datetime.utcnow()},
+                synchronize_session=False
+            )
+            session.commit()
+            logger.info(f"Marked {count} listings as delisted (not seen in latest full scrape)")
+            return count
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error marking missing listings inactive: {str(e)}")
             return 0
         finally:
             session.close()

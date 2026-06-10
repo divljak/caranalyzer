@@ -116,6 +116,8 @@ class PopularModel(BaseModel):
     avg_views: float
     avg_price: float
     avg_days_on_market: float
+    sold_count: int = 0
+    avg_days_to_sell: Optional[float] = None  # From actual delistings, not listing age
     search_url: str
 
 class ScatterPoint(BaseModel):
@@ -217,6 +219,55 @@ def load_flipper_data(timeframe_days: int, max_price: int, price_min: int = 0, y
         print(f"Error loading data: {e}")
         return []
 
+def load_sold_data(timeframe_days: int, max_price: int, price_min: int = 0, year_min: int = 2000, year_max: int = CURRENT_YEAR, transmission: str = "Any") -> Dict[str, Dict]:
+    """Aggregate listings delisted (sold/removed) within the window, per model.
+    Returns {model: {'sold_count': n, 'avg_days_to_sell': d}}"""
+    try:
+        engine, SessionLocal = create_engine_and_session()
+        session = SessionLocal()
+
+        cutoff = datetime.utcnow() - timedelta(days=timeframe_days)
+        query = session.query(CarListing).filter(
+            CarListing.is_active == False,
+            CarListing.delisted_at.isnot(None),
+            CarListing.delisted_at >= cutoff,
+            CarListing.posted_date.isnot(None),
+            CarListing.price.isnot(None),
+            CarListing.make.isnot(None),
+            CarListing.price <= max_price,
+            CarListing.price >= price_min
+        )
+        if year_min and year_max:
+            query = query.filter(
+                CarListing.year.isnot(None),
+                CarListing.year >= year_min,
+                CarListing.year <= year_max
+            )
+        if transmission and transmission != "Any":
+            transmission_map = {"Auto": "automatic", "Manual": "manual"}
+            if transmission in transmission_map:
+                query = query.filter(CarListing.transmission == transmission_map[transmission])
+
+        sold = query.all()
+        session.close()
+
+        per_model = defaultdict(list)
+        for car in sold:
+            days = (car.delisted_at.date() - car.posted_date).days
+            if days >= 0:
+                per_model[f"{car.make} {car.model}".strip()].append(days)
+
+        return {
+            model: {
+                'sold_count': len(days_list),
+                'avg_days_to_sell': round(sum(days_list) / len(days_list), 1)
+            }
+            for model, days_list in per_model.items()
+        }
+    except Exception as e:
+        print(f"Error loading sold data: {e}")
+        return {}
+
 def calculate_days_on_market(listings: List[CarListing], min_listings: int = 3) -> List[Dict]:
     """Calculate average days on market for each model"""
     model_data = defaultdict(list)
@@ -315,8 +366,9 @@ def analyze_price_ranges(listings: List[CarListing]) -> Dict[str, Dict]:
     
     return range_analysis
 
-def calculate_popular_models(listings: List[CarListing], limit: int = 10) -> List[PopularModel]:
+def calculate_popular_models(listings: List[CarListing], sold_lookup: Optional[Dict[str, Dict]] = None, limit: int = 10) -> List[PopularModel]:
     """Rank models by market popularity: listing volume first, buyer views as tiebreaker"""
+    sold_lookup = sold_lookup or {}
     groups = defaultdict(list)
     for car in listings:
         if car.make and car.model:
@@ -349,6 +401,8 @@ def calculate_popular_models(listings: List[CarListing], limit: int = 10) -> Lis
             avg_views=round(r['avg_views'], 1),
             avg_price=round(r['avg_price']),
             avg_days_on_market=round(r['avg_days_on_market'], 1),
+            sold_count=sold_lookup.get(r['model'], {}).get('sold_count', 0),
+            avg_days_to_sell=sold_lookup.get(r['model'], {}).get('avg_days_to_sell'),
             search_url=f"https://olx.ba/pretraga?category_id=18&trazilica={urllib.parse.quote(r['model'])}",
         )
         for i, r in enumerate(ranked[:limit])
@@ -640,9 +694,11 @@ async def get_dashboard_data(
             scatter_data = []
 
         try:
-            popular_models = calculate_popular_models(listings)
+            sold_lookup = load_sold_data(timeframe_days, max_price, price_min, year_min, year_max, transmission)
+            popular_models = calculate_popular_models(listings, sold_lookup)
         except Exception as e:
             print(f"Error in popular models: {e}")
+            sold_lookup = {}
             popular_models = []
         
         # Build opportunities
@@ -775,6 +831,7 @@ async def get_dashboard_data(
             "timeframe_days": timeframe_days,
             "max_price": max_price,
             "models_analyzed": len(days_analysis),
+            "total_sold": sum(s['sold_count'] for s in sold_lookup.values()),
             "last_updated": datetime.now().isoformat()
         }
         

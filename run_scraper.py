@@ -50,7 +50,7 @@ def cleanup_old_data(days: int = 30):
     except Exception as e:
         logging.error(f"Error during cleanup: {str(e)}")
 
-def run_spider():
+def run_spider(max_pages_override: int = None):
     """Run the OLX spider using direct approach"""
     try:
         logging.info("Starting OLX car scraper...")
@@ -75,38 +75,42 @@ def run_spider():
         total_listings = 0
         new_listings = 0
         errors = 0
-        
+        seen_listing_ids = []
+        full_coverage = False  # True only if we reached the end of the results
+
         # Use Selenium handler directly
         with SeleniumHandler() as handler:
             base_url = SCRAPING['base_url']
             page = 1
-            max_pages = min(5, SCRAPING['max_pages'])  # Limit to 5 pages for testing
-            
+            max_pages = max_pages_override or SCRAPING['max_pages']
+
             while page <= max_pages:
                 url = f"{base_url}&page={page}"
                 logging.info(f"Processing page {page}: {url}")
-                
+
                 if not handler.get_page(url):
                     logging.error(f"Failed to load page {page}")
                     break
-                
+
                 # Get listing cards
                 cards = handler.get_listing_cards()
                 if not cards:
                     logging.info(f"No more listings found on page {page}")
+                    full_coverage = True  # ran out of results, so we saw everything
                     break
-                
+
                 logging.info(f"Found {len(cards)} listings on page {page}")
-                
+
                 # Process each card
                 for card in cards:
                     try:
                         data = handler.extract_card_data(card)
                         if data and data.get('listing_id'):
+                            seen_listing_ids.append(data['listing_id'])
                             # Clean and validate data
                             from utils.data_validator import validator
                             cleaned_data = validator.validate_listing(data)
-                            
+
                             if cleaned_data:
                                 is_new = db_manager.add_or_update_listing(cleaned_data)
                                 if is_new:
@@ -115,12 +119,20 @@ def run_spider():
                     except Exception as e:
                         logging.error(f"Error processing listing: {str(e)}")
                         errors += 1
-                
+
                 page += 1
-                
+
                 # Add delay between pages
                 import time, random
                 time.sleep(random.uniform(*SCRAPING['delay_range']))
+
+        # Sold-tracking: anything we did NOT see in a complete crawl has been
+        # delisted (sold/removed). Skip on partial crawls to avoid false sales.
+        if full_coverage and seen_listing_ids:
+            delisted = db_manager.mark_missing_listings_inactive(seen_listing_ids)
+            logging.info(f"Sold tracking: {delisted} listings marked as delisted")
+        elif not full_coverage:
+            logging.info("Partial crawl (page limit or load failure) - skipping sold tracking")
         
         # Update log
         end_time = datetime.utcnow()
@@ -183,6 +195,8 @@ def main():
                        help='Show database statistics')
     parser.add_argument('--no-scrape', action='store_true',
                        help='Skip scraping (useful with --stats or --cleanup)')
+    parser.add_argument('--max-pages', type=int, default=None,
+                       help='Limit number of result pages to crawl (partial crawls skip sold tracking)')
     
     args = parser.parse_args()
     
@@ -207,7 +221,7 @@ def main():
     
     # Run scraper unless explicitly disabled
     if not args.no_scrape:
-        success = run_spider()
+        success = run_spider(max_pages_override=args.max_pages)
         if not success:
             logger.error("Scraping failed")
             sys.exit(1)

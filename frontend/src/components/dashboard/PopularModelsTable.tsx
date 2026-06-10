@@ -15,6 +15,7 @@ export const PopularModelsTable = ({ models }: PopularModelsTableProps) => {
         <h2 className="text-xl font-semibold">🏆 Most Popular Cars on OLX.ba</h2>
         <p className="text-sm text-muted-foreground">
           Models with the most listings and buyer interest in your selected filters — the heart of the market.
+          "Sold" counts listings that disappeared from OLX.ba, with real average time-to-sell.
         </p>
       </div>
 
@@ -37,6 +38,7 @@ export const PopularModelsTable = ({ models }: PopularModelsTableProps) => {
                   <TableHead className="w-12">#</TableHead>
                   <TableHead>Model</TableHead>
                   <TableHead className="text-right">Listings</TableHead>
+                  <TableHead className="text-right">Sold</TableHead>
                   <TableHead className="text-right">Avg Views</TableHead>
                   <TableHead className="text-right">Avg Price</TableHead>
                   <TableHead className="text-right">Avg Days Listed</TableHead>
@@ -57,6 +59,20 @@ export const PopularModelsTable = ({ models }: PopularModelsTableProps) => {
                     </TableCell>
                     <TableCell className="font-medium">{m.model}</TableCell>
                     <TableCell className="text-right font-semibold">{m.listings_count}</TableCell>
+                    <TableCell className="text-right">
+                      {m.sold_count > 0 ? (
+                        <div className="flex flex-col items-end">
+                          <span className="font-semibold text-green-600">{m.sold_count}</span>
+                          {m.avg_days_to_sell !== null && (
+                            <span className="text-xs text-muted-foreground">
+                              in ~{m.avg_days_to_sell.toFixed(0)} days
+                            </span>
+                          )}
+                        </div>
+                      ) : (
+                        <span className="text-muted-foreground">—</span>
+                      )}
+                    </TableCell>
                     <TableCell className="text-right">
                       <span className="inline-flex items-center gap-1">
                         <Eye className="h-3 w-3 text-muted-foreground" />

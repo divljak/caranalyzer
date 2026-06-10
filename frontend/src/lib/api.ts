@@ -65,6 +65,8 @@ export interface PopularModel {
   avg_views: number;
   avg_price: number;
   avg_days_on_market: number;
+  sold_count: number;
+  avg_days_to_sell: number | null;
   search_url: string;
 }
 
@@ -81,6 +83,7 @@ export interface DashboardStats {
   timeframe_days: number;
   max_price: number;
   models_analyzed: number;
+  total_sold?: number;
   last_updated: string;
 }
 
