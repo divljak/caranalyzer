@@ -1,0 +1,156 @@
+"""Stable, paginated OLX API collector for active automobile asking prices."""
+from __future__ import annotations
+
+from datetime import datetime, timezone
+import logging
+import re
+from typing import Any, Dict, List
+
+import requests
+
+from config.settings import USER_AGENTS, VALIDATION
+from scrapers.olx_live_collector import OLXLiveCollector
+
+logger = logging.getLogger(__name__)
+
+API_URL = 'https://api.olx.ba/search'
+SOURCE_QUERY = f'{API_URL}?category_id=18&sort_by=date&order=desc'
+MAX_PAGES = 5
+
+
+class CollectionIntegrityError(RuntimeError):
+    """Raised when a source page does not behave like stable pagination."""
+
+
+class OLXAPICollector:
+    """Collect bounded, distinct API results with page-level provenance."""
+
+    def __init__(self, session: requests.Session | None = None) -> None:
+        self.session = session or requests.Session()
+        self.page_stats: List[Dict[str, int]] = []
+
+    def collect(self, pages: int = 1) -> List[Dict[str, Any]]:
+        if not 1 <= pages <= MAX_PAGES:
+            raise ValueError(f'pages must be between 1 and {MAX_PAGES}')
+
+        listings: List[Dict[str, Any]] = []
+        observed_ids: set[str] = set()
+
+        for page in range(1, pages + 1):
+            payload = self._fetch_page(page)
+            raw_results = payload.get('data')
+            if not isinstance(raw_results, list):
+                raise CollectionIntegrityError(f'OLX API page {page} did not contain a data list')
+
+            raw_ids = [str(item.get('id')) for item in raw_results if item.get('id') is not None]
+            if len(raw_ids) != len(set(raw_ids)):
+                raise CollectionIntegrityError(f'OLX API page {page} contained duplicate listing IDs')
+
+            cross_page_ids = observed_ids.intersection(raw_ids)
+            if cross_page_ids:
+                raise CollectionIntegrityError(
+                    f'OLX API page {page} repeated {len(cross_page_ids)} listing IDs from an earlier page'
+                )
+
+            parsed_page = [parsed for item in raw_results if (parsed := self._parse_listing(item, page))]
+            self.page_stats.append({
+                'page': page,
+                'api_results': len(raw_results),
+                'parsed_results': len(parsed_page),
+                'distinct_ids': len(raw_ids),
+            })
+            logger.info(
+                'OLX API page %s: %s API results, %s verified listings, %s distinct IDs',
+                page,
+                len(raw_results),
+                len(parsed_page),
+                len(raw_ids),
+            )
+            listings.extend(parsed_page)
+            observed_ids.update(raw_ids)
+
+        if not listings:
+            raise CollectionIntegrityError('OLX API returned no valid priced automobile listings')
+        return listings
+
+    def _fetch_page(self, page: int) -> Dict[str, Any]:
+        response = self.session.get(
+            API_URL,
+            params={'category_id': 18, 'page': page, 'sort_by': 'date', 'order': 'desc'},
+            headers={'Accept': 'application/json', 'User-Agent': USER_AGENTS[0]},
+            timeout=30,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    @staticmethod
+    def _parse_listing(item: Dict[str, Any], page: int) -> Dict[str, Any] | None:
+        listing_id = item.get('id')
+        title = ' '.join(str(item.get('title') or '').split())
+        price = item.get('price')
+        if not listing_id or not title or not isinstance(price, (int, float)):
+            return None
+        price = int(price)
+        if not VALIDATION['min_price'] <= price <= VALIDATION['max_price']:
+            logger.warning('Skipping OLX listing %s with implausible price %s', listing_id, price)
+            return None
+
+        attributes = {
+            str(attribute.get('label', '')).lower(): attribute.get('value')
+            for attribute in item.get('special_labels', [])
+            if isinstance(attribute, dict)
+        }
+        make, model = OLXLiveCollector._parse_make_model(title)
+        year = OLXAPICollector._as_int(attributes.get('godište'))
+        if year is None:
+            year = OLXLiveCollector._extract_year([], title)
+        mileage = OLXAPICollector._as_int(attributes.get('kilometraža'))
+        fuel_type = OLXAPICollector._normalize_fuel(attributes.get('gorivo'))
+        if fuel_type is None:
+            fuel_type = OLXLiveCollector._extract_fuel([], title)
+
+        posted_date = None
+        if isinstance(item.get('date'), (int, float)):
+            posted_date = datetime.fromtimestamp(item['date'], tz=timezone.utc).date()
+
+        return {
+            'listing_id': str(listing_id),
+            'listing_url': f'https://olx.ba/artikal/{listing_id}',
+            'title': title,
+            'make': make,
+            'model': model,
+            'year': year,
+            'price': price,
+            'mileage': mileage,
+            'posted_date': posted_date,
+            'location': item.get('location'),
+            'seller_type': 'dealer' if item.get('user_type') == 'shop' else 'individual',
+            'fuel_type': fuel_type,
+            'transmission': OLXLiveCollector._extract_transmission(title),
+            'description': title,
+            'collection_method': 'olx_api',
+            'source_query': SOURCE_QUERY,
+            'source_page': page,
+        }
+
+    @staticmethod
+    def _as_int(value: Any) -> int | None:
+        if value is None:
+            return None
+        digits = re.sub(r'\D', '', str(value))
+        return int(digits) if digits else None
+
+    @staticmethod
+    def _normalize_fuel(value: Any) -> str | None:
+        if value is None:
+            return None
+        normalized = str(value).lower()
+        if normalized in {'dizel', 'diesel'}:
+            return 'diesel'
+        if normalized in {'benzin', 'petrol'}:
+            return 'petrol'
+        if normalized in {'hibrid', 'hybrid'}:
+            return 'hybrid'
+        if 'elektr' in normalized or normalized == 'electric':
+            return 'electric'
+        return None

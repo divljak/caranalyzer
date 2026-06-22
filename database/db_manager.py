@@ -87,12 +87,14 @@ class DatabaseManager:
                 existing_listing.scraped_at = observed_at
                 existing_listing.last_verified_at = observed_at
                 existing_listing.source = 'olx.ba'
+                existing_listing.collection_method = listing_data.get('collection_method', 'olx_api')
                 existing_listing.is_active = True
                 is_new = False
             else:
                 existing_listing = CarListing(
                     listing_id=listing_id,
                     source='olx.ba',
+                    collection_method=listing_data.get('collection_method', 'olx_api'),
                     first_seen_at=observed_at,
                     last_verified_at=observed_at,
                     scraped_at=observed_at,
@@ -108,6 +110,8 @@ class DatabaseManager:
                 asking_price=listing_data['price'],
                 views=listing_data.get('views'),
                 source_url=listing_data['listing_url'],
+                source_query=listing_data.get('source_query'),
+                source_page=listing_data.get('source_page'),
                 title=listing_data['title'],
                 is_active=True,
             ))
@@ -117,6 +121,28 @@ class DatabaseManager:
             session.rollback()
             logger.exception('Unable to store verified OLX listing')
             raise
+        finally:
+            session.close()
+
+    def get_latest_comparable_run_listing_ids(self, source_query: str, pages_requested: int) -> set[str]:
+        """Return IDs from the latest successful run with the same source and scope."""
+        session = self.get_session()
+        try:
+            run = session.query(ScrapingLog).filter(
+                ScrapingLog.status == 'completed',
+                ScrapingLog.source_query == source_query,
+                ScrapingLog.pages_requested == pages_requested,
+                ScrapingLog.end_time.isnot(None),
+            ).order_by(desc(ScrapingLog.start_time)).first()
+            if not run:
+                return set()
+
+            rows = session.query(ListingSnapshot.listing_id).filter(
+                ListingSnapshot.source_query == source_query,
+                ListingSnapshot.observed_at >= run.start_time,
+                ListingSnapshot.observed_at <= run.end_time,
+            ).distinct().all()
+            return {row.listing_id for row in rows}
         finally:
             session.close()
 
@@ -184,9 +210,14 @@ class DatabaseManager:
         try:
             stats = {}
             
-            # Total active listings
+            verified_inventory = (
+                CarListing.is_active == True,
+                CarListing.collection_method == 'olx_api',
+            )
+
+            # Total active listings from the stable API collector.
             stats['total_active'] = session.query(CarListing).filter(
-                CarListing.is_active == True
+                *verified_inventory
             ).count()
             
             # Listings first observed today (not their seller-provided posting date).
@@ -194,14 +225,14 @@ class DatabaseManager:
             stats['new_today'] = session.query(CarListing).filter(
                 and_(
                     func.date(CarListing.first_seen_at) == today,
-                    CarListing.is_active == True
+                    *verified_inventory
                 )
             ).count()
             
             # Average price
             avg_price = session.query(func.avg(CarListing.price)).filter(
                 and_(
-                    CarListing.is_active == True,
+                    *verified_inventory,
                     CarListing.price.isnot(None),
                     CarListing.price > 0
                 )
@@ -211,7 +242,7 @@ class DatabaseManager:
             # Most viewed listing
             most_viewed = session.query(CarListing).filter(
                 and_(
-                    CarListing.is_active == True,
+                    *verified_inventory,
                     CarListing.views > 0
                 )
             ).order_by(desc(CarListing.views)).first()
@@ -239,7 +270,8 @@ class DatabaseManager:
                 CarListing.make,
                 func.count(CarListing.listing_id).label('count')
             ).filter(
-                CarListing.is_active == True
+                CarListing.is_active == True,
+                CarListing.collection_method == 'olx_api',
             ).group_by(CarListing.make).order_by(desc('count')).limit(limit).all()
             
             return [{'make': result.make, 'count': result.count} for result in results]
@@ -255,7 +287,8 @@ class DatabaseManager:
                 CarListing.model,
                 func.count(CarListing.listing_id).label('count')
             ).filter(
-                CarListing.is_active == True
+                CarListing.is_active == True,
+                CarListing.collection_method == 'olx_api',
             ).group_by(CarListing.make, CarListing.model).order_by(desc('count')).limit(limit).all()
             
             return [{'make': result.make, 'model': result.model, 'count': result.count} for result in results]

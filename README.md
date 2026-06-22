@@ -4,7 +4,7 @@ A comprehensive car market intelligence tool that scrapes OLX.ba daily to track 
 
 ## 📋 Features
 
-- **Daily Data Collection**: Automated scraping of all passenger car listings from OLX.ba
+- **Daily Data Collection**: Bounded, date-sorted OLX API collection with snapshot history
 - **Modern React Dashboard**: Interactive web dashboard with market trends and insights
 - **Real-time Data Refresh**: Manual refresh button to pull latest listings from OLX
 - **Price Analysis**: Advanced filtering and price comparison tools
@@ -19,7 +19,7 @@ A comprehensive car market intelligence tool that scrapes OLX.ba daily to track 
 
 ## 🛠️ Technology Stack
 
-- **Scraping**: Scrapy + Selenium for JavaScript handling
+- **Collection**: OLX search API with page-level provenance and duplicate/overlap guardrails
 - **Database**: PostgreSQL with SQLAlchemy ORM
 - **Frontend**: React + TypeScript with modern UI components
 - **Backend API**: FastAPI with automatic documentation
@@ -115,7 +115,8 @@ python run_scraper.py --purge-generated --pages 1
 python run_scraper.py --pages 1
 ```
 
-The collector stores public OLX listing URLs and timestamped asking-price snapshots.
+The collector uses OLX's paginated search API, stores public OLX listing URLs and timestamped asking-price snapshots,
+and rejects duplicate pages or unexplained zero-overlap runs.
 Dashboard figures are asking-price estimates from active listings, not confirmed sale prices.
 Use a small page count (1–5) and respect OLX's terms of use.
 

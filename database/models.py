@@ -35,6 +35,7 @@ class CarListing(Base):
     description = Column(Text)
     scraped_at = Column(DateTime, default=datetime.utcnow)
     source = Column(String(30), nullable=False, default='olx.ba')
+    collection_method = Column(String(30), nullable=False, default='olx_api')
     first_seen_at = Column(DateTime, default=datetime.utcnow)
     last_verified_at = Column(DateTime, default=datetime.utcnow)
     is_active = Column(Boolean, default=True)
@@ -53,6 +54,8 @@ class ListingSnapshot(Base):
     asking_price = Column(Integer, nullable=False)
     views = Column(Integer)
     source_url = Column(String(500), nullable=False)
+    source_query = Column(String(500))
+    source_page = Column(Integer)
     title = Column(String(500), nullable=False)
     is_active = Column(Boolean, nullable=False, default=True)
 
@@ -74,6 +77,8 @@ class ScrapingLog(Base):
     errors_count = Column(Integer, default=0)
     status = Column(String(20), default='running')  # 'running', 'completed', 'failed'
     error_message = Column(Text)
+    source_query = Column(String(500))
+    pages_requested = Column(Integer)
     
     def __repr__(self):
         return f"<ScrapingLog(session_id='{self.session_id}', status='{self.status}', total_listings={self.total_listings_found})>"
@@ -105,15 +110,27 @@ def create_tables():
     engine, _ = create_engine_and_session()
     Base.metadata.create_all(bind=engine)
     with engine.begin() as connection:
-        existing_columns = {column['name'] for column in inspect(connection).get_columns('car_listings')}
         migrations = {
-            'source': "ALTER TABLE car_listings ADD COLUMN source VARCHAR(30) NOT NULL DEFAULT 'olx.ba'",
-            'first_seen_at': 'ALTER TABLE car_listings ADD COLUMN first_seen_at TIMESTAMP',
-            'last_verified_at': 'ALTER TABLE car_listings ADD COLUMN last_verified_at TIMESTAMP',
+            'car_listings': {
+                'source': "ALTER TABLE car_listings ADD COLUMN source VARCHAR(30) NOT NULL DEFAULT 'olx.ba'",
+                'collection_method': "ALTER TABLE car_listings ADD COLUMN collection_method VARCHAR(30) NOT NULL DEFAULT 'legacy_rendered'",
+                'first_seen_at': 'ALTER TABLE car_listings ADD COLUMN first_seen_at TIMESTAMP',
+                'last_verified_at': 'ALTER TABLE car_listings ADD COLUMN last_verified_at TIMESTAMP',
+            },
+            'listing_snapshots': {
+                'source_query': 'ALTER TABLE listing_snapshots ADD COLUMN source_query VARCHAR(500)',
+                'source_page': 'ALTER TABLE listing_snapshots ADD COLUMN source_page INTEGER',
+            },
+            'scraping_logs': {
+                'source_query': 'ALTER TABLE scraping_logs ADD COLUMN source_query VARCHAR(500)',
+                'pages_requested': 'ALTER TABLE scraping_logs ADD COLUMN pages_requested INTEGER',
+            },
         }
-        for column, statement in migrations.items():
-            if column not in existing_columns:
-                connection.execute(text(statement))
+        for table_name, table_migrations in migrations.items():
+            existing_columns = {column['name'] for column in inspect(connection).get_columns(table_name)}
+            for column, statement in table_migrations.items():
+                if column not in existing_columns:
+                    connection.execute(text(statement))
     print("Database tables created successfully!")
 
 if __name__ == "__main__":

@@ -168,6 +168,7 @@ def load_flipper_data(timeframe_days: int, max_price: int, price_min: int = 0, y
             CarListing.price.isnot(None),
             CarListing.make.isnot(None),
             CarListing.source == 'olx.ba',
+            CarListing.collection_method == 'olx_api',
             CarListing.last_verified_at.isnot(None),
             CarListing.last_verified_at >= cutoff_date,
             CarListing.price <= max_price,
@@ -799,14 +800,19 @@ async def get_last_update():
         
         # Get most recent scraping timestamp
         latest_listing = session.query(CarListing).filter(
-            CarListing.is_active == True
+            CarListing.is_active == True,
+            CarListing.collection_method == 'olx_api',
         ).order_by(desc(CarListing.scraped_at)).first()
         
         # Get total count and today's count
-        total_count = session.query(CarListing).filter(CarListing.is_active == True).count()
+        total_count = session.query(CarListing).filter(
+            CarListing.is_active == True,
+            CarListing.collection_method == 'olx_api',
+        ).count()
         
         today_count = session.query(CarListing).filter(
             CarListing.is_active == True,
+            CarListing.collection_method == 'olx_api',
             func.date(CarListing.scraped_at) == func.current_date()
         ).count()
         

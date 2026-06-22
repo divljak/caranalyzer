@@ -50,30 +50,59 @@ def cleanup_old_data(days: int = 30):
     except Exception as e:
         logging.error(f"Error during cleanup: {str(e)}")
 
-def run_spider(pages: int = 1):
+def run_spider(pages: int = 1, allow_zero_overlap: bool = False):
     """Collect a bounded set of live OLX listings and retain price snapshots."""
+    log_id = None
     try:
-        logging.info("Starting verified OLX asking-price collection...")
-        from scrapers.olx_live_collector import OLXLiveCollector
+        logging.info("Starting verified OLX API asking-price collection...")
+        from scrapers.olx_api_collector import OLXAPICollector, SOURCE_QUERY
         import uuid
-        from datetime import datetime
+        from datetime import datetime, timezone
         
         session_id = str(uuid.uuid4())
-        start_time = datetime.utcnow()
+        start_time = datetime.now(timezone.utc).replace(tzinfo=None)
+        previous_listing_ids = db_manager.get_latest_comparable_run_listing_ids(SOURCE_QUERY, pages)
         
         # Add scraping log
         log_id = db_manager.add_scraping_log(
             session_id=session_id,
             start_time=start_time,
-            status='running'
+            status='running',
+            source_query=SOURCE_QUERY,
+            pages_requested=pages,
         )
         
         total_listings = 0
         new_listings = 0
         errors = 0
         
-        with OLXLiveCollector() as collector:
-            listings = collector.collect(pages=pages)
+        collector = OLXAPICollector()
+        listings = collector.collect(pages=pages)
+        for page_stat in collector.page_stats:
+            logging.info('OLX API page stats: %s', page_stat)
+
+        listing_ids = {listing['listing_id'] for listing in listings}
+        overlap_count = len(listing_ids.intersection(previous_listing_ids))
+        if previous_listing_ids and overlap_count == 0 and not allow_zero_overlap:
+            message = (
+                'Collection rejected: zero overlap with the previous comparable OLX API run. '
+                'Use --allow-zero-overlap only after investigating the source.'
+            )
+            db_manager.update_scraping_log(
+                log_id,
+                end_time=datetime.now(timezone.utc).replace(tzinfo=None),
+                total_listings_found=len(listings),
+                errors_count=1,
+                status='failed',
+                error_message=message,
+            )
+            logging.error(message)
+            return False
+        logging.info(
+            'OLX API overlap with previous comparable run: %s/%s listings',
+            overlap_count,
+            len(listing_ids),
+        )
 
         for data in listings:
             try:
@@ -85,7 +114,7 @@ def run_spider(pages: int = 1):
                 errors += 1
         
         # Update log
-        end_time = datetime.utcnow()
+        end_time = datetime.now(timezone.utc).replace(tzinfo=None)
         if log_id:
             db_manager.update_scraping_log(
                 log_id=log_id,
@@ -105,6 +134,14 @@ def run_spider(pages: int = 1):
         return True
         
     except Exception as e:
+        if log_id:
+            db_manager.update_scraping_log(
+                log_id,
+                end_time=datetime.now(timezone.utc).replace(tzinfo=None),
+                errors_count=1,
+                status='failed',
+                error_message=str(e),
+            )
         logging.error(f"Error running spider: {str(e)}")
         return False
 
@@ -154,6 +191,8 @@ def main():
                        help='Number of OLX result pages to collect (1-5; default: 1)')
     parser.add_argument('--purge-generated', action='store_true',
                        help='Remove only the repository-generated demo listings before collecting live data')
+    parser.add_argument('--allow-zero-overlap', action='store_true',
+                       help='Permit a zero-overlap API run after an investigated source change')
     
     args = parser.parse_args()
     
@@ -181,7 +220,7 @@ def main():
     
     # Run scraper unless explicitly disabled
     if not args.no_scrape:
-        success = run_spider(args.pages)
+        success = run_spider(args.pages, args.allow_zero_overlap)
         if not success:
             logger.error("Scraping failed")
             sys.exit(1)
