@@ -22,7 +22,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 try:
     from database.db_manager import db_manager
-    from database.models import create_engine_and_session, CarListing
+    from database.models import create_engine_and_session, create_tables, CarListing
     from sqlalchemy import desc, func, and_
 except ImportError as e:
     print(f"Import error: {e}")
@@ -53,6 +53,12 @@ app.add_middleware(
 static_dir = Path(__file__).parent / "static"
 static_dir.mkdir(exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
+
+@app.on_event("startup")
+async def initialize_database_schema():
+    """Create/apply safe database schema before serving API traffic."""
+    create_tables()
 
 
 @app.get("/youtube")

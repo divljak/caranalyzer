@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime
 import logging
+import os
 import re
 import time
 from typing import Any, Dict, List
@@ -16,6 +17,7 @@ from urllib.parse import urljoin
 from selenium import webdriver
 from selenium.common.exceptions import WebDriverException
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 
@@ -67,7 +69,13 @@ class OLXLiveCollector:
         options.add_argument('--disable-gpu')
         options.add_argument('--window-size=1440,1200')
         options.add_argument(f'--user-agent={USER_AGENTS[0]}')
-        self.driver = webdriver.Chrome(options=options)
+        chrome_binary = os.getenv('CHROME_BIN')
+        if chrome_binary:
+            options.binary_location = chrome_binary
+
+        driver_path = os.getenv('CHROMEDRIVER_PATH')
+        service = Service(executable_path=driver_path) if driver_path else Service()
+        self.driver = webdriver.Chrome(service=service, options=options)
         self.driver.set_page_load_timeout(30)
         return self
 
