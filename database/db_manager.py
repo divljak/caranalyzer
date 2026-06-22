@@ -112,6 +112,7 @@ class DatabaseManager:
                 source_url=listing_data['listing_url'],
                 source_query=listing_data.get('source_query'),
                 source_page=listing_data.get('source_page'),
+                source_per_page=listing_data.get('source_per_page'),
                 title=listing_data['title'],
                 is_active=True,
             ))

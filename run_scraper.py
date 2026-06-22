@@ -55,21 +55,24 @@ def run_spider(pages: int = 1, allow_zero_overlap: bool = False):
     log_id = None
     try:
         logging.info("Starting verified OLX API asking-price collection...")
-        from scrapers.olx_api_collector import OLXAPICollector, SOURCE_QUERY
+        from scrapers.olx_api_collector import OLXAPICollector, build_source_query
         import uuid
         from datetime import datetime, timezone
         
         session_id = str(uuid.uuid4())
         start_time = datetime.now(timezone.utc).replace(tzinfo=None)
-        previous_listing_ids = db_manager.get_latest_comparable_run_listing_ids(SOURCE_QUERY, pages)
+        source_per_page = pages * 20
+        source_query = build_source_query(source_per_page)
+        previous_listing_ids = db_manager.get_latest_comparable_run_listing_ids(source_query, pages)
         
         # Add scraping log
         log_id = db_manager.add_scraping_log(
             session_id=session_id,
             start_time=start_time,
             status='running',
-            source_query=SOURCE_QUERY,
+            source_query=source_query,
             pages_requested=pages,
+            source_per_page=source_per_page,
         )
         
         total_listings = 0

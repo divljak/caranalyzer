@@ -56,6 +56,7 @@ class ListingSnapshot(Base):
     source_url = Column(String(500), nullable=False)
     source_query = Column(String(500))
     source_page = Column(Integer)
+    source_per_page = Column(Integer)
     title = Column(String(500), nullable=False)
     is_active = Column(Boolean, nullable=False, default=True)
 
@@ -79,6 +80,7 @@ class ScrapingLog(Base):
     error_message = Column(Text)
     source_query = Column(String(500))
     pages_requested = Column(Integer)
+    source_per_page = Column(Integer)
     
     def __repr__(self):
         return f"<ScrapingLog(session_id='{self.session_id}', status='{self.status}', total_listings={self.total_listings_found})>"
@@ -120,10 +122,12 @@ def create_tables():
             'listing_snapshots': {
                 'source_query': 'ALTER TABLE listing_snapshots ADD COLUMN source_query VARCHAR(500)',
                 'source_page': 'ALTER TABLE listing_snapshots ADD COLUMN source_page INTEGER',
+                'source_per_page': 'ALTER TABLE listing_snapshots ADD COLUMN source_per_page INTEGER',
             },
             'scraping_logs': {
                 'source_query': 'ALTER TABLE scraping_logs ADD COLUMN source_query VARCHAR(500)',
                 'pages_requested': 'ALTER TABLE scraping_logs ADD COLUMN pages_requested INTEGER',
+                'source_per_page': 'ALTER TABLE scraping_logs ADD COLUMN source_per_page INTEGER',
             },
         }
         for table_name, table_migrations in migrations.items():

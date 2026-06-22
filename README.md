@@ -115,8 +115,9 @@ python run_scraper.py --purge-generated --pages 1
 python run_scraper.py --pages 1
 ```
 
-The collector uses OLX's paginated search API, stores public OLX listing URLs and timestamped asking-price snapshots,
-and rejects duplicate pages or unexplained zero-overlap runs.
+The collector uses one bounded OLX API window (20 results per requested page, up to 100), stores public OLX listing
+URLs and timestamped asking-price snapshots, records duplicate response IDs as warnings, and rejects unexplained
+zero-overlap runs.
 Dashboard figures are asking-price estimates from active listings, not confirmed sale prices.
 Use a small page count (1–5) and respect OLX's terms of use.
 
