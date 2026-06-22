@@ -2,6 +2,7 @@
 Database models for OLX Car Scraper
 """
 from sqlalchemy import create_engine, Column, String, Integer, Date, DateTime, Boolean, Text, ForeignKey, Index, inspect, text
+from sqlalchemy.engine import URL
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime
@@ -78,9 +79,20 @@ class ScrapingLog(Base):
         return f"<ScrapingLog(session_id='{self.session_id}', status='{self.status}', total_listings={self.total_listings_found})>"
 
 def get_database_url():
-    """Get database URL from settings"""
+    """Get a safe database connection URL from production or local settings."""
+    database_url = os.getenv('DATABASE_URL')
+    if database_url:
+        return database_url
+
     db_config = DATABASE
-    return f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
+    return URL.create(
+        'postgresql+psycopg2',
+        username=db_config['user'],
+        password=db_config['password'],
+        host=db_config['host'],
+        port=int(db_config['port']),
+        database=db_config['database'],
+    )
 
 def create_engine_and_session():
     """Create database engine and session"""
