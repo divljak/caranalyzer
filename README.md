@@ -108,8 +108,16 @@ olx-car-scraper/
 
 #### 1. Manual Scraping (Test)
 ```bash
-python run_scraper.py
+# First live collection: remove only generated demo rows, then collect one OLX page.
+python run_scraper.py --purge-generated --pages 1
+
+# Later collections retain the original listings and append asking-price snapshots.
+python run_scraper.py --pages 1
 ```
+
+The collector stores public OLX listing URLs and timestamped asking-price snapshots.
+Dashboard figures are asking-price estimates from active listings, not confirmed sale prices.
+Use a small page count (1–5) and respect OLX's terms of use.
 
 #### 2. Start All Services
 ```bash

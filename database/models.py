@@ -1,7 +1,7 @@
 """
 Database models for OLX Car Scraper
 """
-from sqlalchemy import create_engine, Column, String, Integer, Date, DateTime, Boolean, Text
+from sqlalchemy import create_engine, Column, String, Integer, Date, DateTime, Boolean, Text, ForeignKey, Index, inspect, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime
@@ -33,10 +33,31 @@ class CarListing(Base):
     listing_url = Column(String(500))
     description = Column(Text)
     scraped_at = Column(DateTime, default=datetime.utcnow)
+    source = Column(String(30), nullable=False, default='olx.ba')
+    first_seen_at = Column(DateTime, default=datetime.utcnow)
+    last_verified_at = Column(DateTime, default=datetime.utcnow)
     is_active = Column(Boolean, default=True)
     
     def __repr__(self):
         return f"<CarListing(id='{self.listing_id}', make='{self.make}', model='{self.model}', year={self.year}, price={self.price})>"
+
+
+class ListingSnapshot(Base):
+    """An immutable observation of a live OLX listing at collection time."""
+    __tablename__ = 'listing_snapshots'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    listing_id = Column(String(50), ForeignKey('car_listings.listing_id', ondelete='CASCADE'), nullable=False)
+    observed_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    asking_price = Column(Integer, nullable=False)
+    views = Column(Integer)
+    source_url = Column(String(500), nullable=False)
+    title = Column(String(500), nullable=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+
+    __table_args__ = (
+        Index('ix_listing_snapshots_listing_observed', 'listing_id', 'observed_at'),
+    )
 
 class ScrapingLog(Base):
     """Model for tracking scraping sessions"""
@@ -68,9 +89,19 @@ def create_engine_and_session():
     return engine, SessionLocal
 
 def create_tables():
-    """Create all tables in the database"""
+    """Create tables and apply the small backwards-compatible schema migration."""
     engine, _ = create_engine_and_session()
     Base.metadata.create_all(bind=engine)
+    with engine.begin() as connection:
+        existing_columns = {column['name'] for column in inspect(connection).get_columns('car_listings')}
+        migrations = {
+            'source': "ALTER TABLE car_listings ADD COLUMN source VARCHAR(30) NOT NULL DEFAULT 'olx.ba'",
+            'first_seen_at': 'ALTER TABLE car_listings ADD COLUMN first_seen_at TIMESTAMP',
+            'last_verified_at': 'ALTER TABLE car_listings ADD COLUMN last_verified_at TIMESTAMP',
+        }
+        for column, statement in migrations.items():
+            if column not in existing_columns:
+                connection.execute(text(statement))
     print("Database tables created successfully!")
 
 if __name__ == "__main__":

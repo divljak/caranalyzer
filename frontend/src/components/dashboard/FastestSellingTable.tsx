@@ -62,9 +62,9 @@ export const FastestSellingTable = ({ models, filters }: FastestSellingTableProp
   return (
     <div className="space-y-4">
       <div className="space-y-2">
-        <h2 className="text-xl font-semibold">🎯 Best Opportunities to Buy & Flip</h2>
+        <h2 className="text-xl font-semibold">🎯 Observed OLX asking-price estimates</h2>
         <p className="text-sm text-muted-foreground">
-          Models selling fastest - ideal for quick turnaround and profit.
+          Active listings ranked by current listing count; prices are estimates from live OLX asking prices.
         </p>
       </div>
 
@@ -72,7 +72,7 @@ export const FastestSellingTable = ({ models, filters }: FastestSellingTableProp
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <TrendingUp className="h-5 w-5 text-success" />
-            Market Leaders
+            Most represented active models
           </CardTitle>
         </CardHeader>
         <CardContent>
@@ -148,19 +148,19 @@ export const FastestSellingTable = ({ models, filters }: FastestSellingTableProp
                     <div className="flex items-center justify-between">
                       <div className="flex flex-col space-y-1">
                         <span className="text-xs text-muted-foreground uppercase tracking-wide font-medium">
-                          Average Days
+                          Listings in sample
                         </span>
                         <div className="flex items-center gap-2">
                           <span className="text-2xl font-bold text-foreground">
-                            {model.avg_days_on_market.toFixed(0)}
+                            {model.listing_count}
                           </span>
-                          <span className="text-sm text-muted-foreground">days</span>
+                          <span className="text-sm text-muted-foreground">listings</span>
                         </div>
                       </div>
 
                       <div className="flex flex-col items-end space-y-1">
                         <span className="text-xs text-muted-foreground uppercase tracking-wide font-medium">
-                          Average Price
+                          Avg. asking price
                         </span>
                         <span className="text-lg font-bold text-primary">
                           {model.avg_price.toLocaleString()} KM
@@ -168,10 +168,10 @@ export const FastestSellingTable = ({ models, filters }: FastestSellingTableProp
                       </div>
                     </div>
 
-                    {/* Demand Level Badge */}
+                    {/* Listing-volume level */}
                     <div className="flex justify-between items-center pt-2 border-t border-border/50">
                       <span className="text-xs text-muted-foreground uppercase tracking-wide font-medium">
-                        Demand Level
+                        Listing volume
                       </span>
                       <DemandBadge level={model.demand_level} />
                     </div>

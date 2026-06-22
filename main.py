@@ -38,6 +38,8 @@ app = FastAPI(
     version="1.0.0"
 )
 
+CURRENT_YEAR = date.today().year
+
 # Enable CORS for React frontend
 app.add_middleware(
     CORSMiddleware,
@@ -79,6 +81,7 @@ class OpportunityCard(BaseModel):
     subtitle: str
     model: Optional[str]
     days: Optional[float]
+    sample_size: Optional[int] = None
     color: str  # "green", "orange", "blue"
 
 class PriceBracketModel(BaseModel):
@@ -100,6 +103,7 @@ class FastestSellingModel(BaseModel):
     avg_days_on_market: float
     avg_price: float
     demand_level: str
+    listing_count: int
 
 class TrendingModel(BaseModel):
     model: str
@@ -161,8 +165,8 @@ class LastUpdateResponse(BaseModel):
     new_today: int
 
 # Helper functions
-def load_flipper_data(timeframe_days: int, max_price: int, price_min: int = 0, year_min: int = 2000, year_max: int = 2024, transmission: str = "Any") -> List[CarListing]:
-    """Load car data with filters"""
+def load_flipper_data(timeframe_days: int, max_price: int, price_min: int = 0, year_min: int = 2000, year_max: int = CURRENT_YEAR, transmission: str = "Any") -> List[CarListing]:
+    """Load verified OLX asking-price observations with filters."""
     try:
         engine, SessionLocal = create_engine_and_session()
         session = SessionLocal()
@@ -173,8 +177,9 @@ def load_flipper_data(timeframe_days: int, max_price: int, price_min: int = 0, y
             CarListing.is_active == True,
             CarListing.price.isnot(None),
             CarListing.make.isnot(None),
-            CarListing.posted_date.isnot(None),
-            CarListing.posted_date >= cutoff_date,
+            CarListing.source == 'olx.ba',
+            CarListing.last_verified_at.isnot(None),
+            CarListing.last_verified_at >= cutoff_date,
             CarListing.price <= max_price,
             CarListing.price >= price_min
         )
@@ -203,12 +208,12 @@ def load_flipper_data(timeframe_days: int, max_price: int, price_min: int = 0, y
         return []
 
 def calculate_days_on_market(listings: List[CarListing], min_listings: int = 3) -> List[Dict]:
-    """Calculate average days on market for each model"""
+    """Calculate model-level asking-price and observation metrics."""
     model_data = defaultdict(list)
     
     for car in listings:
-        if car.posted_date:
-            days_on_market = (date.today() - car.posted_date).days
+        if car.first_seen_at:
+            days_on_market = (date.today() - car.first_seen_at.date()).days
             key = f"{car.make} {car.model}".strip()
             model_data[key].append({
                 'days': days_on_market,
@@ -239,9 +244,10 @@ def calculate_days_on_market(listings: List[CarListing], min_listings: int = 3) 
                 'avg_price': avg_price,
                 'avg_year': avg_year,
                 'avg_views': avg_views
+                ,'listing_count': len(data)
             })
     
-    return sorted(model_stats, key=lambda x: x['avg_days_on_market'])
+    return sorted(model_stats, key=lambda x: (x['listing_count'], x['avg_price']), reverse=True)
 
 def analyze_price_ranges(listings: List[CarListing]) -> Dict[str, Dict]:
     """Analyze cars by price ranges"""
@@ -264,15 +270,13 @@ def analyze_price_ranges(listings: List[CarListing]) -> Dict[str, Dict]:
             model_data = defaultdict(list)
             
             for car in range_cars:
-                if car.posted_date and car.make and car.model:
-                    days = (date.today() - car.posted_date).days
+                if car.first_seen_at and car.make and car.model:
+                    days = (date.today() - car.first_seen_at.date()).days
                     model_key = f"{car.make} {car.model}".strip()
                     # Always create search URL for this car model on OLX.ba (more reliable than individual listings)
-                    search_query = urllib.parse.quote(f"{car.make} {car.model}")
-                    url = f"https://www.olx.ba/pretraga?trazilica={search_query}"
                     model_data[model_key].append({
                         'days': days,
-                        'url': url,
+                        'url': car.listing_url,
                         'price': car.price,
                         'car': car
                     })
@@ -285,7 +289,7 @@ def analyze_price_ranges(listings: List[CarListing]) -> Dict[str, Dict]:
                     sample_car = min(car_list, key=lambda x: abs(x['days'] - avg_days))
                     model_averages.append((model, avg_days, sample_car['url'], sample_car['price']))
             
-            model_averages.sort(key=lambda x: x[1])
+            model_averages.sort(key=lambda x: x[3])
             range_analysis[range_name] = {
                 'models': model_averages[:5],  # Show top 5 instead of 3
                 'total_cars': len(range_cars),
@@ -305,8 +309,8 @@ def create_scatter_data(listings: List[CarListing]) -> List[Dict]:
     scatter_data = []
     
     for car in listings[:100]:  # Limit for performance
-        if car.price and car.posted_date and car.mileage:
-            days_on_market = (date.today() - car.posted_date).days
+        if car.price and car.first_seen_at and car.mileage:
+            days_on_market = (date.today() - car.first_seen_at.date()).days
             
             if car.mileage < 50000:
                 mileage_bracket = "<50k km"
@@ -532,8 +536,8 @@ async def get_dashboard_data(
     max_price: int = Query(25000, ge=1000, le=200000, description="Maximum price filter"),
     price_min: int = Query(0, ge=0, le=100000, description="Minimum price filter"),
     min_listings: int = Query(5, ge=2, le=20, description="Minimum listings per model"),
-    year_min: int = Query(2000, ge=1990, le=2024, description="Minimum year filter"),
-    year_max: int = Query(2024, ge=1990, le=2024, description="Maximum year filter"),
+    year_min: int = Query(2000, ge=1990, le=CURRENT_YEAR, description="Minimum year filter"),
+    year_max: int = Query(CURRENT_YEAR, ge=1990, le=CURRENT_YEAR, description="Maximum year filter"),
     transmission: str = Query("Any", description="Transmission type: Any, Auto, Manual")
 ):
     """Get complete dashboard data"""
@@ -587,46 +591,33 @@ async def get_dashboard_data(
         # Build opportunities
         opportunities = []
         
-        # Hot Flip
+        # Most visible model in the observed inventory. This is not a sale signal.
         if days_analysis:
             hot_flip = days_analysis[0]
-            days_faster = max(0, 30 - hot_flip['avg_days_on_market'])
             opportunities.append(OpportunityCard(
                 type="hot_flip",
-                title=f"Hot Flip: {hot_flip['model']}",
-                subtitle=f"High demand this period. Sells {days_faster:.0f} days faster than average.",
+                title=f"Most visible: {hot_flip['model']}",
+                subtitle=f"{hot_flip['listing_count']} active OLX listings match the current filters.",
                 model=hot_flip['model'],
                 days=hot_flip['avg_days_on_market'],
+                sample_size=hot_flip['listing_count'],
                 color="green"
             ))
         
-        # Overpriced
-        slow_models = [m for m in days_analysis if m['avg_days_on_market'] > 35]
-        if slow_models:
-            overpriced = slow_models[0]
-            opportunities.append(OpportunityCard(
-                type="overpriced",
-                title=f"Overpriced: {overpriced['model']}",
-                subtitle=f"Avg. {overpriced['avg_days_on_market']:.0f} days on market. Advise cautious pricing.",
-                model=overpriced['model'],
-                days=overpriced['avg_days_on_market'],
-                color="orange"
-            ))
-        else:
-            opportunities.append(OpportunityCard(
-                type="overpriced",
-                title="Market Analysis",
-                subtitle="No major overpricing detected in current filters.",
-                model=None,
-                days=None,
-                color="orange"
-            ))
+        opportunities.append(OpportunityCard(
+            type="overpriced",
+            title="Asking-price estimates",
+            subtitle="Listings are verified from OLX; prices are asking prices, not completed-sale prices.",
+            model=None,
+            days=None,
+            color="orange"
+        ))
         
         # Rising Demand (simplified)
         opportunities.append(OpportunityCard(
             type="rising_demand",
-            title="Rising Demand: Monitoring",
-            subtitle="Analyzing trends for emerging opportunities.",
+            title="Historical tracking enabled",
+            subtitle="Each collection keeps a timestamped price snapshot for future comparisons.",
             model=None,
             days=None,
             color="blue"
@@ -652,13 +643,13 @@ async def get_dashboard_data(
                 total_models=bracket_data['total_models']
             ))
         
-        # Build fastest selling models
+        # Build model summaries ranked by observed OLX visibility, not selling speed.
         fastest_selling = []
         for model_data in days_analysis[:10]:
             days = model_data['avg_days_on_market']
-            if days <= 15:
+            if model_data['listing_count'] >= 5:
                 demand_level = "High"
-            elif days <= 30:
+            elif model_data['listing_count'] >= 3:
                 demand_level = "Medium"
             else:
                 demand_level = "Low"
@@ -668,7 +659,8 @@ async def get_dashboard_data(
                 year=model_data['avg_year'],
                 avg_days_on_market=days,
                 avg_price=model_data['avg_price'],
-                demand_level=demand_level
+                demand_level=demand_level,
+                listing_count=model_data['listing_count']
             ))
         
         # Build trending models from real data
@@ -685,12 +677,11 @@ async def get_dashboard_data(
                 trend_type="views_up"
             ))
         
-        # Get models selling quickly (under 10 days)
-        fast_selling = [m for m in days_analysis if m['avg_days_on_market'] < 10][:1]
-        for model_data in fast_selling:
+        recently_observed = [m for m in days_analysis if m['avg_days_on_market'] < 10][:1]
+        for model_data in recently_observed:
             trending_models.append(TrendingModel(
                 model=model_data['model'],
-                trend_text=f"Fast seller: {model_data['avg_days_on_market']:.1f} days avg",
+                trend_text=f"Tracked for {model_data['avg_days_on_market']:.1f} days on average",
                 trend_type="days_down"
             ))
         
@@ -701,7 +692,7 @@ async def get_dashboard_data(
                 model_data = days_analysis[idx]
                 trending_models.append(TrendingModel(
                     model=model_data['model'],
-                    trend_text=f"Market performer: {model_data['avg_days_on_market']:.1f} days avg",
+                    trend_text=f"Asking-price estimate from active OLX listings",
                     trend_type="general"
                 ))
         
@@ -841,8 +832,8 @@ async def get_last_update():
 async def run_scraper_background(project_root: Path):
     """Run scraper in background with timeout"""
     try:
-        # Create command to run scraper with timeout  
-        cmd = f"cd '{project_root}' && python run_scraper.py"
+        # Use the project environment and the collector's intentionally bounded default.
+        cmd = f"cd '{project_root}' && venv/bin/python run_scraper.py"
         
         # Run in background
         process = await asyncio.create_subprocess_shell(

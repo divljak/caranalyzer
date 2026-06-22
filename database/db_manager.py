@@ -13,7 +13,7 @@ import logging
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from database.models import CarListing, ScrapingLog, create_engine_and_session
+from database.models import CarListing, ListingSnapshot, ScrapingLog, create_engine_and_session
 from config.settings import VALIDATION
 
 # Set up logging
@@ -59,6 +59,82 @@ class DatabaseManager:
             session.rollback()
             logger.error(f"Error adding/updating listing {listing_data.get('listing_id', 'unknown')}: {str(e)}")
             return False
+        finally:
+            session.close()
+
+    def upsert_verified_listing(self, listing_data: Dict[str, Any], observed_at: Optional[datetime] = None) -> bool:
+        """Store a verified live OLX listing and append an immutable price snapshot.
+
+        Returns True only when the listing has not been seen before. Every successful
+        collection records a snapshot, including when the asking price did not change.
+        """
+        observed_at = observed_at or datetime.utcnow()
+        session = self.get_session()
+        try:
+            listing_id = str(listing_data['listing_id'])
+            existing_listing = session.query(CarListing).filter(CarListing.listing_id == listing_id).first()
+            fields = {
+                key: value for key, value in listing_data.items()
+                if key in {
+                    'make', 'model', 'year', 'price', 'mileage', 'views', 'posted_date',
+                    'location', 'seller_type', 'fuel_type', 'transmission', 'listing_url', 'description'
+                } and value is not None
+            }
+
+            if existing_listing:
+                for key, value in fields.items():
+                    setattr(existing_listing, key, value)
+                existing_listing.scraped_at = observed_at
+                existing_listing.last_verified_at = observed_at
+                existing_listing.source = 'olx.ba'
+                existing_listing.is_active = True
+                is_new = False
+            else:
+                existing_listing = CarListing(
+                    listing_id=listing_id,
+                    source='olx.ba',
+                    first_seen_at=observed_at,
+                    last_verified_at=observed_at,
+                    scraped_at=observed_at,
+                    is_active=True,
+                    **fields,
+                )
+                session.add(existing_listing)
+                is_new = True
+
+            session.add(ListingSnapshot(
+                listing_id=listing_id,
+                observed_at=observed_at,
+                asking_price=listing_data['price'],
+                views=listing_data.get('views'),
+                source_url=listing_data['listing_url'],
+                title=listing_data['title'],
+                is_active=True,
+            ))
+            session.commit()
+            return is_new
+        except Exception:
+            session.rollback()
+            logger.exception('Unable to store verified OLX listing')
+            raise
+        finally:
+            session.close()
+
+    def purge_generated_data(self) -> int:
+        """Remove only records created by the repository's demo-data generators."""
+        session = self.get_session()
+        try:
+            generated_prefixes = ('sample_%', 'today_%', 'hot_%', 'real_%', 'recent_%')
+            deleted = session.query(CarListing).filter(
+                or_(*(CarListing.listing_id.like(prefix) for prefix in generated_prefixes))
+            ).delete(synchronize_session=False)
+            session.commit()
+            logger.info('Removed %s generated listings', deleted)
+            return deleted
+        except Exception:
+            session.rollback()
+            logger.exception('Unable to remove generated listings')
+            raise
         finally:
             session.close()
     
@@ -113,11 +189,11 @@ class DatabaseManager:
                 CarListing.is_active == True
             ).count()
             
-            # New listings today
+            # Listings first observed today (not their seller-provided posting date).
             today = date.today()
             stats['new_today'] = session.query(CarListing).filter(
                 and_(
-                    CarListing.posted_date == today,
+                    func.date(CarListing.first_seen_at) == today,
                     CarListing.is_active == True
                 )
             ).count()

@@ -17,7 +17,7 @@ const Dashboard = () => {
     max_price: 25000,
     price_min: 0,
     year_min: 2000,
-    year_max: 2024,
+    year_max: 2026,
     transmission: 'Any',
     min_listings: 5
   });
@@ -65,6 +65,10 @@ const Dashboard = () => {
   return (
     <div className="min-h-screen bg-background">
       <div className="container mx-auto px-6 py-6">
+        <div className="mb-6 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-950">
+          <span className="font-semibold">Verified OLX asking-price estimates.</span>{" "}
+          Prices are active-listing asking prices, not confirmed sale prices. Every refresh preserves a timestamped snapshot.
+        </div>
         {/* Essential Filters - Compact Row */}
         <Card className="mb-6">
           <CardHeader className="pb-4">
@@ -98,7 +102,7 @@ const Dashboard = () => {
               <div>
                 <Label htmlFor="timeframe">Analysis Period</Label>
                 <div className="flex gap-2">
-                  {[30, 60, 90].map((days) => (
+                  {[7, 30, 60].map((days) => (
                     <Button
                       key={days}
                       variant={filters.timeframe_days === days ? "default" : "outline"}
@@ -114,7 +118,7 @@ const Dashboard = () => {
               <div>
                 <Label htmlFor="yearRange">Year Range</Label>
                 <Select 
-                  value={`${filters.year_min || 2000}-${filters.year_max || 2024}`}
+                  value={`${filters.year_min || 2000}-${filters.year_max || 2026}`}
                   onValueChange={(value) => {
                     const [min, max] = value.split('-').map(Number);
                     setFilters({...filters, year_min: min, year_max: max});
@@ -124,11 +128,11 @@ const Dashboard = () => {
                     <SelectValue placeholder="Select year range" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="2020-2024">2020 - 2024 (Newest)</SelectItem>
-                    <SelectItem value="2015-2024">2015 - 2024 (Modern)</SelectItem>
-                    <SelectItem value="2010-2024">2010 - 2024 (Recent)</SelectItem>
-                    <SelectItem value="2005-2024">2005 - 2024 (Reliable)</SelectItem>
-                    <SelectItem value="2000-2024">2000 - 2024 (All)</SelectItem>
+                    <SelectItem value="2020-2026">2020 - 2026 (Newest)</SelectItem>
+                    <SelectItem value="2015-2026">2015 - 2026 (Modern)</SelectItem>
+                    <SelectItem value="2010-2026">2010 - 2026 (Recent)</SelectItem>
+                    <SelectItem value="2005-2026">2005 - 2026 (Reliable)</SelectItem>
+                    <SelectItem value="2000-2026">2000 - 2026 (All)</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -178,22 +182,22 @@ const Dashboard = () => {
             </CardContent>
           </Card>
 
-          {/* Hot Flip Opportunity */}
+          {/* Most visible observed model */}
           {dashboardData?.opportunities?.find(o => o.type === "hot_flip") ? (
             <Card className="bg-gradient-to-r from-green-50 to-emerald-50 border-green-200">
               <CardContent className="p-6">
                 <div className="flex items-center justify-between">
                   <div>
-                    <p className="text-sm text-green-600 font-medium">🔥 Hot Flip</p>
+                    <p className="text-sm text-green-600 font-medium">📊 Most represented</p>
                     <p className="text-lg font-bold text-green-800">
                       {dashboardData.opportunities.find(o => o.type === "hot_flip")?.model || "No opportunity"}
                     </p>
                   </div>
                   <div className="text-right">
                     <p className="text-2xl font-bold text-green-800">
-                      {dashboardData.opportunities.find(o => o.type === "hot_flip")?.days?.toFixed(0) || "0"} days
+                      {dashboardData.opportunities.find(o => o.type === "hot_flip")?.sample_size || "0"}
                     </p>
-                    <p className="text-xs text-green-600">avg selling time</p>
+                    <p className="text-xs text-green-600">active listings</p>
                   </div>
                 </div>
               </CardContent>
@@ -203,12 +207,12 @@ const Dashboard = () => {
               <CardContent className="p-6">
                 <div className="flex items-center justify-between">
                   <div>
-                    <p className="text-sm text-muted-foreground">🔥 Hot Flip</p>
-                    <p className="text-lg font-bold text-muted-foreground">No opportunity</p>
+                    <p className="text-sm text-muted-foreground">📊 Most represented</p>
+                    <p className="text-lg font-bold text-muted-foreground">No listing data</p>
                   </div>
                   <div className="text-right">
                     <p className="text-2xl font-bold text-muted-foreground">0 days</p>
-                    <p className="text-xs text-muted-foreground">avg selling time</p>
+                    <p className="text-xs text-muted-foreground">active listings</p>
                   </div>
                 </div>
               </CardContent>
@@ -216,7 +220,7 @@ const Dashboard = () => {
           )}
         </div>
 
-        {/* Fastest Selling Models - Limited to Top 6 */}
+        {/* Observed OLX asking-price summaries */}
         {dashboardData?.fastest_selling && (
           <FastestSellingTable 
             models={dashboardData.fastest_selling.slice(0, 6)} 
@@ -261,7 +265,7 @@ const Dashboard = () => {
                     <div className="flex items-center gap-2">
                       <Clock className="w-4 h-4" />
                       <span>
-                        Last updated: {lastUpdate.last_update 
+                        Last verified from OLX: {lastUpdate.last_update
                           ? new Date(lastUpdate.last_update).toLocaleString() 
                           : 'Never'}
                       </span>

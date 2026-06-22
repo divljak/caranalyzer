@@ -50,15 +50,11 @@ def cleanup_old_data(days: int = 30):
     except Exception as e:
         logging.error(f"Error during cleanup: {str(e)}")
 
-def run_spider():
-    """Run the OLX spider using direct approach"""
+def run_spider(pages: int = 1):
+    """Collect a bounded set of live OLX listings and retain price snapshots."""
     try:
-        logging.info("Starting OLX car scraper...")
-        
-        # Import and use the selenium handler directly for now
-        from scrapers.selenium_handler import SeleniumHandler
-        from database.db_manager import db_manager
-        from config.settings import SCRAPING
+        logging.info("Starting verified OLX asking-price collection...")
+        from scrapers.olx_live_collector import OLXLiveCollector
         import uuid
         from datetime import datetime
         
@@ -76,51 +72,17 @@ def run_spider():
         new_listings = 0
         errors = 0
         
-        # Use Selenium handler directly
-        with SeleniumHandler() as handler:
-            base_url = SCRAPING['base_url']
-            page = 1
-            max_pages = min(5, SCRAPING['max_pages'])  # Limit to 5 pages for testing
-            
-            while page <= max_pages:
-                url = f"{base_url}&page={page}"
-                logging.info(f"Processing page {page}: {url}")
-                
-                if not handler.get_page(url):
-                    logging.error(f"Failed to load page {page}")
-                    break
-                
-                # Get listing cards
-                cards = handler.get_listing_cards()
-                if not cards:
-                    logging.info(f"No more listings found on page {page}")
-                    break
-                
-                logging.info(f"Found {len(cards)} listings on page {page}")
-                
-                # Process each card
-                for card in cards:
-                    try:
-                        data = handler.extract_card_data(card)
-                        if data and data.get('listing_id'):
-                            # Clean and validate data
-                            from utils.data_validator import validator
-                            cleaned_data = validator.validate_listing(data)
-                            
-                            if cleaned_data:
-                                is_new = db_manager.add_or_update_listing(cleaned_data)
-                                if is_new:
-                                    new_listings += 1
-                                total_listings += 1
-                    except Exception as e:
-                        logging.error(f"Error processing listing: {str(e)}")
-                        errors += 1
-                
-                page += 1
-                
-                # Add delay between pages
-                import time, random
-                time.sleep(random.uniform(*SCRAPING['delay_range']))
+        with OLXLiveCollector() as collector:
+            listings = collector.collect(pages=pages)
+
+        for data in listings:
+            try:
+                if db_manager.upsert_verified_listing(data, observed_at=start_time):
+                    new_listings += 1
+                total_listings += 1
+            except Exception as exc:
+                logging.error('Could not persist listing %s: %s', data.get('listing_id'), exc)
+                errors += 1
         
         # Update log
         end_time = datetime.utcnow()
@@ -134,7 +96,12 @@ def run_spider():
                 status='completed'
             )
         
-        logging.info(f"Scraping completed: {total_listings} total, {new_listings} new, {errors} errors")
+        logging.info(
+            'Verified collection completed: %s listings observed, %s new, %s errors',
+            total_listings,
+            new_listings,
+            errors,
+        )
         return True
         
     except Exception as e:
@@ -183,6 +150,10 @@ def main():
                        help='Show database statistics')
     parser.add_argument('--no-scrape', action='store_true',
                        help='Skip scraping (useful with --stats or --cleanup)')
+    parser.add_argument('--pages', type=int, default=1, choices=range(1, 6),
+                       help='Number of OLX result pages to collect (1-5; default: 1)')
+    parser.add_argument('--purge-generated', action='store_true',
+                       help='Remove only the repository-generated demo listings before collecting live data')
     
     args = parser.parse_args()
     
@@ -192,11 +163,10 @@ def main():
     
     logger.info("Starting OLX Car Scraper application")
     
-    # Setup database if requested or if it's the first run
-    if args.setup_db or not os.path.exists('olx_scraper.log'):
-        if not setup_database():
-            logger.error("Database setup failed, exiting")
-            sys.exit(1)
+    # Ensure the listing and snapshot tables are available before every collection.
+    if not setup_database():
+        logger.error("Database setup failed, exiting")
+        sys.exit(1)
     
     # Clean up old data
     cleanup_old_data(args.cleanup)
@@ -204,10 +174,14 @@ def main():
     # Show statistics if requested
     if args.stats:
         get_stats()
+
+    if args.purge_generated:
+        removed = db_manager.purge_generated_data()
+        logger.info('Removed %s generated listings', removed)
     
     # Run scraper unless explicitly disabled
     if not args.no_scrape:
-        success = run_spider()
+        success = run_spider(args.pages)
         if not success:
             logger.error("Scraping failed")
             sys.exit(1)
