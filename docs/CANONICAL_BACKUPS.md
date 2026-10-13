@@ -178,3 +178,59 @@ JSON snapshots, not to local collection or synchronization.
 Current guidance: [Supabase backup/restore](https://supabase.com/docs/guides/platform/migrating-within-supabase/backup-restore),
 [read-only export and RLS](https://supabase.com/docs/guides/troubleshooting/pg_dump-fails-with-query-would-be-affected-by-row-level-security-policy-1d5783),
 [PostgreSQL snapshot/RLS export](https://www.postgresql.org/docs/17/app-pgdump.html).
+
+## Measured completion — 13 October 2026
+
+Installed runtime source: **`e61e59d`**, focused branch
+`codex/canonical-backup-recovery`, draft [PR #8](https://github.com/divljak/caranalyzer/pull/8)
+stacked on PR #4. The five installed runtime/override files match their source
+SHA256 values, recorded in `canonical-backups/installation.json` on the VPS.
+This extension does not select or overwrite `direct-current`; later browser/
+coverage releases can use the existing collector wrapper independently.
+
+The final tested post-attempt bundle is
+`canonical-20261013T190410286398-after`, exported at **19:04:10 UTC** and
+successfully restored on VPS at **19:04:50 UTC**. It covers **30,611 rows**:
+6,612 listings, 16,514 observations, 151 direct checks, 131 scraping logs,
+15 collection runs, 672 tracked states, one budget, 6,406 labels, 108 listing
+details, one source pause and zero current Following/candidate records. It
+includes the final read-only role's three-connection setting. The same bundle
+was copied privately to the Mac and passed the identical restoration checks.
+All data/schema/access/sequence checks matched and scratch containers were removed.
+Five focused safety/tampering tests passed, including preservation of nonempty
+private filter/baseline content checksums and rejection of altered baselines.
+Shell/Python checks and installed pre/post wrappers passed. No OLX request or
+live evidence restore occurred.
+
+Installed full hooks were exercised directly without starting the collector;
+**14 October, 07:17 UTC** remains their first complete scheduled collector cycle.
+The actual collector's prior `partial` / exit-1 status was retained. Existing
+cutover JSON snapshots and `.collector-health/current.json` remain intact; the
+health checker currently verifies those JSON snapshots, while full schema/data
+restore evidence is in the separate markers documented above. Main can consume
+both contracts without changing health thresholds.
+
+Disk reserve improved from approximately **1.37 GiB to 2.77 GiB**. Exact unused
+image `sha256:73055a5ec834f5cf6be8b4aff6b22a0abfba2b4cc8f6500b6ef710ff8786fc03`
+(July `car-analyzer-app:latest`, not the running app's image or the collector's
+image) was streamed to a private Mac archive, with every OCI blob and all nine
+layer content hashes verified before its VPS image reference was removed without
+force. Its compressed archive is 366,973,196 bytes, SHA256
+`44d842cc6f9add00fdfa5fa1c8674183a04b56931256eb64fb2d03a463851ce5`, at
+`.private/canonical-backups/rollbacks/car-analyzer-unused-app-73055a5ec834.tar.gz`
+in this worktree. Recover it with `gzip -dc ARCHIVE | docker image load` and
+explicitly restore the original tag if needed. Keep this worktree's ignored
+private files when archiving/moving the worktree.
+
+Package/pip download caches were cleared; no installed package, running container,
+local database, rollback backup or active collector image was removed. Existing
+OS package dependency inconsistencies were left untouched; the Python runtime
+uses a private venv bootstrapped by the existing pip. The legacy running app's
+old `c0b81fe...` image was already absent from Docker's image registry before this
+work; its running container/layers were preserved. Do not confuse the archived
+unused July image with a verified current legacy-app disaster recovery image.
+
+The unchanged health checker reported `disk_pressure` **recovered** at
+**19:02:40.514311 UTC**, available bytes **2,973,618,176**. Its stale-clean,
+partial-collection and detail-failure warnings remain honest and unchanged.
+No broad Docker prune, backup deletion, storage account or paid upgrade was used.
