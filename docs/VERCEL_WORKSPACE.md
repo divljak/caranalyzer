@@ -60,5 +60,48 @@ aggregates, and verify Follow → reload → Following → Unfollow against Supa
 Remove only the verification searches created by that flow. Unauthenticated HTML,
 API and asset requests must encounter Vercel Authentication.
 
-The deployment report and browser/API verification evidence are appended after
-the hosted checks finish.
+## Deployment verification — 13 October 2026
+
+The [private workspace](https://car-analyzer-git-dealer-eviden-1dda87-ogilud-gmailcoms-projects.vercel.app/market)
+is available on the branch preview alias. Vercel deploys the committed branch
+`dealer-evidence-prototype`; the implementation commit is `fa6a3d0` in PR #2.
+The initial verified deployment is `dpl_4PEMtReo8Kw6YNpeUhsDtfLKmBuc`, READY,
+API target `staging` (Vercel's preview environment), with the FastAPI function in
+Stockholm (`arn1`). The first automatic Git build selected production and was
+canceled before release. A project ignored-build rule now skips production builds;
+explicit preview builds proceed. The production environment has no database secret.
+
+Verified against the deployed browser, same-origin API and Supabase:
+
+- Market displayed actual filtered distributions, including Peugeot 3008's
+  14 priced ads/34,700 KM median and Tiguan's 7 priced ads/45,900 KM median in
+  the default 2020–23 SUV/diesel/automatic/50k–150k km scope.
+- Model analysis rendered per-year and monthly evidence, comparable ad rows,
+  real OLX links and recorded individual asking-price histories. Browser testing
+  found and fixed the missing SELECT permission for the candidate-status join.
+- Compare rendered both models with the same filters and no ceiling; the API
+  preserved `confirmed_sales: null` and the insufficient-evidence resale verdict.
+- Follow, full page reload, Following and Unfollow worked. Direct Supabase SQL
+  confirmed the exact saved filters, 7-ad/45,900 KM baseline and original collection
+  timestamp. The verification searches were removed; the table returned to zero rows.
+- Live loading and empty states were observed. An invalid live API request showed
+  the error and Retry control without substituting fixture prices. A simulated
+  unavailable database returned a generic uncached 503 in the hosted runtime test.
+- Anonymous HTML, API and branch-alias requests returned Vercel sign-in redirects.
+  Authenticated cross-origin POST returned 403. Unexpected hosts, source jobs and
+  production were rejected in hosted runtime checks. Database tests confirmed the
+  role cannot change collector evidence, saved baselines or schema. `anon` and
+  `authenticated` table access remains denied.
+- Build, active TypeScript/ESLint checks, 16 dealer API integration tests, 6 frontend
+  evidence tests, 3 parser tests and 3 new hosted-runtime tests passed. Browser assets
+  were checked for database credentials. Verification captures and request evidence
+  are retained in `.private/vercel-runtime/`, excluded from Git and deployment.
+
+The original frontend lockfile still reports dependency audit advisories (23 in
+the production dependency graph, including 19 high). No broad dependency upgrade
+was included in this database/deployment change. Runtime Python dependencies are
+pinned separately and the frontend build continues to use its existing lockfile.
+
+Reference configuration follows [Vercel's FastAPI runtime](https://vercel.com/docs/frameworks/backend/fastapi),
+[Vercel Authentication](https://vercel.com/docs/deployment-protection/methods-to-protect-deployments/vercel-authentication)
+and [Supabase's SQLAlchemy pooler guidance](https://supabase.com/docs/guides/troubleshooting/using-sqlalchemy-with-supabase-FUqebT).

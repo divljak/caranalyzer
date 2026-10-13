@@ -13,7 +13,8 @@ BEGIN
   FOREACH table_name IN ARRAY ARRAY[
     'car_listings','listing_snapshots','scraping_logs','website_collection_runs',
     'website_listing_checks','website_listing_states','website_collection_budget',
-    'dealer_listing_details','dealer_vehicle_labels','dealer_source_pauses','dealer_model_searches'
+    'dealer_listing_details','dealer_vehicle_labels','dealer_source_pauses','dealer_model_searches',
+    'dealer_candidates'
   ] LOOP
     EXECUTE format('GRANT SELECT ON TABLE public.%I TO car_analyzer_app', table_name);
     EXECUTE format('CREATE POLICY private_app_read ON public.%I FOR SELECT TO car_analyzer_app USING (true)', table_name);

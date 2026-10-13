@@ -613,6 +613,12 @@ frontend = Path(__file__).parent / 'frontend' / 'dist'
 if (frontend / 'assets').exists():
     app.mount('/assets', StaticFiles(directory=frontend / 'assets'), name='assets')
 
+@app.get('/favicon.ico')
+def favicon():
+    if not (frontend / 'favicon.ico').exists():
+        raise HTTPException(404, 'Icon unavailable')
+    return FileResponse(frontend / 'favicon.ico')
+
 @app.get('/')
 @app.get('/market')
 @app.get('/compare')
