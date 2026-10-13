@@ -170,3 +170,55 @@ hosted overview and repeat the read-only report. Report measured successful chec
 and backlog changes separately from planned allocation. Partial/failed runs do not
 advance the clean anchor. Keep the prior direct release for rollback; do not enable
 legacy local collection/sync. Installation evidence is appended below.
+
+## Installed handoff — 13 October, 19:00:58 UTC / 21:00 Sarajevo
+
+Installed runtime source is **`b6e94ff`**; active immutable release is
+`/opt/car-analyzer/.daily-delivery/releases/priority-b6e94ff`.
+Draft [PR #7](https://github.com/divljak/caranalyzer/pull/7) is stacked on browser
+repair PR #6. The original shared checkout was not branched, reset or broad-staged.
+The attached coverage worktree contains the focused implementation and tests.
+
+Installation held the existing pipeline lock and rejected an active service or
+collector. It verified all 18 files in the browser-reliability manifest, copied
+the complete `details-1327757` release and changed only the direct entry point
+(two lines) while adding the priority module and report/SQL files. The repaired
+browser SHA256 remains `20cf2d8ed26aa740c0e7e1057e5df052cb84de3650cba9be25bb331581c175eb`.
+All other prior runtime file hashes were preserved. The new four-file runtime
+hashes match source commit `b6e94ff`; `.daily-delivery/coverage-priority-installation.json`
+records both the prior and full combined release manifests.
+
+The existing installed direct runner's **no-source `--verify-only` check passed**
+from 19:00:12 to 19:00:55 UTC, using the existing collector and backup roles.
+All twelve before/after full-table checksums matched. It inserted no listing
+evidence and made no source visits. The real `latest-direct-attempt.json` marker
+remained byte-for-byte identical, and service state remains honestly failed from
+the prior partial real run (exit 1). Counts remain 6,612 listings, 16,514
+observations and 151 checks; budgets remain 3/3 discovery and 18/20 direct with no
+website pause. Preferences and imported enrichment were included in the unchanged
+checksums. No role, schema, secret, service/timer or backup hook was changed.
+
+The timer remains active, with next collection **14 October, 07:17 UTC / 09:17
+Sarajevo**. **No new successful live source checks are attributable to this priority
+policy yet.** Next-run verification should deliberately update its expected release
+to `priority-b6e94ff` and preserve the browser-reliability diagnostics. Inspect the
+real run's persisted `priority_selection`, then distinguish selected IDs from
+actual attempted and successful checks before reporting coverage gains.
+
+Read-only reporting is operational in the release as
+`scripts/collection_coverage_report.py`, using `/delivery/backup-secret.json` inside
+the existing pinned image and writing to a separate private report mount. It has
+no schedule or source access. Standalone audit staging is retained under
+`.daily-delivery/coverage-audit-20261013`; reports under
+`.daily-delivery/coverage-reports`. The manual deployment script and verification
+JSON are retained privately for audit. An initial read-only report connection had
+a generic `OperationalError`; a subsequent manual invocation succeeded. It made
+no source request and no budgets were changed. Connection reliability remains an
+independent concern, not a reason to silently fall back to local evidence.
+
+For policy rollback, retain `details-1327757` and atomically select it under the
+same pipeline lock after checking the collector is stopped. Preserve any backup
+owner's later hooks/releases; do not overwrite their work or enable legacy local
+collection. If the backup owner builds the next release, copy the current complete
+release and retain `database/collection_priority.py`, the two-line direct entry
+point change and report files. This task has finished its runtime/service mutation.
