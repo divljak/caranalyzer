@@ -93,14 +93,14 @@ def main(argv=None):
     status = 1
     try:
         from database.db_manager import db_manager
-        from database.website_tracking import WebsiteStore
+        from database.collection_priority import PriorityWebsiteStore
         from run_website_sync import utcnow, sync
         from scrapers.olx_website_collector import WebsiteBrowser
         from market_labels import refresh_labels
         backup_engine = private_engine(args.backup_credentials, 'car_analyzer_backup')
         result['connection'] = preflight(db_manager.engine, 'car_analyzer_collector')
         preflight(backup_engine, 'car_analyzer_backup')
-        store = WebsiteStore(db_manager.engine)
+        store = PriorityWebsiteStore(db_manager.engine)
         with pinned_collection(db_manager, store) as c:
             result['before'] = backup(backup_engine, args.state_dir, 'before')
             if args.verify_only:
