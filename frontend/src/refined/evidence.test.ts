@@ -2,6 +2,7 @@ import { test } from "node:test";
 import { strict as assert } from "node:assert";
 import {
   baselineChange,
+  collectionFreshness,
   defaultFilters,
   fingerprint,
   isSuggested,
@@ -12,6 +13,44 @@ import {
   sortedModels,
   type ModelEvidence,
 } from "./evidence.ts";
+import type { WebsiteCollection } from "../pages/dealerShared";
+
+test("partial observations remain distinct from the clean analysis anchor", () => {
+  const clean = "2026-10-01T17:31:22Z";
+  const partial: WebsiteCollection = {
+    status: "partial", started_at: "2026-10-13T16:48:01Z",
+    finished_at: "2026-10-13T16:50:12Z", observations: 68,
+  };
+  const result = collectionFreshness(clean, partial, partial, Date.parse(partial.finished_at!));
+  assert.equal(result.show, true);
+  assert.equal(result.cleanLine, "Last clean collection: 1 Oct 2026.");
+  assert.match(result.latestLine!, /13 Oct 2026 · partial · 68 recorded observations/);
+  assert.equal(result.observationLine, null);
+});
+
+test("a later failed run does not hide observations from an earlier partial run", () => {
+  const partial: WebsiteCollection = {
+    status: "partial", started_at: "2026-10-11T07:17:20Z",
+    finished_at: "2026-10-11T07:23:59Z", observations: 136,
+  };
+  const failed: WebsiteCollection = {
+    status: "failed", started_at: "2026-10-13T07:17:20Z",
+    finished_at: "2026-10-13T07:17:53Z", observations: 0,
+  };
+  const result = collectionFreshness("2026-10-01T17:31:22Z", failed, partial);
+  assert.match(result.latestLine!, /13 Oct 2026 · failed · 0 recorded observations/);
+  assert.match(result.observationLine!, /11 Oct 2026 · partial · 136 recorded observations/);
+});
+
+test("a running attempt is disclosed even with a recent clean anchor", () => {
+  const running: WebsiteCollection = {
+    status: "running", started_at: "2026-10-13T16:48:01Z",
+    finished_at: null, observations: 0,
+  };
+  const result = collectionFreshness("2026-10-13T07:00:00Z", running, null, Date.parse(running.started_at!));
+  assert.equal(result.show, true);
+  assert.match(result.latestLine!, /running · 0 recorded observations so far/);
+});
 const cohort: ModelEvidence = {
   make: "Test",
   model: "Car",

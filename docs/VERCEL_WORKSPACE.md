@@ -105,3 +105,16 @@ pinned separately and the frontend build continues to use its existing lockfile.
 Reference configuration follows [Vercel's FastAPI runtime](https://vercel.com/docs/frameworks/backend/fastapi),
 [Vercel Authentication](https://vercel.com/docs/deployment-protection/methods-to-protect-deployments/vercel-authentication)
 and [Supabase's SQLAlchemy pooler guidance](https://supabase.com/docs/guides/troubleshooting/using-sqlalchemy-with-supabase-FUqebT).
+
+## Collection-status follow-up
+
+The UI now labels the analysis timestamp as the last clean collection, alongside
+the latest website run's date, status and recorded observation count. If a later
+attempt fails with no observations, it also retains the latest run that recorded
+observations. Partial/failed/running attempts do not advance the clean analysis
+anchor or imply that every listing was freshly checked. This status is shared by
+all four pages, including an empty Following page. The API adds observation counts
+and the latest run with observations to its existing overview; it does not alter
+collection records or schedules. Daily delivery and collector changes are owned
+by the separate delivery task; the historical snapshot-only description above
+describes the initial deployment.

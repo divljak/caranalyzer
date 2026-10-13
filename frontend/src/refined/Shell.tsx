@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { Database, Info } from "lucide-react";
 import { demo, previewState } from "./data";
-import { displayDate } from "./evidence";
+import { collectionFreshness } from "./evidence";
 import { useWorkspace } from "./context";
 export function PageHeader({
   title,
@@ -45,8 +45,8 @@ export function PageHeader({
           )}
           <p>
             The collector attempts a bounded sample of the newest OLX car results.
-            This is incomplete market coverage. This database copy does not
-            automatically receive future collections.
+            This is incomplete market coverage. Runs can be partial or fail;
+            new observations do not mean every listing was freshly checked.
           </p>
           <p>
             Asking prices are not transaction prices. Leaving the collected
@@ -77,14 +77,23 @@ export function PageHeader({
   );
 }
 export function StaleNotice({ asOf }: { asOf?: string | null }) {
-  const stale =
-    previewState === "stale" ||
-    (asOf && Date.now() - Date.parse(asOf) > 3 * 86400000);
-  return stale ? (
+  const { overview } = useWorkspace();
+  const freshness = collectionFreshness(
+    asOf ?? overview.data?.as_of,
+    overview.data?.website_collection,
+    overview.data?.website_observation_collection,
+  );
+  return freshness.show || previewState === "stale" ? (
     <div className="stale-notice" role="status">
       <Database size={16} />
       <span>
-        Data through {displayDate(asOf)}. No newer collection is available.
+        {freshness.cleanLine}
+        {freshness.latestLine && <> {freshness.latestLine}</>}
+        {freshness.observationLine && <> {freshness.observationLine}</>}
+        {(freshness.latestLine || freshness.observationLine) && (
+          <> New observations do not mean every listing was freshly checked.</>
+        )}
+        {overview.isError && <> Latest website status unavailable.</>}
       </span>
     </div>
   ) : null;

@@ -185,12 +185,17 @@ def overview():
           (SELECT count(*) FROM listing_snapshots) AS snapshots,
           (SELECT count(*) FROM scraping_logs) AS runs""")[0]
         data['website_listings'] = connection.execute(text("SELECT count(*) FROM car_listings WHERE source='olx.ba' AND collection_method='olx_website'")).scalar()
-        health = rows(connection, 'SELECT status,started_at,finished_at,search_attempted,detail_attempted,details_completed,errors,report FROM website_collection_runs ORDER BY started_at DESC,id DESC LIMIT 1')
+        health = rows(connection, 'SELECT status,started_at,finished_at,search_attempted,detail_attempted,details_completed,observations,errors,report FROM website_collection_runs ORDER BY started_at DESC,id DESC LIMIT 1')
         data['website_collection'] = health[0] if health else None
         if health:
             for field in ('started_at','finished_at'):
                 data['website_collection'][field] = utc(data['website_collection'][field])
             data['website_collection']['report'] = json.loads(data['website_collection']['report'] or '{}')
+        observed = rows(connection, 'SELECT status,started_at,finished_at,observations FROM website_collection_runs WHERE observations>0 ORDER BY started_at DESC,id DESC LIMIT 1')
+        data['website_observation_collection'] = observed[0] if observed else None
+        if observed:
+            for field in ('started_at','finished_at'):
+                data['website_observation_collection'][field] = utc(observed[0][field])
         data['as_of'] = utc(as_of(connection))
         data['coverage'] = 'Bounded newest-results sample; model coverage is unknown'
         data['availability'] = 'Last observed on OLX; current availability is unverified'

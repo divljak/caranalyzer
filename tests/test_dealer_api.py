@@ -2,7 +2,7 @@
 import os
 import unittest
 from unittest.mock import patch
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from sqlalchemy import text, create_engine
 from fastapi.testclient import TestClient
 
@@ -100,6 +100,32 @@ class DealerEvidenceTests(unittest.TestCase):
         self.assertEqual(422,self.client.get('/api/listings?page=0').status_code)
         self.assertEqual(422,self.client.get('/api/listings?year_min=2025&year_max=2024').status_code)
         self.assertEqual(400,self.client.get('/api/overview',headers={'host':'evil.example'}).status_code)
+
+    def test_overview_separates_latest_failed_attempt_from_partial_observations(self):
+        started = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(days=1)
+        ids = []
+        try:
+            with self.engine.begin() as c:
+                for offset, status, observations in [(0, 'partial', 68), (1, 'failed', 0)]:
+                    ids.append(c.execute(text("""INSERT INTO website_collection_runs
+                      (session_id,started_at,finished_at,status,source_query,search_limit,detail_limit,
+                       search_attempted,detail_attempted,discovery_complete,details_completed,observations,new_listings,errors,report)
+                      VALUES (:session,:started,:finished,:status,'verification',0,0,0,0,0,0,:observations,0,1,'{}') RETURNING id"""),
+                      {'session':f'__freshness_test_{offset}', 'started':started+timedelta(minutes=offset),
+                       'finished':started+timedelta(minutes=offset,seconds=30), 'status':status,
+                       'observations':observations}).scalar())
+            result = self.client.get('/api/overview')
+            self.assertEqual(200, result.status_code, result.text)
+            data = result.json()
+            self.assertEqual('failed', data['website_collection']['status'])
+            self.assertEqual(0, data['website_collection']['observations'])
+            self.assertEqual('partial', data['website_observation_collection']['status'])
+            self.assertEqual(68, data['website_observation_collection']['observations'])
+            self.assertEqual(self.module.utc(self.anchor), data['as_of'])
+            self.assertTrue(data['website_collection']['started_at'].endswith('+00:00'))
+        finally:
+            with self.engine.begin() as c:
+                c.execute(text('DELETE FROM website_collection_runs WHERE id=ANY(:ids)'), {'ids':ids})
 
     def test_model_analysis_has_year_gaps_distinct_prices_and_attribute_coverage(self):
         r=self.client.get('/api/model-analysis?make=__DealerTest&model=Test&year_min=2022&year_max=2025&days=90')

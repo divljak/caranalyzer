@@ -235,7 +235,7 @@ export default function Workspace() {
             <div className="last-updated">
               <Database size={18} />
               <div>
-                <small>Last updated</small>
+                <small>Last clean collection</small>
                 <span>{displayDate(overview.data?.as_of)}</span>
               </div>
             </div>

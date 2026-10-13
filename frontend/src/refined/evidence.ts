@@ -1,4 +1,9 @@
-import type { Evidence, Filters, Segment } from "../pages/dealerShared";
+import type {
+  Evidence,
+  Filters,
+  Segment,
+  WebsiteCollection,
+} from "../pages/dealerShared";
 
 export const SIGNALS = Object.freeze({
   withinCeiling: 0.6,
@@ -95,6 +100,36 @@ export function displayDate(value?: string | null, full = true) {
   })
     .format(d)
     .replace("Sept", "Sep");
+}
+export function collectionFreshness(
+  asOf?: string | null,
+  latest?: WebsiteCollection | null,
+  observed?: WebsiteCollection | null,
+  now = Date.now(),
+) {
+  const anchor = asOf ? Date.parse(asOf) : -Infinity;
+  const time = (run?: WebsiteCollection | null) =>
+    run?.finished_at || run?.started_at;
+  const newer = (run?: WebsiteCollection | null) =>
+    !!time(run) && Date.parse(time(run)!) > anchor;
+  const describe = (run: WebsiteCollection) =>
+    `${displayDate(time(run))} · ${run.status} · ${num(run.observations)} recorded observations${run.status === "running" ? " so far" : ""}.`;
+  const latestLine = newer(latest)
+    ? `Latest website collection: ${describe(latest!)}`
+    : null;
+  const observationLine =
+    newer(observed) && time(observed) !== time(latest)
+      ? `Latest run with observations: ${describe(observed!)}`
+      : null;
+  return {
+    show:
+      (!!asOf && now - anchor > 3 * 86400000) ||
+      !!latestLine ||
+      !!observationLine,
+    cleanLine: `Last clean collection: ${displayDate(asOf)}.`,
+    latestLine,
+    observationLine,
+  };
 }
 export function scaleFor(
   items: Pick<Evidence, "p25" | "p75">[],
