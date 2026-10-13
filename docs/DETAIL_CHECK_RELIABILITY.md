@@ -163,3 +163,16 @@ not spend another visit or reset budgets just to turn a verification green.
 Implementation uses [Selenium eager navigation](https://www.selenium.dev/documentation/webdriver/drivers/options/),
 [explicit waits](https://www.selenium.dev/documentation/webdriver/waits/) and
 [the async script timeout contract](https://www.selenium.dev/selenium/docs/api/py/selenium_webdriver_remote/selenium.webdriver.remote.webdriver.html).
+
+## Shared integration boundary
+
+Runtime edits are finished. The only changed runtime file is
+`scrapers/olx_website_collector.py`. Other task files are
+`tests/test_website_navigation.py`, `tests/test_browser_loopback.py` and this document.
+`run_website_sync.py`, `database/website_tracking.py`, direct entry scripts,
+selection/queue code, canonical archive/backup code and service/timer files were not
+edited. The priority/coverage owner can now integrate at the collector selection
+boundary, and the backup owner can extend the canonical pipeline, preserving the
+new browser module when building the next complete immutable release. Use the
+installed manifest to retain the exact combined runtime; this task holds no ongoing
+shared file/service mutation.
