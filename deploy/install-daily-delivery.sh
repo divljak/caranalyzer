@@ -2,6 +2,7 @@
 set -euo pipefail
 umask 077
 cd /opt/car-analyzer
+[[ ! -e .daily-delivery/direct-active ]] || { echo "Direct Supabase collection is active; use its installer."; exit 1; }
 [[ "$EUID" == 0 ]] || { echo 'Run this installer as root on the collector VPS.'; exit 1; }
 [[ "$(systemctl show car-analyzer-collector.service -p ActiveState --value)" != activating ]] || { echo 'Wait for the current collector run to finish before installation.'; exit 1; }
 [[ -r .daily-delivery/sync-secret.json ]] || { echo 'Provision the scoped sync-role credential file first.'; exit 1; }

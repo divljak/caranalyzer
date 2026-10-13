@@ -2,6 +2,8 @@
 """Conservative website-only daily pilot. Retains observations and never infers sales."""
 import argparse
 from datetime import datetime, timezone
+import os
+from sqlalchemy.exc import SQLAlchemyError
 import json
 import logging
 import time
@@ -18,14 +20,14 @@ def utcnow():
 
 
 def sync(db, store, browser, *, search_pages=3, detail_checks=20, delay=15, brand=None, model=None,
-         now=utcnow, sleep=time.sleep):
+         now=utcnow, sleep=time.sleep, session_prefix=''):
     """Browser/clock injection lets tests verify the entire run without visiting OLX."""
     query = search_url(1, brand, model)
     report = dict(status='running', search_attempted=0, detail_attempted=0, discovery_complete=0,
                   details_completed=0, observations=0, new_listings=0, errors=0,
                   scope=query, coverage='bounded_newest_sample', source_total=None, page_stats=[],
                   known_overlap=0, rejected=0, stopped_reason=None, sale_inference=False)
-    session_id, started = str(uuid.uuid4()), now()
+    session_id, started = session_prefix + str(uuid.uuid4()), now()
     run_id = store.start_run(session_id, started, query, search_pages, detail_checks)
     log_id = db.add_scraping_log(session_id=session_id, start_time=started, status='running',
                                 source_query=query, pages_requested=search_pages, source_per_page=None)
@@ -83,6 +85,8 @@ def sync(db, store, browser, *, search_pages=3, detail_checks=20, delay=15, bran
                 else:
                     report['details_completed'] += 1
                     consecutive_errors = 0
+            except SQLAlchemyError:
+                raise
             except WebsiteBlocked:
                 store.record_check(run_id, lid, now(), {'outcome': 'blocked', 'evidence': {'reason': 'source_refusal'}})
                 raise
@@ -106,7 +110,7 @@ def sync(db, store, browser, *, search_pages=3, detail_checks=20, delay=15, bran
         report.update(status='budget_exhausted', stopped_reason='daily_page_budget')
     except Exception as exc:
         report.update(status='partial' if report['observations'] else 'failed',
-                      stopped_reason=str(exc)[:250], errors=report['errors'] + 1)
+                      stopped_reason=type(exc).__name__ if isinstance(exc, SQLAlchemyError) else str(exc)[:250], errors=report['errors'] + 1)
     finally:
         if report['status'] == 'completed' and search_pages and not report['discovery_complete']:
             report.update(status='partial', stopped_reason='discovery_budget_incomplete')
@@ -140,6 +144,8 @@ def parse_args(argv=None):
 def main():
     args = parse_args()
     logging.basicConfig(level=logging.INFO)
+    if os.getenv('CAR_ANALYZER_COLLECTOR') == 'supabase':
+        raise RuntimeError('Use the managed scripts/direct_collector.py entrypoint')
     if not args.plan:
         create_tables()
         create_website_tables(db_manager.engine)

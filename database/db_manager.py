@@ -141,7 +141,10 @@ class DatabaseManager:
             return is_new
         except Exception:
             session.rollback()
-            logger.exception('Unable to store verified OLX listing')
+            if os.getenv('CAR_ANALYZER_COLLECTOR') == 'supabase':
+                logger.error('Unable to store verified OLX listing; database write failed')
+            else:
+                logger.exception('Unable to store verified OLX listing')
             raise
         finally:
             session.close()
@@ -399,6 +402,8 @@ class DatabaseManager:
             return log_entry.id
         except Exception as e:
             session.rollback()
+            if os.getenv('CAR_ANALYZER_COLLECTOR') == 'supabase':
+                raise
             logger.error(f"Error adding scraping log: {str(e)}")
             return None
         finally:
@@ -416,6 +421,8 @@ class DatabaseManager:
                 session.commit()
         except Exception as e:
             session.rollback()
+            if os.getenv('CAR_ANALYZER_COLLECTOR') == 'supabase':
+                raise
             logger.error(f"Error updating scraping log: {str(e)}")
         finally:
             session.close()
