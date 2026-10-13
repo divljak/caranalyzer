@@ -19,6 +19,14 @@ export default {
 		},
 		extend: {
 			colors: {
+        canvas: "var(--bg-canvas)",
+        surface: "var(--surface)",
+        "surface-raised": "var(--surface-raised)",
+        "accent-blue": "var(--accent-blue)",
+        "accent-pink": "var(--accent-pink)",
+        "text-primary": "var(--text-primary)",
+        "text-secondary": "var(--text-secondary)",
+        caution: "var(--caution)",
 				border: 'hsl(var(--border))',
 				input: 'hsl(var(--input))',
 				ring: 'hsl(var(--ring))',

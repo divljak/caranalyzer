@@ -1,3 +1,5 @@
+> The current local UI includes Market, Model analysis, Compare and Following. Start with the [UI setup guide](frontend/README.md) to preview it with illustrative data or connect a local PostgreSQL copy. Shared design references are in [design/](design/README.md). The older product descriptions below are legacy documentation.
+
 # 🚗 OLX.ba Car Market Analysis MVP
 
 A comprehensive car market intelligence tool that scrapes OLX.ba daily to track Bosnia & Herzegovina's used car market. Provides market insights, pricing trends, and inventory tracking for car dealerships and market analysts.

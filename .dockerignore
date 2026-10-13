@@ -8,3 +8,7 @@ __pycache__/
 *.log
 backups/
 .git/
+.private/
+.venv/
+tests/
+.website-rollout*/

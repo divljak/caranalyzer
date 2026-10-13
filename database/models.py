@@ -23,7 +23,8 @@ class CarListing(Base):
     make = Column(String(50), nullable=False)
     model = Column(String(100), nullable=False)
     year = Column(Integer)
-    price = Column(Integer)  # Price in Bosnian Marks (KM)
+    price = Column(Integer)  # Price in Bosnian Marks (KM); 0 means missing/on-request when price_status != 'priced'
+    price_status = Column(String(30), nullable=False, default='priced')  # 'priced' or 'missing'
     mileage = Column(Integer)  # In kilometers
     views = Column(Integer, default=0)
     posted_date = Column(Date)
@@ -38,6 +39,13 @@ class CarListing(Base):
     collection_method = Column(String(30), nullable=False, default='olx_api')
     first_seen_at = Column(DateTime, default=datetime.utcnow)
     last_verified_at = Column(DateTime, default=datetime.utcnow)
+    first_price = Column(Integer)
+    previous_price = Column(Integer)
+    price_change_count = Column(Integer, nullable=False, default=0)
+    last_price_change_at = Column(DateTime)
+    last_source_query = Column(String(500))
+    missing_from_window_since_at = Column(DateTime)
+    consecutive_missing_runs = Column(Integer, nullable=False, default=0)
     is_active = Column(Boolean, default=True)
     
     def __repr__(self):
@@ -51,7 +59,8 @@ class ListingSnapshot(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     listing_id = Column(String(50), ForeignKey('car_listings.listing_id', ondelete='CASCADE'), nullable=False)
     observed_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-    asking_price = Column(Integer, nullable=False)
+    asking_price = Column(Integer, nullable=False)  # 0 means missing/on-request when price_status != 'priced'
+    price_status = Column(String(30), nullable=False, default='priced')
     views = Column(Integer)
     source_url = Column(String(500), nullable=False)
     source_query = Column(String(500))
@@ -81,6 +90,7 @@ class ScrapingLog(Base):
     source_query = Column(String(500))
     pages_requested = Column(Integer)
     source_per_page = Column(Integer)
+    missing_from_window_count = Column(Integer, nullable=False, default=0)
     
     def __repr__(self):
         return f"<ScrapingLog(session_id='{self.session_id}', status='{self.status}', total_listings={self.total_listings_found})>"
@@ -118,16 +128,26 @@ def create_tables():
                 'collection_method': "ALTER TABLE car_listings ADD COLUMN collection_method VARCHAR(30) NOT NULL DEFAULT 'legacy_rendered'",
                 'first_seen_at': 'ALTER TABLE car_listings ADD COLUMN first_seen_at TIMESTAMP',
                 'last_verified_at': 'ALTER TABLE car_listings ADD COLUMN last_verified_at TIMESTAMP',
+                'price_status': "ALTER TABLE car_listings ADD COLUMN price_status VARCHAR(30) NOT NULL DEFAULT 'priced'",
+                'first_price': 'ALTER TABLE car_listings ADD COLUMN first_price INTEGER',
+                'previous_price': 'ALTER TABLE car_listings ADD COLUMN previous_price INTEGER',
+                'price_change_count': 'ALTER TABLE car_listings ADD COLUMN price_change_count INTEGER NOT NULL DEFAULT 0',
+                'last_price_change_at': 'ALTER TABLE car_listings ADD COLUMN last_price_change_at TIMESTAMP',
+                'last_source_query': 'ALTER TABLE car_listings ADD COLUMN last_source_query VARCHAR(500)',
+                'missing_from_window_since_at': 'ALTER TABLE car_listings ADD COLUMN missing_from_window_since_at TIMESTAMP',
+                'consecutive_missing_runs': 'ALTER TABLE car_listings ADD COLUMN consecutive_missing_runs INTEGER NOT NULL DEFAULT 0',
             },
             'listing_snapshots': {
                 'source_query': 'ALTER TABLE listing_snapshots ADD COLUMN source_query VARCHAR(500)',
                 'source_page': 'ALTER TABLE listing_snapshots ADD COLUMN source_page INTEGER',
                 'source_per_page': 'ALTER TABLE listing_snapshots ADD COLUMN source_per_page INTEGER',
+                'price_status': "ALTER TABLE listing_snapshots ADD COLUMN price_status VARCHAR(30) NOT NULL DEFAULT 'priced'",
             },
             'scraping_logs': {
                 'source_query': 'ALTER TABLE scraping_logs ADD COLUMN source_query VARCHAR(500)',
                 'pages_requested': 'ALTER TABLE scraping_logs ADD COLUMN pages_requested INTEGER',
                 'source_per_page': 'ALTER TABLE scraping_logs ADD COLUMN source_per_page INTEGER',
+                'missing_from_window_count': 'ALTER TABLE scraping_logs ADD COLUMN missing_from_window_count INTEGER NOT NULL DEFAULT 0',
             },
         }
         for table_name, table_migrations in migrations.items():
@@ -135,6 +155,26 @@ def create_tables():
             for column, statement in table_migrations.items():
                 if column not in existing_columns:
                     connection.execute(text(statement))
+        connection.execute(text("""
+            UPDATE car_listings
+            SET first_price = price
+            WHERE collection_method = 'olx_api'
+              AND first_price IS NULL
+              AND price IS NOT NULL
+        """))
+        connection.execute(text("""
+            UPDATE car_listings cl
+            SET last_source_query = latest.source_query
+            FROM (
+                SELECT DISTINCT ON (listing_id) listing_id, source_query
+                FROM listing_snapshots
+                WHERE source_query IS NOT NULL
+                ORDER BY listing_id, observed_at DESC
+            ) latest
+            WHERE cl.listing_id = latest.listing_id
+              AND cl.collection_method = 'olx_api'
+              AND cl.last_source_query IS NULL
+        """))
     print("Database tables created successfully!")
 
 if __name__ == "__main__":
