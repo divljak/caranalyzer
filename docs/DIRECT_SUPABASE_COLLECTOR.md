@@ -141,6 +141,10 @@ Safe status files under `.daily-delivery/`:
 - `latest-success.json`: **legacy final reconciliation only**, no longer a freshness
   marker for active collection.
 
+These markers are written by the Python process. Container-launch failure or a hard
+systemd termination can leave the previous marker in place; follow-up monitoring
+should compare timestamps and the systemd result/journal as well as reading JSON.
+
 A no-source verification command is
 `/opt/car-analyzer/scripts/daily-direct-collection.sh --verify-only`. It uses the same
 locks, rolled-back budget/listing updates and diagnostic run inserts, label refresh
@@ -198,6 +202,9 @@ If Supabase is unavailable, leave collection stopped instead of silently divergi
 ## Source and remaining work
 
 Focused branch: `codex/direct-supabase-collector`, based on PR #3's `21925fc`.
+Installed runtime source commit: **`3bb5a10`**; all 15 deployed runtime files
+matched its SHA256 manifest in `.daily-delivery/direct-installation.json`.
+Draft [PR #4](https://github.com/divljak/caranalyzer/pull/4) is stacked on PR #3.
 Changed runtime files: `database/collector_connection.py`, `database/models.py`,
 `database/db_manager.py`, `run_website_sync.py`, `scripts/direct_collector.py`,
 `scripts/backup_supabase.py`, the two direct shell entry scripts, direct installer and
