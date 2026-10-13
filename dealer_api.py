@@ -1,4 +1,4 @@
-"""Loopback-only dealer prototype. Existing collector tables are read-only here."""
+"""Private dealer workspace. Existing collector evidence is read-only here."""
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -9,6 +9,7 @@ import time
 import uuid
 import json
 import hashlib
+import os
 import requests
 
 from fastapi import FastAPI, Depends, HTTPException, Query, Request
@@ -22,7 +23,13 @@ from scrapers.olx_listing_details import DETAILS_DDL, DetailsUnavailable, fetch_
 from market_labels import LABEL_DDL, refresh_labels
 from database.website_tracking import create_website_tables
 
-engine, _ = create_engine_and_session()
+HOSTED = os.getenv('VERCEL') == '1'
+if HOSTED:
+    from hosted_runtime import hosted_engine, hosted_hosts, same_origin
+    engine = hosted_engine()
+else:
+    from hosted_runtime import same_origin
+    engine, _ = create_engine_and_session()
 logger = logging.getLogger(__name__)
 LISTING_SOURCE = """(SELECT c0.*,
  CASE WHEN w0.details_checked_at IS NOT NULL THEN w0.attributes::jsonb->>'Proizvođač' ELSE COALESCE(n.make,c0.make) END AS market_make,
@@ -57,6 +64,10 @@ SEARCH_DDL = """CREATE TABLE IF NOT EXISTS dealer_model_searches (
 
 @asynccontextmanager
 async def lifespan(app):
+    if HOSTED:
+        # Imported schema and labels are managed outside request-serving workers.
+        yield
+        return
     create_website_tables(engine)
     with engine.begin() as connection:
         connection.execute(text(CANDIDATE_DDL))
@@ -66,22 +77,32 @@ async def lifespan(app):
         refresh_labels(connection)
     yield
 
-app = FastAPI(title='Car Analyzer · Dealer workspace', lifespan=lifespan)
-app.add_middleware(TrustedHostMiddleware, allowed_hosts=['localhost', '127.0.0.1', 'testserver'])
+app = FastAPI(title='Car Analyzer · Dealer workspace', lifespan=lifespan,
+              docs_url=None if HOSTED else '/docs', redoc_url=None if HOSTED else '/redoc',
+              openapi_url=None if HOSTED else '/openapi.json')
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=hosted_hosts() if HOSTED else ['localhost', '127.0.0.1', 'testserver'])
 
 @app.middleware('http')
 async def private_requests(request: Request, call_next):
+    # Hobby Standard Protection covers preview URLs. Production must stay closed.
+    if HOSTED and os.getenv('VERCEL_ENV') != 'preview':
+        return JSONResponse({'detail': 'This workspace requires a protected preview deployment'}, status_code=503)
+    if HOSTED and (request.url.path.startswith('/api/candidates') or
+                   request.url.path.startswith('/api/transmission-jobs') or
+                   request.url.path == '/api/model-transmission'):
+        return JSONResponse({'detail': 'Source refresh is available only in the local collector workspace'}, status_code=409)
     if request.method not in {'GET', 'HEAD', 'OPTIONS'}:
         origin = request.headers.get('origin')
-        if origin and origin != str(request.base_url).rstrip('/'):
+        if not same_origin(origin, request.headers.get('host'), str(request.base_url), HOSTED):
             return JSONResponse({'detail': 'Cross-origin writes are disabled'}, status_code=403)
         if request.headers.get('sec-fetch-site') == 'cross-site':
             return JSONResponse({'detail': 'Cross-site writes are disabled'}, status_code=403)
     try:
         response = await call_next(request)
-    except Exception:
-        logger.exception('Private workspace request failed')
-        return JSONResponse({'detail': 'Database unavailable. Check the local restored copy.'}, status_code=503)
+    except Exception as error:
+        logger.error('Private workspace request failed: %s', type(error).__name__)
+        return JSONResponse({'detail': 'Database unavailable. Please retry later.'}, status_code=503,
+                            headers={'Cache-Control': 'no-store'})
     response.headers['Cache-Control'] = 'no-store'
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['Referrer-Policy'] = 'no-referrer'
@@ -157,7 +178,8 @@ def cohort(filters, anchor):
 @app.get('/api/overview')
 def overview():
     with engine.begin() as connection:
-        refresh_labels(connection)
+        if not HOSTED:
+            refresh_labels(connection)
         data = rows(connection, """SELECT (SELECT count(*) FROM car_listings) AS listings,
           (SELECT count(*) FROM car_listings WHERE collection_method='olx_api' AND source='olx.ba') AS api_listings,
           (SELECT count(*) FROM listing_snapshots) AS snapshots,
@@ -285,7 +307,8 @@ def discovery(filters: Filters = Depends(query_filters),
               sort: Literal['observed','price','recent','cuts'] = 'observed'):
     """Budget determines eligible models, never truncates their displayed price bands."""
     with engine.begin() as connection:
-        refresh_labels(connection)
+        if not HOSTED:
+            refresh_labels(connection)
         anchor = as_of(connection)
         if not anchor:
             return {'items':[], 'as_of':None, 'coverage':{'observed':0,'recognized':0,'categorized':0}, 'confirmed_sales':None}

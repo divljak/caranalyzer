@@ -676,9 +676,15 @@ function GearboxDetails({
             in the demo.
           </p>
         )}
+        {import.meta.env.VITE_HOSTED === 'true' && !demo && (
+          <p className="muted">
+            Saved gearbox details are available. New source checks run in the
+            collector workspace.
+          </p>
+        )}
         <button
           className="outline"
-          disabled={demo || busy || running || !!sourcePaused}
+          disabled={demo || import.meta.env.VITE_HOSTED === 'true' || busy || running || !!sourcePaused}
           onClick={refresh}
         >
           <RefreshCw size={16} />

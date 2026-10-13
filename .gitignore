@@ -87,3 +87,6 @@ frontend-backup/
 
 # Cache
 .cache/
+.vercel/
+.vercel
+.env*

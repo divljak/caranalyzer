@@ -44,8 +44,8 @@ export function PageHeader({
             </p>
           )}
           <p>
-            The collector samples the newest 300 OLX car results daily. This is
-            incomplete market coverage. This local database copy does not
+            The collector attempts a bounded sample of the newest OLX car results.
+            This is incomplete market coverage. This database copy does not
             automatically receive future collections.
           </p>
           <p>

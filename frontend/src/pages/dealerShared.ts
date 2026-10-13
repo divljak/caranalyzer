@@ -25,7 +25,7 @@ export const date = (v: string | null) => v ? new Date(v.endsWith('Z') || v.incl
 export const key = (s: Segment) => `${s.make.toLowerCase()}|${s.model.toLowerCase()}`;
 export async function api<T>(path: string, body?: unknown, method = 'GET'): Promise<T> {
  const r = await fetch(`/api/${path}`, { method, headers: body ? { 'Content-Type': 'application/json' } : undefined, body: body ? JSON.stringify(body) : undefined });
- if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(typeof e.detail === 'string' ? e.detail : 'Request failed. Check the filters and local database.'); } return r.json();
+ if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(typeof e.detail === 'string' ? e.detail : 'Request failed. Check the filters and retry.'); } return r.json();
 }
 
 export const transmissionLabel = (c: Car) => c.transmission ? `${c.transmission[0].toUpperCase()}${c.transmission.slice(1)}` : c.transmission_detail_outcome === 'not_specified' ? 'Transmission not specified' : 'Transmission not collected';
