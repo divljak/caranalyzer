@@ -77,15 +77,31 @@ class DatabaseManager:
                 key: value for key, value in listing_data.items()
                 if key in {
                     'make', 'model', 'year', 'price', 'mileage', 'views', 'posted_date',
-                    'location', 'seller_type', 'fuel_type', 'transmission', 'listing_url', 'description'
+                    'location', 'seller_type', 'fuel_type', 'transmission', 'listing_url', 'description',
+                    'price_status'
                 } and value is not None
             }
 
             if existing_listing:
+                existing_price = existing_listing.price
+                new_price = fields.get('price')
+                if (
+                    new_price is not None
+                    and existing_price is not None
+                    and new_price != existing_price
+                ):
+                    existing_listing.previous_price = existing_price
+                    existing_listing.price_change_count = (existing_listing.price_change_count or 0) + 1
+                    existing_listing.last_price_change_at = observed_at
                 for key, value in fields.items():
                     setattr(existing_listing, key, value)
+                if existing_listing.first_price is None and fields.get('price') is not None:
+                    existing_listing.first_price = fields['price']
                 existing_listing.scraped_at = observed_at
                 existing_listing.last_verified_at = observed_at
+                existing_listing.last_source_query = listing_data.get('source_query')
+                existing_listing.missing_from_window_since_at = None
+                existing_listing.consecutive_missing_runs = 0
                 existing_listing.source = 'olx.ba'
                 existing_listing.collection_method = listing_data.get('collection_method', 'olx_api')
                 existing_listing.is_active = True
@@ -98,6 +114,10 @@ class DatabaseManager:
                     first_seen_at=observed_at,
                     last_verified_at=observed_at,
                     scraped_at=observed_at,
+                    first_price=fields.get('price'),
+                    price_change_count=0,
+                    last_source_query=listing_data.get('source_query'),
+                    consecutive_missing_runs=0,
                     is_active=True,
                     **fields,
                 )
@@ -108,6 +128,7 @@ class DatabaseManager:
                 listing_id=listing_id,
                 observed_at=observed_at,
                 asking_price=listing_data['price'],
+                price_status=listing_data.get('price_status', 'priced'),
                 views=listing_data.get('views'),
                 source_url=listing_data['listing_url'],
                 source_query=listing_data.get('source_query'),
