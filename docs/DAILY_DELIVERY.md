@@ -55,9 +55,12 @@ nonempty filters/baselines, enrichment and destination-only observations.
 
 The protected hosted `/api/overview` returned 6,612 listings, 16,501 observations,
 the partial 13 October run with 68 observations, and the unchanged clean anchor.
-The Vercel integration chat owns the related freshness-notice deployment. Its
-shared notice must disclose partial observations separately from complete
-analysis freshness; importing data does not refresh old listings.
+The Vercel integration chat deployed the related freshness notice at commit
+`29d09fc` in PR #2, with deployment status READY. The live Market browser showed
+“Last clean collection: 1 Oct 2026. Latest website collection: 13 Oct 2026 ·
+partial · 68 recorded observations. New observations do not mean every listing
+was freshly checked.” The integration chat verified the shared notice on all
+four pages. Importing data does not refresh old listings.
 
 ## Pipeline and failure behavior
 
