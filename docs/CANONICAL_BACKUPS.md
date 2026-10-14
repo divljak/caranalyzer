@@ -351,3 +351,11 @@ by this endpoint; older one-time Mac copies remain retained in their existing pl
 The prior recurring-copy gap is closed for this existing Mac facility. An always-on
 off-VPS facility is still unconfirmed: sleep/offline/logged-out recovery-point lag
 and separate Supabase platform settings/custom-role-password requirements remain.
+
+Recurring-copy runtime source is **`f044d49`** in the existing draft
+[PR #8](https://github.com/divljak/caranalyzer/pull/8). Local and VPS script hashes
+match that source. Local `installation.json` and the VPS installation record
+identify this extension; the original pre-extension VPS record was preserved as
+`installation-pre-off-vps-20261014.json`. The original canonical module change
+adds only successful per-bundle restore receipts; collector release selection,
+source budgets, schema/application privileges and timer commands were unchanged.
