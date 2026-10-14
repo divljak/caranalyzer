@@ -137,6 +137,8 @@ def main():
     parser.add_argument('--credentials', type=Path, required=True)
     parser.add_argument('--state-dir', type=Path, required=True)
     args = parser.parse_args()
+    if (args.state_dir / 'direct-active').exists():
+        raise DeliveryError('Direct Supabase collector is active; legacy synchronization disabled')
     if args.credentials.stat().st_mode & 0o077:
         raise DeliveryError('Credential file must be readable only by its owner')
     credential = json.loads(args.credentials.read_text())

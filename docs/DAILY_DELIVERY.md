@@ -1,5 +1,10 @@
 # Daily collector delivery to Supabase
 
+**Superseded on 13 October 2026:** collection now writes directly to Supabase.
+The source-sync pipeline described below is retained history and is disabled.
+See [the installed direct-collector handoff](DIRECT_SUPABASE_COLLECTOR.md) for
+active runtime, backups, permissions and safe rollback.
+
 Installed and verified on 13 October 2026 on the existing collector VPS,
 `root@167.99.139.58`, application directory `/opt/car-analyzer`.
 Supabase project: `ojmokmsjppkqwppmrzpv`.

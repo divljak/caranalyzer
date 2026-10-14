@@ -97,6 +97,9 @@ class ScrapingLog(Base):
 
 def get_database_url():
     """Get a safe database connection URL from production or local settings."""
+    if os.getenv('CAR_ANALYZER_COLLECTOR') == 'supabase':
+        from database.collector_connection import credential_url
+        return credential_url(os.environ['COLLECTOR_CREDENTIAL_FILE'], 'car_analyzer_collector')[0]
     database_url = os.getenv('DATABASE_URL')
     if database_url:
         return database_url
@@ -113,12 +116,18 @@ def get_database_url():
 
 def create_engine_and_session():
     """Create database engine and session"""
-    engine = create_engine(get_database_url())
+    if os.getenv('CAR_ANALYZER_COLLECTOR') == 'supabase':
+        from database.collector_connection import private_engine
+        engine = private_engine(os.environ['COLLECTOR_CREDENTIAL_FILE'], 'car_analyzer_collector')
+    else:
+        engine = create_engine(get_database_url())
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     return engine, SessionLocal
 
 def create_tables():
     """Create tables and apply the small backwards-compatible schema migration."""
+    if os.getenv('CAR_ANALYZER_COLLECTOR') == 'supabase':
+        raise RuntimeError('Collector runtime cannot create or migrate schema')
     engine, _ = create_engine_and_session()
     Base.metadata.create_all(bind=engine)
     with engine.begin() as connection:

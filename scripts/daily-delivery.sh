@@ -2,6 +2,7 @@
 set -euo pipefail
 umask 077
 cd /opt/car-analyzer
+[[ ! -e .daily-delivery/direct-active ]] || { echo "Direct Supabase collection is active; legacy sync is disabled."; exit 1; }
 mkdir -p .daily-delivery
 chmod 700 .daily-delivery
 exec 9>.daily-delivery/pipeline.lock
