@@ -9,6 +9,7 @@ __pycache__/
 backups/
 .git/
 .private/
+.daily-delivery/
 .venv/
 tests/
 .website-rollout*/

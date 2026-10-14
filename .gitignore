@@ -30,6 +30,7 @@ ENV/
 
 # Database
 .private/
+.daily-delivery/
 .venv/
 *.db
 *.sqlite3

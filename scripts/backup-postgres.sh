@@ -28,8 +28,10 @@ docker compose exec -T postgres \
 chmod 600 "$BACKUP_FILE"
 
 gzip -t "$BACKUP_FILE"
-gunzip -c "$BACKUP_FILE" \
-  | docker compose exec -T postgres pg_restore --list >/dev/null
+TMP_DUMP="$(mktemp)"
+trap 'rm -f "$TMP_DUMP"' EXIT
+gunzip -c "$BACKUP_FILE" > "$TMP_DUMP"
+docker compose exec -T postgres pg_restore --list < "$TMP_DUMP" >/dev/null
 
 find "$BACKUP_DIR" -maxdepth 1 -type f -name 'car_analyzer-*.dump.gz' -printf '%T@ %p\0' \
   | sort -z -nr \
