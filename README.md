@@ -1,10 +1,12 @@
+> The current local UI includes Market, Model analysis, Compare and Following. Start with the [UI setup guide](frontend/README.md) to preview it with illustrative data or connect a local PostgreSQL copy. Shared design references are in [design/](design/README.md). The older product descriptions below are legacy documentation.
+
 # 🚗 OLX.ba Car Market Analysis MVP
 
 A comprehensive car market intelligence tool that scrapes OLX.ba daily to track Bosnia & Herzegovina's used car market. Provides market insights, pricing trends, and inventory tracking for car dealerships and market analysts.
 
 ## 📋 Features
 
-- **Daily Data Collection**: Automated scraping of all passenger car listings from OLX.ba
+- **Daily Data Collection**: Bounded, date-sorted OLX API collection with snapshot history
 - **Modern React Dashboard**: Interactive web dashboard with market trends and insights
 - **Real-time Data Refresh**: Manual refresh button to pull latest listings from OLX
 - **Price Analysis**: Advanced filtering and price comparison tools
@@ -19,7 +21,7 @@ A comprehensive car market intelligence tool that scrapes OLX.ba daily to track 
 
 ## 🛠️ Technology Stack
 
-- **Scraping**: Scrapy + Selenium for JavaScript handling
+- **Collection**: OLX search API with page-level provenance and duplicate/overlap guardrails
 - **Database**: PostgreSQL with SQLAlchemy ORM
 - **Frontend**: React + TypeScript with modern UI components
 - **Backend API**: FastAPI with automatic documentation
@@ -108,8 +110,18 @@ olx-car-scraper/
 
 #### 1. Manual Scraping (Test)
 ```bash
-python run_scraper.py
+# First live collection: remove only generated demo rows, then collect one OLX page.
+python run_scraper.py --purge-generated --pages 1
+
+# Later collections retain the original listings and append asking-price snapshots.
+python run_scraper.py --pages 1
 ```
+
+The collector uses one bounded OLX API window (20 results per requested page, up to 100), stores public OLX listing
+URLs and timestamped asking-price snapshots, records duplicate response IDs as warnings, and rejects unexplained
+zero-overlap runs.
+Dashboard figures are asking-price estimates from active listings, not confirmed sale prices.
+Use a small page count (1–5) and respect OLX's terms of use.
 
 #### 2. Start All Services
 ```bash

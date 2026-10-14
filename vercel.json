@@ -1,0 +1,13 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "fastapi",
+  "buildCommand": "npm ci --prefix frontend && VITE_HOSTED=true npm run build --prefix frontend",
+  "regions": ["arn1"],
+  "functions": {
+    "deploy/vercel_app.py": {
+      "maxDuration": 60,
+      "includeFiles": "frontend/dist/**",
+      "excludeFiles": "{.private/**,.venv/**,venv/**,node_modules/**,frontend/node_modules/**,api/**,tests/**,design/**,docs/**,logs/**,supabase/**}"
+    }
+  }
+}

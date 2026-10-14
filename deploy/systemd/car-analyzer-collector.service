@@ -1,0 +1,16 @@
+[Unit]
+Description=Car Analyzer OLX collector and backup
+Documentation=https://github.com/divljak/caranalyzer
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/car-analyzer
+TimeoutStartSec=20min
+ExecStart=/usr/bin/docker compose run --rm collector python run_scraper.py --pages 5
+ExecStartPost=/opt/car-analyzer/scripts/backup-postgres.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=car-analyzer-collector

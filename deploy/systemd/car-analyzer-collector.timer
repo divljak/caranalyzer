@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Car Analyzer OLX collector daily at 07:17
+
+[Timer]
+OnCalendar=*-*-* 07:17:00
+Persistent=true
+Unit=car-analyzer-collector.service
+
+[Install]
+WantedBy=timers.target

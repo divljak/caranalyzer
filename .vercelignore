@@ -1,0 +1,14 @@
+.private
+.venv
+venv
+node_modules
+frontend/node_modules
+frontend/dist
+api
+tests
+logs
+.env*
+frontend/.env*.local
+*.log
+__pycache__
+.git

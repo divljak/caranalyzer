@@ -1,0 +1,42 @@
+{
+  "project_id": "ojmokmsjppkqwppmrzpv",
+  "read_only_inventory_date": "2026-10-14",
+  "applied": [
+    {
+      "version": "20261013132620",
+      "name": "car_analyzer_baseline",
+      "file": "supabase/migrations/20261013132620_car_analyzer_baseline.sql",
+      "source_sha256": "75ea51deb0a7f860d9c4ab5972ff40a1dd1a3b899fccb603cd77627568550c82",
+      "applied_statement_sha256": "75ea51deb0a7f860d9c4ab5972ff40a1dd1a3b899fccb603cd77627568550c82",
+      "comparison": "byte_exact"
+    },
+    {
+      "version": "20261013133615",
+      "name": "website_checks_run_index",
+      "file": "supabase/migrations/20261013133615_website_checks_run_index.sql",
+      "source_sha256": "09d42fb5293d0c258c729121d756d9b909afb5e5a5ff14ea0dcb3d3dac9a35b7",
+      "applied_statement_sha256": "dc556985fd154846447339324b046e44e0034bf163bbde79206eff08720dda60",
+      "comparison": "comments_and_whitespace"
+    },
+    {
+      "version": "20261013174917",
+      "name": "direct_collector_roles",
+      "file": "supabase/migrations/20261013174917_direct_collector_roles.sql",
+      "source_sha256": "d8f872c30c2873f1a6186c6b6c0138b68d0626c44b07ac71ab485a6c23dc918f",
+      "applied_statement_sha256": "d8f872c30c2873f1a6186c6b6c0138b68d0626c44b07ac71ab485a6c23dc918f",
+      "comparison": "byte_exact"
+    },
+    {
+      "version": "20261014155031",
+      "name": "collector_priority_read_access",
+      "file": "supabase/migrations/20261014155031_collector_priority_read_access.sql",
+      "source_sha256": "bbcb47c1d1b3f9c4d73aae0d121bb690578014b0f3484959608ec3410e4535b4",
+      "applied_statement_sha256": "bbcb47c1d1b3f9c4d73aae0d121bb690578014b0f3484959608ec3410e4535b4",
+      "comparison": "byte_exact"
+    }
+  ],
+  "manual_history": [
+    "supabase/manual-history/20261013134056_private_vercel_runtime.sql",
+    "supabase/manual-history/20261013164856_daily_collector_delivery.sql"
+  ]
+}
