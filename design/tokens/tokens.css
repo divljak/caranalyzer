@@ -1,0 +1,49 @@
+/* Car Analyzer design tokens — exported from the pen.dev design system */
+:root {
+  /* Surfaces */
+  --bg-canvas: #0E0E10;
+  --bg-app: #141416;
+  --surface: #1D1E21;
+  --surface-raised: #26272B;
+  --border: #2C2E32;
+  --track: #34363B;
+
+  /* Text */
+  --text-primary: #ECEEF1;
+  --text-secondary: #9A9EA6;
+  --text-muted: #666A72;
+  --on-accent: #121214;
+  --on-accent-muted: #3A3D44;
+
+  /* Accents */
+  --accent-blue: #B9CCE3;
+  --accent-blue-muted: #93A6BF;
+  --accent-pink: #E3BAE0;
+  --accent-pink-muted: #CC9FCA;
+  --hatch: #5B5F68;
+
+  /* Semantic */
+  --focus-ring: #B9CCE3;
+  --caution: #E3BAE0;
+  --caution-text: #121214;
+
+  /* Typography */
+  --font: "Geist", ui-sans-serif, system-ui, sans-serif;
+
+  /* Radius */
+  --radius-sm: 8px;
+  --radius-md: 14px;
+  --radius-lg: 20px;
+  --radius-xl: 32px;
+  --radius-pill: 999px;
+
+  /* Spacing */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 40px;
+  --space-8: 64px;
+}

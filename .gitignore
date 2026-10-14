@@ -12,6 +12,8 @@ eggs/
 .eggs/
 lib/
 lib64/
+!frontend/src/lib/
+!frontend/src/lib/*.ts
 parts/
 sdist/
 var/
@@ -27,6 +29,8 @@ env/
 ENV/
 
 # Database
+.private/
+.venv/
 *.db
 *.sqlite3
 
@@ -83,3 +87,6 @@ frontend-backup/
 
 # Cache
 .cache/
+.vercel/
+.vercel
+.env*

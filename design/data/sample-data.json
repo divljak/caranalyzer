@@ -1,0 +1,61 @@
+{
+  "_note": "Illustrative sample data used in the designs. NOT real OLX measurements. Replace with the real local database.",
+  "dataset": { "lastUpdated": "2026-09-29", "currency": "KM" },
+  "marketFilters": {
+    "askingPriceCeilingKM": 50000,
+    "category": "SUV",
+    "yearFrom": 2020,
+    "yearTo": 2023,
+    "mileageKm": [50000, 150000],
+    "fuel": "Diesel",
+    "gearbox": "Automatic",
+    "windowDays": 30
+  },
+  "models": [
+    { "model": "Škoda Karoq", "years": "2020–23", "median": 41200, "p25": 37800, "p75": 44900, "pricedAds": 34, "adsWithCuts": 3, "withinCeiling": 30, "lastObserved": "2026-09-29" },
+    { "model": "Volkswagen T-Roc", "years": "2020–23", "median": 39800, "p25": 36500, "p75": 43200, "pricedAds": 41, "adsWithCuts": 5, "withinCeiling": 38, "lastObserved": "2026-09-29" },
+    { "model": "Dacia Duster", "years": "2020–23", "median": 27900, "p25": 25500, "p75": 30400, "pricedAds": 31, "adsWithCuts": 2, "withinCeiling": 31, "lastObserved": "2026-09-28" },
+    { "model": "Peugeot 2008", "years": "2020–23", "median": 36400, "p25": 32900, "p75": 39800, "pricedAds": 48, "adsWithCuts": 9, "withinCeiling": 41, "lastObserved": "2026-09-29" },
+    { "model": "Ford Kuga", "years": "2020–23", "median": 40900, "p25": 37000, "p75": 45500, "pricedAds": 23, "adsWithCuts": 2, "withinCeiling": 19, "lastObserved": "2026-09-27" },
+    { "model": "Renault Captur", "years": "2020–23", "median": 31900, "p25": 28400, "p75": 35500, "pricedAds": 29, "adsWithCuts": 7, "withinCeiling": 29, "lastObserved": "2026-09-28" },
+    { "model": "Kia Sportage", "years": "2020–23", "median": 45600, "p25": 41000, "p75": 50900, "pricedAds": 26, "adsWithCuts": 6, "withinCeiling": 17, "lastObserved": "2026-09-28" },
+    { "model": "Nissan Qashqai", "years": "2021–23", "median": 42500, "p25": 38900, "p75": 47300, "pricedAds": 19, "adsWithCuts": 5, "withinCeiling": 15, "lastObserved": "2026-09-27" },
+    { "model": "Seat Ateca", "years": "2020–23", "median": 38700, "p25": 35200, "p75": 42800, "pricedAds": 17, "adsWithCuts": 3, "withinCeiling": 16, "lastObserved": "2026-09-29" },
+    { "model": "Toyota RAV4", "years": "2020–22", "median": 56900, "p25": 51800, "p75": 62500, "pricedAds": 14, "adsWithCuts": 2, "withinCeiling": 3, "lastObserved": "2026-09-26" },
+    { "model": "Hyundai Tucson", "years": "2021–23", "median": 49900, "p25": 45000, "p75": 56500, "pricedAds": 8, "adsWithCuts": 1, "withinCeiling": 6, "lastObserved": "2026-09-26" },
+    { "model": "Peugeot 3008", "years": "2020–23", "median": 47900, "p25": 42500, "p75": 53900, "pricedAds": 64, "adsWithCuts": 11, "withinCeiling": 23, "lastObserved": "2026-09-28" },
+    { "model": "Volkswagen Tiguan", "years": "2020–22", "median": 54800, "p25": 49500, "p75": 61200, "pricedAds": 37, "adsWithCuts": 6, "withinCeiling": 8, "lastObserved": "2026-09-27" },
+    { "model": "Škoda Kodiaq", "years": "2021–23", "median": 58500, "p25": 52000, "p75": 64900, "pricedAds": 22, "adsWithCuts": 4, "withinCeiling": 5, "lastObserved": "2026-09-29" }
+  ],
+  "modelAnalysis": {
+    "model": "Škoda Karoq",
+    "byYear": [
+      { "year": 2020, "median": 36900, "p25": 34500, "p75": 39200, "pricedAds": 10 },
+      { "year": 2021, "median": 39800, "p25": 37100, "p75": 42300, "pricedAds": 12 },
+      { "year": 2022, "median": 42900, "p25": 40500, "p75": 45600, "pricedAds": 7 },
+      { "year": 2023, "median": 46500, "p25": 44000, "p75": 48900, "pricedAds": 5 }
+    ],
+    "monthly": [
+      { "month": "2025-10", "median": 43500, "pricedAds": 22 },
+      { "month": "2025-11", "median": 43100, "pricedAds": 25 },
+      { "month": "2025-12", "median": 42800, "pricedAds": 24 },
+      { "month": "2026-01", "median": 42900, "pricedAds": 27 },
+      { "month": "2026-02", "median": 42400, "pricedAds": 29 },
+      { "month": "2026-03", "median": 42000, "pricedAds": 31 },
+      { "month": "2026-04", "median": 41900, "pricedAds": 28 },
+      { "month": "2026-05", "median": 41600, "pricedAds": 30 },
+      { "month": "2026-06", "median": 41800, "pricedAds": 33 },
+      { "month": "2026-07", "median": 41400, "pricedAds": 32 },
+      { "month": "2026-08", "median": 41300, "pricedAds": 35 },
+      { "month": "2026-09", "median": 41200, "pricedAds": 34, "partial": true }
+    ],
+    "_monthlyBandNote": "In the design p25 = median - 3400 and p75 = median + 3700 for every month (illustrative)."
+  },
+  "compare": ["Škoda Karoq", "Volkswagen T-Roc", "Peugeot 2008"],
+  "following": [
+    { "model": "Škoda Karoq", "specs": "2020–23 · Diesel · Automatic · 50k–150k km · SUV · 30 d", "baselineMedian": 42100, "newCollectionSinceSaved": true },
+    { "model": "Volkswagen T-Roc", "specs": "2020–23 · Diesel · Automatic · 50k–150k km · SUV · 30 d", "baselineMedian": 39800, "newCollectionSinceSaved": true },
+    { "model": "Dacia Duster", "specs": "2020–23 · Diesel · Manual · all mileage · SUV · 30 d", "baselineMedian": 27900, "newCollectionSinceSaved": false },
+    { "model": "Hyundai Tucson", "specs": "2021–23 · Diesel · Automatic · 50k–150k km · SUV · 90 d", "baselineMedian": 49900, "newCollectionSinceSaved": false }
+  ]
+}

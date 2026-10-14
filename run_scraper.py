@@ -50,80 +50,74 @@ def cleanup_old_data(days: int = 30):
     except Exception as e:
         logging.error(f"Error during cleanup: {str(e)}")
 
-def run_spider():
-    """Run the OLX spider using direct approach"""
+def run_spider(pages: int = 1, allow_zero_overlap: bool = False):
+    """Collect a bounded set of live OLX listings and retain price snapshots."""
+    log_id = None
     try:
-        logging.info("Starting OLX car scraper...")
-        
-        # Import and use the selenium handler directly for now
-        from scrapers.selenium_handler import SeleniumHandler
-        from database.db_manager import db_manager
-        from config.settings import SCRAPING
+        logging.info("Starting verified OLX API asking-price collection...")
+        from scrapers.olx_api_collector import OLXAPICollector, build_source_query
         import uuid
-        from datetime import datetime
+        from datetime import datetime, timezone
         
         session_id = str(uuid.uuid4())
-        start_time = datetime.utcnow()
+        start_time = datetime.now(timezone.utc).replace(tzinfo=None)
+        source_per_page = pages * 20
+        source_query = build_source_query(source_per_page)
+        previous_listing_ids = db_manager.get_latest_comparable_run_listing_ids(source_query, pages)
         
         # Add scraping log
         log_id = db_manager.add_scraping_log(
             session_id=session_id,
             start_time=start_time,
-            status='running'
+            status='running',
+            source_query=source_query,
+            pages_requested=pages,
+            source_per_page=source_per_page,
         )
         
         total_listings = 0
         new_listings = 0
         errors = 0
         
-        # Use Selenium handler directly
-        with SeleniumHandler() as handler:
-            base_url = SCRAPING['base_url']
-            page = 1
-            max_pages = min(5, SCRAPING['max_pages'])  # Limit to 5 pages for testing
-            
-            while page <= max_pages:
-                url = f"{base_url}&page={page}"
-                logging.info(f"Processing page {page}: {url}")
-                
-                if not handler.get_page(url):
-                    logging.error(f"Failed to load page {page}")
-                    break
-                
-                # Get listing cards
-                cards = handler.get_listing_cards()
-                if not cards:
-                    logging.info(f"No more listings found on page {page}")
-                    break
-                
-                logging.info(f"Found {len(cards)} listings on page {page}")
-                
-                # Process each card
-                for card in cards:
-                    try:
-                        data = handler.extract_card_data(card)
-                        if data and data.get('listing_id'):
-                            # Clean and validate data
-                            from utils.data_validator import validator
-                            cleaned_data = validator.validate_listing(data)
-                            
-                            if cleaned_data:
-                                is_new = db_manager.add_or_update_listing(cleaned_data)
-                                if is_new:
-                                    new_listings += 1
-                                total_listings += 1
-                    except Exception as e:
-                        logging.error(f"Error processing listing: {str(e)}")
-                        errors += 1
-                
-                page += 1
-                
-                # Add delay between pages
-                import time, random
-                time.sleep(random.uniform(*SCRAPING['delay_range']))
+        collector = OLXAPICollector()
+        listings = collector.collect(pages=pages)
+        for page_stat in collector.page_stats:
+            logging.info('OLX API page stats: %s', page_stat)
+
+        listing_ids = {listing['listing_id'] for listing in listings}
+        overlap_count = len(listing_ids.intersection(previous_listing_ids))
+        if previous_listing_ids and overlap_count == 0 and not allow_zero_overlap:
+            message = (
+                'Collection rejected: zero overlap with the previous comparable OLX API run. '
+                'Use --allow-zero-overlap only after investigating the source.'
+            )
+            db_manager.update_scraping_log(
+                log_id,
+                end_time=datetime.now(timezone.utc).replace(tzinfo=None),
+                total_listings_found=len(listings),
+                errors_count=1,
+                status='failed',
+                error_message=message,
+            )
+            logging.error(message)
+            return False
+        logging.info(
+            'OLX API overlap with previous comparable run: %s/%s listings',
+            overlap_count,
+            len(listing_ids),
+        )
+
+        for data in listings:
+            try:
+                if db_manager.upsert_verified_listing(data, observed_at=start_time):
+                    new_listings += 1
+                total_listings += 1
+            except Exception as exc:
+                logging.error('Could not persist listing %s: %s', data.get('listing_id'), exc)
+                errors += 1
         
         # Update log
-        end_time = datetime.utcnow()
+        end_time = datetime.now(timezone.utc).replace(tzinfo=None)
         if log_id:
             db_manager.update_scraping_log(
                 log_id=log_id,
@@ -134,10 +128,23 @@ def run_spider():
                 status='completed'
             )
         
-        logging.info(f"Scraping completed: {total_listings} total, {new_listings} new, {errors} errors")
+        logging.info(
+            'Verified collection completed: %s listings observed, %s new, %s errors',
+            total_listings,
+            new_listings,
+            errors,
+        )
         return True
         
     except Exception as e:
+        if log_id:
+            db_manager.update_scraping_log(
+                log_id,
+                end_time=datetime.now(timezone.utc).replace(tzinfo=None),
+                errors_count=1,
+                status='failed',
+                error_message=str(e),
+            )
         logging.error(f"Error running spider: {str(e)}")
         return False
 
@@ -183,6 +190,12 @@ def main():
                        help='Show database statistics')
     parser.add_argument('--no-scrape', action='store_true',
                        help='Skip scraping (useful with --stats or --cleanup)')
+    parser.add_argument('--pages', type=int, default=1, choices=range(1, 6),
+                       help='Number of OLX result pages to collect (1-5; default: 1)')
+    parser.add_argument('--purge-generated', action='store_true',
+                       help='Remove only the repository-generated demo listings before collecting live data')
+    parser.add_argument('--allow-zero-overlap', action='store_true',
+                       help='Permit a zero-overlap API run after an investigated source change')
     
     args = parser.parse_args()
     
@@ -192,11 +205,10 @@ def main():
     
     logger.info("Starting OLX Car Scraper application")
     
-    # Setup database if requested or if it's the first run
-    if args.setup_db or not os.path.exists('olx_scraper.log'):
-        if not setup_database():
-            logger.error("Database setup failed, exiting")
-            sys.exit(1)
+    # Ensure the listing and snapshot tables are available before every collection.
+    if not setup_database():
+        logger.error("Database setup failed, exiting")
+        sys.exit(1)
     
     # Clean up old data
     cleanup_old_data(args.cleanup)
@@ -204,10 +216,14 @@ def main():
     # Show statistics if requested
     if args.stats:
         get_stats()
+
+    if args.purge_generated:
+        removed = db_manager.purge_generated_data()
+        logger.info('Removed %s generated listings', removed)
     
     # Run scraper unless explicitly disabled
     if not args.no_scrape:
-        success = run_spider()
+        success = run_spider(args.pages, args.allow_zero_overlap)
         if not success:
             logger.error("Scraping failed")
             sys.exit(1)

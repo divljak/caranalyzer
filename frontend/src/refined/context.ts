@@ -1,0 +1,20 @@
+import { createContext, useContext } from "react";
+import type { UseQueryResult } from "@tanstack/react-query";
+import type { Filters, Overview, Segment } from "../pages/dealerShared";
+type WorkspaceState = {
+  marketFilters: Filters;
+  setMarketFilters: (f: Filters) => void;
+  analysisFilters: Filters;
+  setAnalysisFilters: (f: Filters) => void;
+  compareFilters: Filters;
+  setCompareFilters: (f: Filters) => void;
+  selected: Segment[];
+  toggle: (s: Segment) => void;
+  add: (s: Segment) => boolean;
+  overview: UseQueryResult<Overview, Error>;
+  notice: (s: string) => void;
+  href: (s: string) => string;
+  analyzeHref: (s: Segment, f?: Filters) => string;
+};
+export const Context = createContext<WorkspaceState>(null!);
+export const useWorkspace = () => useContext(Context);
