@@ -328,6 +328,8 @@ def verify_restore(path):
         cleanup = subprocess.run(['docker','rm','-f',container],capture_output=True,timeout=30)
         if cleanup.returncode:
             raise RuntimeError('Scratch cleanup failed; inspect isolated container')
+    result['manifest_sha256'] = hashlib.sha256((path/'manifest.json').read_bytes()).hexdigest()
+    json_write(path/'restore-verified.json',result)
     json_write(path.parent/'latest-restore.json',result)
     return result
 

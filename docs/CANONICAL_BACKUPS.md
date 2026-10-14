@@ -159,14 +159,67 @@ additional schemas/storage must extend this contract before claiming coverage.
 
 ## Off-VPS copies and operational handoff
 
-A verified full bundle is stored privately on the user's existing Mac under this
-worktree's `.private/canonical-backups/`, and restored there with matching checks.
-This is independent of both Supabase and the VPS. It is a **one-time copy**:
-recurring automatic off-VPS copying is **not configured**. The existing VPS
-`vault-sync` pushes an unrelated notes repository; it was not used for raw private
-saved-search data. No authorized recurring independent backup destination/account
-was configured, and no new third-party account or billing choice was introduced.
-VPS backups remain exposed to total VPS loss; the Mac copy will become stale.
+The existing Mac now receives recurring private copies through a user LaunchAgent,
+`com.caranalyzer.backup-copy`, every hour at minute **45**, plus login/load catch-up.
+The destination is `~/Library/Application Support/CarAnalyzerBackups/archives`,
+outside repository worktrees. No new account, paid service or public backup object
+is used. The original one-time copies and rollback image archives remain retained.
+
+The job uses its own private SSH key restricted by the existing VPS's
+`authorized_keys` forced command. The server helper offers only a fixed backup
+inventory and named archive fetch; arbitrary commands/paths, symlinks, PTYs,
+forwarding and credential-file access are denied. Scheduled access cannot execute
+administrator commands despite authenticating through the existing root account.
+The copy endpoint opens only the fixed eight recovery files. It never opens the
+collector/database credential files, queries Supabase or visits OLX.
+
+Successful isolated restores now write a per-bundle `restore-verified.json`, bound
+to the archive manifest SHA256 and table counts, only after scratch cleanup. The
+copier offers only bundles with a matching successful restore proof, selects the
+newest per UTC day, and fetches the newest first before catching up up to seven
+missing daily copies per invocation. The job verifies all six payload file hashes
+and every table's full-row content checksum, including private filters/baselines,
+before atomically publishing a copy. An interrupted, malformed or altered transfer
+is discarded; previous complete copies remain intact. Daily sync needs only SSH
+and the bundled standard-library Python script, without Codex or Docker running.
+
+Mac retention is **90 days**, minimum **14 verified copies**, a **512 MiB archive
+cap**, and a **5 GiB free-space floor** with 96 MiB staging reserve. Only completed
+owned copies with matching manifests/receipts are candidates for expiry. Unexpired
+copies and existing rollback backups are never deleted to make room; the job fails
+safely at the cap/floor. The two safe job logs are bounded to about 1 MiB each.
+Directories are 700, key/data/status/plist files 600. The Mac's FileVault encryption
+is enabled. No raw saved-search values, passwords or SSH key material enter logs.
+
+Private local markers are `status.json` (latest attempt/failure, with the previous
+last success retained), `latest-copy.json` (last verified sync), per-bundle
+`copy-verified.json`, and `installation.json` under the destination's parent.
+Main can read these locally without contacting a source or restarting a heartbeat.
+Compare both last sync time and copied source-archive time; an old source archive
+is not made current merely by a recent transfer. The main checker continues to
+read canonical JSON snapshots; this independent copy status does not overwrite it.
+
+The hourly calendar event catches up after sleep, but the Mac must be powered on,
+logged into this user session and online. Offline attempts record failure and retry
+at the next hourly event; the job does not wake the Mac or change power settings.
+Logged-out/shut-down periods defer work until login. Thus off-VPS recovery-point
+lag is approximately up to an hour while available and **unbounded while the Mac
+is unavailable**. Offline periods longer than VPS retention can lose older
+point-in-time versions, even though the newest full archive still carries current
+application history. No confirmed always-on off-VPS facility was found. The
+existing same-VPS MinIO and unrelated notes Git sync are not independent backup
+storage; no new external destination was silently chosen.
+
+`deploy/install-off-vps-backup.py` installs this single user job, the restricted
+key, copier and stable `recovery-tools` (full restore script, checksum helper,
+labels dependency, pinned private venv and this recovery guide). None depends on
+retaining the development worktree. Disable only this job with
+`launchctl bootout gui/$(id -u)/com.caranalyzer.backup-copy`; preserve the destination
+and revoke only its marked restricted SSH key when intentionally retiring copying.
+Custom-role passwords, platform configuration and the exclusions documented above
+remain separate recovery requirements. Copied schema/grants/policies include the
+applied collector-priority SELECT repair when the archive was made after that
+migration; older archives require it to be reapplied before priority verification.
 
 Installation is reproducible with `deploy/install-canonical-backup.sh SOURCE_DIR`
 after applying the sequence SELECT grant. It refuses an active collector, uses
@@ -234,3 +287,67 @@ The unchanged health checker reported `disk_pressure` **recovered** at
 **19:02:40.514311 UTC**, available bytes **2,973,618,176**. Its stale-clean,
 partial-collection and detail-failure warnings remain honest and unchanged.
 No broad Docker prune, backup deletion, storage account or paid upgrade was used.
+
+## Recurring off-VPS completion — 14 October 2026
+
+Installed user job: **`com.caranalyzer.backup-copy`**, plist
+`/Users/ognjendivljak/Library/LaunchAgents/com.caranalyzer.backup-copy.plist`.
+It runs hourly at minute 45 and at login/load. Its interpreter is the existing
+Homebrew Python 3.13; its script, restricted SSH key, archives, recovery tools,
+private logs and status are under
+`/Users/ognjendivljak/Library/Application Support/CarAnalyzerBackups`.
+The job works independently of Codex and development worktree availability.
+A successful LaunchAgent execution copied the first archive at **16:06:28 UTC**;
+a repeat installation/load at **16:10:00 UTC** reverified the same copy and fetched
+zero duplicate archives. Calendar registration was confirmed; no claim is made
+that the next hourly wall-clock event has already occurred.
+
+Fresh manual backup `canonical-20261014T160441957720-manual` was created at
+**16:04:41.957720 UTC**, after applied migration **20261014155031** from PR #10.
+It restored on VPS at **16:05:21.212928 UTC**, then the Mac copy restored independently
+at **16:08:08.900257 UTC** using the stable bundled recovery tools and private venv.
+The Mac restore used a temporary clone so the published downloaded artifacts stayed
+immutable; the clone and network-disabled scratch container were removed afterward.
+`latest-local-restore.json` records this independent proof against the copied bundle.
+
+The manifest SHA256 is
+`c415e88dec5cb598bef656d6b43c9dede2d836cda2597da58ec08d0e25ecf2e4`.
+All **30,932 rows across 12 tables**, file hashes, full-row content checksums,
+schema/access definitions and sequence states matched. The copied catalog explicitly
+contains all three `collector_priority_read` SELECT policies and collector SELECT
+grants for listing details, candidates and Following searches. Thus this recovery
+point includes the actual priority-access repair, rather than depending on an older
+permission image. The business table counts/checksums match the earlier 14 October
+scheduled post-run archive exactly: this work changed no evidence, private state,
+source budget, pause, sequence, real collector marker or clean anchor.
+
+Copied evidence includes **6,674 listings, 16,618 observations, 151 checks**, 6,468
+labels, 763 tracked states, 132 scraping logs, 16 collection runs, 108 listing details,
+one budget and one source pause; Following and candidates are currently empty.
+First copy storage measured **2,625,266 bytes**; available Mac space measured about
+**27 GiB**, above the unchanged 5 GiB floor. The existing local database and old
+rollback backups/image archives were retained. The active source release remains
+`priority-b6e94ff`, service remains honestly failed/exit-1 from its partial real run,
+and the existing next collection remains **15 October, 07:17 UTC / 09:17 Sarajevo**.
+No extra source run, fake verification observation, heartbeat restart or external
+message was performed.
+
+Eight focused copier tests passed: shell/credential/traversal denial, wrong/failed
+restore-proof exclusion, malicious tar-member/link rejection, private-baseline
+checksum preservation/tampering refusal, expired-only retention, cap/floor refusal
+and network-failure preservation. Five original canonical-backup tests passed.
+Actual restricted-key inventory succeeded; shell and credential-path commands were
+rejected with empty data output. Mode 700 directories and mode 600 key/status/data
+files, registered calendar and successful launchd exit were checked.
+
+For independent verification, read local `status.json`, `latest-copy.json`,
+`latest-local-restore.json` and `installation.json`; check the copied manifest SHA
+above and the per-bundle copy/restore receipts. The root-side endpoint is
+`/opt/car-analyzer/.daily-delivery/backup-tools/off_vps_backup.py` and is reachable
+only through the marked forced-command SSH key. Global VPS/admin keys remain intact.
+Old full exports lacking per-bundle restoration proof are deliberately not offered
+by this endpoint; older one-time Mac copies remain retained in their existing places.
+
+The prior recurring-copy gap is closed for this existing Mac facility. An always-on
+off-VPS facility is still unconfirmed: sleep/offline/logged-out recovery-point lag
+and separate Supabase platform settings/custom-role-password requirements remain.
