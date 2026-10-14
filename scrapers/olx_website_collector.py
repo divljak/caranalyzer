@@ -1,9 +1,11 @@
 """Read rendered website pages only. No direct OLX API calls or automatic retries."""
 from datetime import datetime
 import json
+import logging
 import os
 import re
 import shutil
+import time
 from urllib.parse import parse_qs, urlencode, urlsplit
 from zoneinfo import ZoneInfo
 
@@ -30,12 +32,12 @@ for (const h of document.querySelectorAll('h4')) {
   const next = h.nextElementSibling;
   if (next && next.tagName === 'H4') attributes[clean(h)] = clean(next);
 }
-const cards = Array.from(document.querySelectorAll('a[href*="/artikal/"]'))
+const cards = arguments[0] === 'search' ? Array.from(document.querySelectorAll('a[href*="/artikal/"]'))
   .filter(a => visible(a) && a.querySelector('h1.main-heading'))
   .map(a => ({url:a.getAttribute('href'), title:clean(a.querySelector('h1.main-heading')),
     price:clean(a.querySelector('.price-wrap .smaller:not(.discount)')),
     tags:Array.from(a.querySelectorAll('.standard-tag')).map(clean),
-    dealer:/PIK SHOP/.test(a.innerText)}));
+    dealer:/PIK SHOP/.test(a.innerText)})) : [];
 const pageItems = Array.from(document.querySelectorAll('li')).filter(e => visible(e) && /^\d+$/.test(clean(e)));
 const activePage = pageItems.find(e => e.classList.contains('active'));
 const resultHeading = document.querySelector('h1.search-title');
@@ -48,12 +50,21 @@ return {url:location.href, title:document.title, blocked, headings, attributes, 
   main_title:clean(mainTitle), prices, on_request:onRequest};
 """
 
+# Async WebDriver execution makes the configured script timeout apply to DOM
+# extraction. The callback returns selected fields only; it makes no requests.
+EXTRACT_ASYNC_SCRIPT = "const done = arguments[arguments.length - 1]; done((function () {" + EXTRACT_SCRIPT + "}).call(null, arguments[0]));"
+
 
 class WebsiteReadError(RuntimeError):
     pass
 
 
 class WebsiteBlocked(WebsiteReadError):
+    pass
+
+
+class WebsiteDOMTimeout(WebsiteReadError):
+    """The reserved visit never produced a verified rendered page."""
     pass
 
 
@@ -172,15 +183,23 @@ SOLD_MESSAGES = {'oglas je prodan', 'ovaj oglas je prodan'}
 
 def parse_detail(page, expected_id):
     base = {'evidence': {'parser': PARSER_VERSION}}
+    if 'browser' in page:
+        base['evidence']['browser'] = page['browser']
     if page.get('blocked'):
         return {**base, 'outcome': 'blocked'}
     try:
+        parsed = urlsplit(page.get('url', ''))
+        if parsed.scheme != 'https' or parsed.netloc != 'olx.ba':
+            raise WebsiteReadError('Unexpected direct page origin')
         if listing_id(page.get('url', '')) != str(expected_id):
             raise WebsiteReadError('Direct page changed identity')
     except WebsiteReadError:
         return {**base, 'outcome': 'check_failed', 'evidence': {**base['evidence'], 'reason': 'identity_or_redirect'}}
     # H1 is deliberately excluded: a seller's title containing "sold" is not a site status.
     headings = {h.casefold().strip(' .!') for h in page.get('headings', []) if h != page.get('main_title')}
+    if sum(bool(headings & messages) for messages in
+           (UNAVAILABLE_MESSAGES, ENDED_MESSAGES, SOLD_MESSAGES)) > 1 and not page.get('main_title'):
+        return {**base, 'outcome': 'check_failed', 'evidence': {**base['evidence'], 'reason': 'conflicting_status'}}
     for messages, outcome in [(UNAVAILABLE_MESSAGES, 'unavailable'), (ENDED_MESSAGES, 'source_reported_ended'),
                               (SOLD_MESSAGES, 'source_reported_sold')]:
         matching = headings & messages
@@ -222,10 +241,14 @@ def parse_detail(page, expected_id):
     if not data['make'] or not data['model']:
         return {**base, 'outcome': 'check_failed', 'evidence': {**base['evidence'], 'reason': 'vehicle_labels_missing'}}
     return {'outcome': 'listed', 'listing': data, 'renewed_at': renewed_at,
-            'evidence': {'parser': PARSER_VERSION, 'attributes': attrs}}
+            'evidence': {**base['evidence'], 'attributes': attrs}}
 
 
 class WebsiteBrowser:
+    DOM_TIMEOUT = 20
+    SCRIPT_TIMEOUT = 5
+    MAX_SCRIPT_RETRIES = 2
+
     def __enter__(self):
         driver_path = os.getenv('CHROMEDRIVER_PATH') or shutil.which('chromedriver')
         if not driver_path:
@@ -242,23 +265,77 @@ class WebsiteBrowser:
         options.set_capability('goog:loggingPrefs', {'performance': 'ALL'})
         if os.getenv('CHROME_BIN'):
             options.binary_location = os.environ['CHROME_BIN']
-        self.driver = webdriver.Chrome(service=Service(driver_path), options=options)
-        self.driver.set_page_load_timeout(30)
+        self.service = Service(driver_path)
+        self.driver = None
+        try:
+            self.driver = webdriver.Chrome(service=self.service, options=options)
+            self.driver.set_page_load_timeout(30)
+            self.driver.set_script_timeout(self.SCRIPT_TIMEOUT)
+        except Exception:
+            self.close()
+            raise
         return self
 
     def __exit__(self, *args):
-        self.driver.quit()
+        self.close()
+
+    def close(self):
+        # Cleanup must also run when setup or quit fails. It must not hide the
+        # refusal/timeout that the collector needs to record for this visit.
+        driver, self.driver = getattr(self, 'driver', None), None
+        try:
+            if driver is not None:
+                driver.quit()
+        except Exception as exc:
+            logging.getLogger(__name__).warning('Browser quit failed: %s', type(exc).__name__)
+        finally:
+            service = getattr(self, 'service', None)
+            if service is not None:
+                try:
+                    service.stop()
+                except Exception as exc:
+                    logging.getLogger(__name__).warning('Browser service cleanup failed: %s', type(exc).__name__)
 
     def read(self, url, kind):
+        if kind not in {'search', 'detail'}:
+            raise ValueError('Unknown website page kind')
+        expected_id = listing_id(url) if kind == 'detail' else None
+        started = time.monotonic()
+        navigation_timeout, script_retries = False, 0
+        previous_status = None
         self.driver.get_log('performance')  # Discard stale navigation diagnostics.
         def ready(driver):
+            nonlocal script_retries, previous_status
             self.check_responses()
-            page = driver.execute_script(EXTRACT_SCRIPT)
-            usable = page['blocked'] or (page['result_heading'] if kind == 'search' else
-                            page['attributes'].get('ID') or any(
-                                h.casefold().strip(' .!') in UNAVAILABLE_MESSAGES | ENDED_MESSAGES | SOLD_MESSAGES
-                                for h in page['headings']))
-            return page if usable else False
+            try:
+                page = driver.execute_async_script(EXTRACT_ASYNC_SCRIPT, kind)
+            except TimeoutException:
+                self.check_responses()
+                previous_status = None
+                script_retries += 1
+                if script_retries > self.MAX_SCRIPT_RETRIES:
+                    raise WebsiteDOMTimeout('Renderer did not respond within the DOM retry limit') from None
+                return False
+            if page['blocked']:
+                raise WebsiteBlocked('Website access was refused')
+            if kind == 'search':
+                return page if page['result_heading'] else False
+            result = parse_detail(page, expected_id)
+            # ID can render before title, labels and current price. Wait for the
+            # parser's full contract rather than accepting an incomplete shell.
+            if result['outcome'] == 'listed':
+                previous_status = None
+                return page
+            if result['outcome'] == 'check_failed':
+                previous_status = None
+                return False
+            # Negative templates need two consistent DOM reads, so a transient
+            # heading during hydration cannot immediately change availability.
+            status = (result['outcome'], result['evidence']['message'])
+            if status == previous_status:
+                return page
+            previous_status = status
+            return False
         try:
             try:
                 self.driver.get(url)
@@ -266,8 +343,12 @@ class WebsiteBrowser:
                 # A navigation timeout can leave a usable DOM. Do not visit again:
                 # readiness, HTTP refusal and identity/parser checks still apply.
                 self.check_responses()
+                navigation_timeout = True
             self.check_responses()
-            page = WebDriverWait(self.driver, 20).until(ready)
+            try:
+                page = WebDriverWait(self.driver, self.DOM_TIMEOUT).until(ready)
+            except TimeoutException:
+                raise WebsiteDOMTimeout('Reserved visit did not produce a verified DOM') from None
         except WebsiteBlocked:
             raise
         except Exception:
@@ -276,9 +357,12 @@ class WebsiteBrowser:
         self.check_responses()
         if page['blocked']:
             raise WebsiteBlocked('Website access was refused')
+        page['browser'] = {'navigation_timeout': navigation_timeout, 'script_retries': script_retries,
+                           'elapsed_ms': round((time.monotonic() - started) * 1000)}
         return page
 
     def check_responses(self):
+        server_error = False
         for event in self.driver.get_log('performance'):
             message = json.loads(event['message'])['message']
             if message['method'] != 'Network.responseReceived':
@@ -289,4 +373,8 @@ class WebsiteBrowser:
             if response['status'] in {403, 429}:
                 raise WebsiteBlocked('Website access was refused')
             if message['params'].get('type') == 'Document' and response['status'] >= 500:
-                raise WebsiteReadError('Website returned a server error')
+                server_error = True
+        # Inspect the entire batch before reporting an error, so a later refusal
+        # still triggers the persistent source pause rather than an ordinary failure.
+        if server_error:
+            raise WebsiteReadError('Website returned a server error')
