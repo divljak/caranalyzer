@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from sqlalchemy import Column, Date, DateTime, ForeignKey, Integer, String, Text, func, text
 from sqlalchemy.orm import sessionmaker
 
-from database.models import Base, CarListing
+from database.models import Base, CarListing, ListingSnapshot
 
 
 class WebsiteBudget(Base):
@@ -164,6 +164,31 @@ class WebsiteStore:
             return set()
         with self.sessions() as session:
             return {row[0] for row in session.query(CarListing.listing_id).filter(CarListing.listing_id.in_(ids))}
+
+    def discovery_baseline(self, query, before):
+        """Read the last validated same-scope discovery, including partial detail runs.
+
+        Reconstruct from immutable observations, so pre-instrumentation runs are
+        usable too. The interval attribution relies on the collector's exclusive
+        advisory lock; current/manual/failed discovery rows are never baselines.
+        """
+        with self.sessions() as session:
+            run = session.query(WebsiteRun).filter(
+                WebsiteRun.source_query == query, WebsiteRun.discovery_complete == 1,
+                WebsiteRun.finished_at.isnot(None), WebsiteRun.finished_at <= before,
+                WebsiteRun.status.in_(['completed', 'partial'])).order_by(
+                    WebsiteRun.started_at.desc(), WebsiteRun.id.desc()).first()
+            if run is None:
+                return None
+            rows = session.query(ListingSnapshot.listing_id).filter(
+                ListingSnapshot.source_query == query, ListingSnapshot.source_page.isnot(None),
+                ListingSnapshot.observed_at >= run.started_at,
+                ListingSnapshot.observed_at <= run.finished_at).distinct().limit(1001).all()
+            # Refuse an unbounded or empty historical extract as a useful overlap baseline.
+            if not rows or len(rows) > 1000:
+                return None
+            return {'run_id': run.id, 'finished_at': run.finished_at,
+                    'ids': sorted(row[0] for row in rows)}
 
     def coverage(self, now):
         with self.sessions() as session:
