@@ -65,7 +65,7 @@ positive asking price below 1,000 KM. Older evidence includes eight suspect mile
 values and uncertain model labels. These need provenance review, not invented
 replacement values or deletion of history.
 
-## Correctness fixes prepared after the catch-up run
+## Correctness fixes installed after the catch-up run
 
 Offline reproduction found two latent defects; neither explains today's DOM
 timeouts or contradicts today's reconciled counts:
@@ -103,6 +103,17 @@ Final relevant coverage comprises 81 passing tests, including both real Chromium
 fixtures; the separate PostgreSQL advisory-lock test was skipped because no
 disposable integration database was supplied. Sixty focused local cases also
 passed. Test runs made no OLX requests and inserted no canonical evidence.
+
+Installed source is `f7c9d20a043210db2731e229d3a987534a95df87`, immutable release
+`.daily-delivery/releases/ingestion-f7c9d20`. The existing installer held the
+pipeline lock and passed no-source verification at 11:15:41 UTC: zero source
+visits, zero inserted listing evidence and all twelve before/after table
+checksums equal. Its 22-file manifest is
+`.daily-delivery/ingestion-validation-installation.json`; the independent
+scheduler capture verified every hash and the original backup installation.
+The prior release is retained. The ordinary timer is enabled/active for
+25 October 07:17 UTC, and the real run marker still correctly records today's
+partial result. Source publication is [PR #12](https://github.com/divljak/caranalyzer/pull/12).
 
 ## What still needs real evidence
 
