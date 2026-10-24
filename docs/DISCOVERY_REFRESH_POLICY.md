@@ -147,3 +147,38 @@ legacy partial run: 73 new IDs / 3 search visits = 24.33 new IDs per search visi
 1 completed detail check / 3 attempts = 0.3333. These are the existing run's
 results, not outcomes attributable to the new policy. New overlap/refresh
 measurements start with the next real daily run.
+
+## Installed release — 24 October, 16:45 UTC
+
+Runtime source is `80d50ca68dc5d8bf639f42719f37ba466b3a214e`, installed as
+`.daily-delivery/releases/discovery-80d50ca`. The complete parent release
+`ingestion-f7c9d20` was retained and only the five runtime files were overlaid.
+The 24-file combined manifest is
+`.daily-delivery/discovery-refresh-installation.json`. For scheduler capture,
+pass that exact path with `--runtime-manifest`; older manifest defaults do not
+describe this release.
+
+The existing installer acquired its normal pipeline lock and ran no-source
+verification successfully. All twelve before/after table checksums matched;
+there were zero source visits and zero fabricated listing observations. The real
+partial-run marker, pinned image and canonical-backup override were preserved
+byte for byte. Counts remain 6,747 listings, 16,696 observations and 154 checks;
+Following/candidates, all 108 enrichment records and the source pause are intact.
+
+Final packaged validation ran **97 tests: 96 passed, one optional PostgreSQL
+advisory-lock integration test skipped**. Both real Chromium loopback tests
+passed with external networking disabled. Fifteen new regression cases and the
+existing priority cases also passed locally. Actual collector-role and
+backup-role read-only preflights passed; their reports contain zero source visits.
+
+The original timer stays enabled/active for **25 October, 07:17 UTC / 08:17
+Sarajevo**. Its prior failed service result correctly remains today's partial
+collection; installation did not turn it into a clean source run. The retired
+legacy app was not recreated, and no database/container/image pruning occurred.
+
+Private evidence is under `.private/discovery-refresh-20261024/` in this
+worktree and `.daily-delivery/discovery-refresh-20261024/` on the VPS. It includes
+the read-only pre/postflight, seven-day baseline, packaged test logs, installation
+verification and explicit scheduler/manifest capture. Measurements accumulate
+from the next real run; publication/installation does not backfill historical
+coverage or establish that today's DOM timeouts are resolved.
