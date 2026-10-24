@@ -5,7 +5,7 @@ from unittest.mock import Mock, patch
 from selenium.common.exceptions import TimeoutException, WebDriverException
 from scrapers.olx_website_collector import (
     WebsiteBlocked, WebsiteBrowser, WebsiteDOMTimeout, WebsiteReadError, parse_detail)
-from tests.test_website_sync import detail_page, absent_page
+from tests.test_website_sync import detail_page, absent_page, search_page
 
 
 def response(status, url='https://olx.ba/artikal/79589391', kind='Document'):
@@ -40,6 +40,24 @@ class NavigationTests(unittest.TestCase):
         self.assertEqual(2, browser.driver.execute_async_script.call_count)
         browser.driver.get.assert_called_once()
 
+    def test_search_waits_for_pagination_on_the_same_reserved_visit(self):
+        partial = search_page()
+        partial.update(current_page=None, last_page=None)
+        browser = self.browser([partial, search_page()])
+        page = browser.read(partial['url'], 'search')
+        self.assertEqual(16, page['last_page'])
+        self.assertEqual(2, browser.driver.execute_async_script.call_count)
+        browser.driver.get.assert_called_once_with(partial['url'])
+
+    def test_search_heading_without_loaded_cards_is_not_ready(self):
+        partial = search_page()
+        partial['cards'] = []
+        browser = self.browser([partial])
+        browser.DOM_TIMEOUT = 0
+        with self.assertRaises(WebsiteDOMTimeout):
+            browser.read(partial['url'], 'search')
+        browser.driver.get.assert_called_once()
+
     def test_transient_script_timeouts_poll_existing_dom_only(self):
         browser = self.browser([TimeoutException(), TimeoutException(), detail_page()])
         result = browser.read(detail_page()['url'], 'detail')
@@ -66,8 +84,13 @@ class NavigationTests(unittest.TestCase):
         partial['prices'] = []
         browser = self.browser([partial])
         browser.DOM_TIMEOUT = 0
-        with self.assertRaises(WebsiteDOMTimeout):
+        with self.assertRaises(WebsiteDOMTimeout) as caught:
             browser.read(partial['url'], 'detail')
+        diagnostic = caught.exception.diagnostics
+        self.assertEqual('price_not_verified', diagnostic['parser_reason'])
+        self.assertTrue(diagnostic['last_dom']['expected_id_matched'])
+        self.assertEqual(0, diagnostic['last_dom']['price_values'])
+        self.assertNotIn('attributes', diagnostic['last_dom'])
 
     def test_negative_template_needs_two_consistent_reads(self):
         browser = self.browser([absent_page(), absent_page()])
@@ -215,6 +238,7 @@ class BrowserBudgetTests(unittest.TestCase):
             checks = session.query(WebsiteListingCheck).filter_by(outcome='check_failed').all()
             self.assertEqual(2, len(checks))
             self.assertTrue(all(json.loads(c.evidence)['reason'] == 'WebsiteDOMTimeout' for c in checks))
+            self.assertTrue(all(json.loads(c.evidence)['browser']['stage'] == 'detail' for c in checks))
             self.assertEqual(3, session.query(ListingSnapshot).count())
             self.assertEqual(0, session.query(CarListing).filter_by(is_active=False).count())
             self.assertEqual(0, session.query(ScrapingLog).filter_by(status='completed').count())

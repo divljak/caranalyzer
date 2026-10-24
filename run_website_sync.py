@@ -12,7 +12,7 @@ import uuid
 from database.db_manager import db_manager
 from database.models import create_tables
 from database.website_tracking import BudgetExhausted, SourcePaused, WebsiteStore, create_website_tables
-from scrapers.olx_website_collector import WebsiteBlocked, WebsiteBrowser, WebsiteReadError, parse_detail, parse_search, search_url
+from scrapers.olx_website_collector import WebsiteBlocked, WebsiteBrowser, WebsiteDOMTimeout, WebsiteReadError, parse_detail, parse_search, search_url
 
 
 def utcnow():
@@ -32,6 +32,7 @@ def sync(db, store, browser, *, search_pages=3, detail_checks=20, delay=15, bran
     log_id = db.add_scraping_log(session_id=session_id, start_time=started, status='running',
                                 source_query=query, pages_requested=search_pages, source_per_page=None)
     seen, fingerprints, consecutive_errors = set(), set(), 0
+    validated_pages, terminal_page = 0, False
 
     def visit(url, kind):
         wait = store.reserve(kind, now(), search_pages, detail_checks, delay)
@@ -60,13 +61,23 @@ def sync(db, store, browser, *, search_pages=3, detail_checks=20, delay=15, bran
                 if item['listing_id'] in seen:
                     continue
                 added = db.upsert_verified_listing(item, observed_at=observed_at)
-                store.note_listed(item['listing_id'], observed_at)
+                # The upsert has committed its immutable observation already.
+                # A later state-write failure must not erase it from run totals.
                 report['new_listings'] += bool(added)
                 report['observations'] += 1
                 seen.add(item['listing_id'])
-            if page['last_page'] == page_number or page['source_total'] == 0 or page['last_page'] is None:
+                store.note_listed(item['listing_id'], observed_at)
+            validated_pages += 1
+            terminal_page = page['source_total'] == 0 or (
+                page['last_page'] == page_number and len(seen) >= page['source_total'])
+            if terminal_page:
                 break
-        report['discovery_complete'] = int(remaining_search == search_pages and search_pages > 0 and report['rejected'] == 0)
+            if page['last_page'] == page_number and page_number < remaining_search:
+                raise WebsiteReadError('Search terminal page conflicts with its result count')
+        report['discovery_complete'] = int(
+            remaining_search == search_pages and search_pages > 0 and report['rejected'] == 0
+            and validated_pages == report['search_attempted']
+            and (validated_pages == search_pages or terminal_page))
         # Search absence is deliberately unused. Only direct, successful checks affect status.
         for lid in store.candidates(now(), remaining_details):
             checked_at = now()
@@ -95,12 +106,15 @@ def sync(db, store, browser, *, search_pages=3, detail_checks=20, delay=15, bran
             except Exception as exc:
                 report['errors'] += 1
                 consecutive_errors += 1
+                evidence = {'reason': type(exc).__name__}
+                if isinstance(exc, WebsiteDOMTimeout) and getattr(exc, 'diagnostics', None):
+                    evidence['browser'] = exc.diagnostics
                 store.record_check(run_id, lid, now(), {'outcome': 'check_failed',
-                                   'evidence': {'reason': type(exc).__name__}})
+                                   'evidence': evidence})
             if consecutive_errors >= 2:
                 raise WebsiteReadError('Two consecutive detail failures; stopping without retries')
         report['status'] = ('partial' if report['errors'] or report['rejected'] else
-                            'completed' if report['observations'] or report['details_completed'] else 'budget_exhausted')
+                            'completed' if report['discovery_complete'] or report['observations'] or report['details_completed'] else 'budget_exhausted')
     except WebsiteBlocked:
         store.pause(now())
         report.update(status='paused', stopped_reason='source_refusal', errors=report['errors'] + 1)
