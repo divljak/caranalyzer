@@ -128,6 +128,28 @@ def listing_id(url):
     return match.group(1)
 
 
+def verified_search_last_page(page, requested_page, total, card_count):
+    """Missing controls prove one page only when every advertised result is present."""
+    if total is None or (total > 0 and not card_count) or (total == 0 and card_count):
+        raise WebsiteReadError('Search result cards are not ready')
+    current, last = page.get('current_page'), page.get('last_page')
+    if type(current) is int and type(last) is int and current == requested_page and last >= current:
+        return last
+    if requested_page == 1 and last is None and current in (None, 1) and card_count == total:
+        return 1
+    raise WebsiteReadError('Search pagination is not verified')
+
+
+def search_card_ids(cards):
+    ids = set()
+    for card in cards:
+        try:
+            ids.add(listing_id(card.get('url', '')))
+        except WebsiteReadError:
+            continue
+    return ids
+
+
 def parse_search(page, requested_page, query):
     if page.get('blocked'):
         raise WebsiteBlocked('Website access was refused')
@@ -169,9 +191,9 @@ def parse_search(page, requested_page, query):
             seen.add(lid)
         except (KeyError, ValueError, WebsiteReadError):
             rejected += 1
-    if total and not listings:
-        raise WebsiteReadError('Search has results but no cards could be parsed')
-    return {'listings': listings, 'source_total': total, 'last_page': page.get('last_page'),
+    last_page = verified_search_last_page(page, requested_page, total,
+                                          len(search_card_ids(page.get('cards', []))))
+    return {'listings': listings, 'source_total': total, 'last_page': last_page,
             'raw_cards': len(page.get('cards', [])), 'rejected': rejected, 'duplicates': duplicates}
 
 
@@ -303,9 +325,10 @@ class WebsiteBrowser:
         started = time.monotonic()
         navigation_timeout, script_retries = False, 0
         previous_status = None
+        last_dom, parser_reason = {}, None
         self.driver.get_log('performance')  # Discard stale navigation diagnostics.
         def ready(driver):
-            nonlocal script_retries, previous_status
+            nonlocal script_retries, previous_status, last_dom, parser_reason
             self.check_responses()
             try:
                 page = driver.execute_async_script(EXTRACT_ASYNC_SCRIPT, kind)
@@ -318,9 +341,27 @@ class WebsiteBrowser:
                 return False
             if page['blocked']:
                 raise WebsiteBlocked('Website access was refused')
+            # Diagnostic flags only: no seller text, contact data or full DOM.
+            last_dom = {'cards': len(page.get('cards', [])),
+                        'pagination_present': page.get('current_page') is not None and page.get('last_page') is not None,
+                        'title_present': bool(page.get('main_title')),
+                        'expected_id_matched': page.get('attributes', {}).get('ID') == expected_id if expected_id else None,
+                        'price_values': len(page.get('prices', [])),
+                        'on_request': bool(page.get('on_request'))}
             if kind == 'search':
-                return page if page['result_heading'] else False
+                heading = re.fullmatch(r'([\d.\s]+)\s+rezultata', page.get('result_heading', ''), re.I)
+                if not heading:
+                    return False
+                requested = int(parse_qs(urlsplit(url).query).get('page', ['1'])[0])
+                try:
+                    verified_search_last_page(page, requested, numeric(heading.group(1)),
+                                              len(search_card_ids(page.get('cards', []))))
+                except WebsiteReadError:
+                    parser_reason = 'search_cards_or_pagination_not_verified'
+                    return False
+                return page
             result = parse_detail(page, expected_id)
+            parser_reason = result.get('evidence', {}).get('reason')
             # ID can render before title, labels and current price. Wait for the
             # parser's full contract rather than accepting an incomplete shell.
             if result['outcome'] == 'listed':
@@ -350,6 +391,13 @@ class WebsiteBrowser:
             except TimeoutException:
                 raise WebsiteDOMTimeout('Reserved visit did not produce a verified DOM') from None
         except WebsiteBlocked:
+            raise
+        except WebsiteDOMTimeout as exc:
+            exc.diagnostics = {'stage': kind, 'navigation_timeout': navigation_timeout,
+                               'script_retries': script_retries,
+                               'elapsed_ms': round((time.monotonic() - started) * 1000),
+                               'last_dom': last_dom, 'parser_reason': parser_reason}
+            self.check_responses()
             raise
         except Exception:
             self.check_responses()  # A refusal may have caused the navigation/DOM timeout.

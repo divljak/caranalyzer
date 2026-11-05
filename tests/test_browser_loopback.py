@@ -6,7 +6,7 @@ from threading import Thread
 import time
 import unittest
 from selenium.common.exceptions import TimeoutException
-from scrapers.olx_website_collector import EXTRACT_ASYNC_SCRIPT, WebsiteBrowser, parse_detail
+from scrapers.olx_website_collector import EXTRACT_ASYNC_SCRIPT, WebsiteBrowser, WebsiteDOMTimeout, parse_detail
 
 
 @unittest.skipUnless(os.getenv('DETAIL_BROWSER_LOOPBACK') == '1', 'Requires packaged Chromium; loopback only')
@@ -22,7 +22,8 @@ class LoopbackBrowserTests(unittest.TestCase):
             def do_GET(self):
                 requests.append(self.path)
                 body = b'''<!doctype html><title>Local browser fixture</title>
-                    <h1 class="search-title">39 REZULTATA</h1>
+                    <h1 class="search-title">1 REZULTATA</h1>
+                    <a style="display:block" href="/artikal/123"><h1 class="main-heading">Fixture vehicle</h1></a>
                     <h1 class="main-title-listing">Fixture vehicle</h1>
                     <div><h4>ID</h4><h4>123</h4></div>
                     <div><h4>Proizvo\xc4\x91a\xc4\x8d</h4><h4>Fixture</h4></div>
@@ -33,7 +34,7 @@ class LoopbackBrowserTests(unittest.TestCase):
                 self.send_header('Content-Type', 'application/javascript' if self.path == '/slow.js' else 'text/html; charset=utf-8')
                 self.end_headers()
                 if self.path == '/slow.js':
-                    time.sleep(1)
+                    time.sleep(3)
                     body = b'/* delayed loopback asset */'
                 try:
                     self.wfile.write(body)
@@ -52,9 +53,14 @@ class LoopbackBrowserTests(unittest.TestCase):
 
     def test_renderer_timeout_recovers_existing_dom_and_cleans_up_driver(self):
         with WebsiteBrowser() as browser:
-            browser.driver.set_page_load_timeout(0.2)
-            page = browser.read(self.url, 'search')
-            self.assertEqual('39 REZULTATA', page['result_heading'])
+            # Allow the fixture document to arrive on a busy shared VPS while
+            # its deferred script still guarantees a real navigation timeout.
+            browser.driver.set_page_load_timeout(1)
+            try:
+                page = browser.read(self.url, 'search')
+            except WebsiteDOMTimeout as exc:
+                self.fail(str(getattr(exc, 'diagnostics', {})))
+            self.assertEqual('1 REZULTATA', page['result_heading'])
             self.assertTrue(page['browser']['navigation_timeout'])
             self.assertEqual(1, self.requests.count('/fixture'))
             process = browser.service.process
@@ -73,5 +79,5 @@ class LoopbackBrowserTests(unittest.TestCase):
             with self.assertRaises(TimeoutException):
                 browser.driver.execute_async_script('/* deliberately never call callback */')
             page = browser.driver.execute_async_script(EXTRACT_ASYNC_SCRIPT, 'search')
-            self.assertEqual('39 REZULTATA', page['result_heading'])
+            self.assertEqual('1 REZULTATA', page['result_heading'])
         print(json.dumps({'async_timeout_configured': True, 'local_fixture_rejected_as_evidence': True, 'source_visits': 0}))

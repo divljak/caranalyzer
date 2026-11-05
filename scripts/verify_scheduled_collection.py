@@ -90,7 +90,8 @@ def capture_scheduler(root, runtime_manifest=None):
     release = (root / '.daily-delivery/direct-current').resolve()
     manifest = runtime_manifest or root / '.daily-delivery/direct-installation.json'
     if runtime_manifest is None:
-        for name in ('detail-reliability-installation.json', 'coverage-priority-installation.json'):
+        for name in ('detail-reliability-installation.json', 'coverage-priority-installation.json',
+                     'ingestion-validation-installation.json'):
             candidate = root / '.daily-delivery' / name
             if candidate.exists() and load(candidate).get('release') == str(release):
                 manifest = candidate

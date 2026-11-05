@@ -2,8 +2,10 @@
 from copy import deepcopy
 from datetime import datetime, timedelta
 import unittest
+from unittest.mock import patch
 
 from sqlalchemy import create_engine
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import sessionmaker
 
 from database.db_manager import DatabaseManager
@@ -58,11 +60,17 @@ class ParserTests(unittest.TestCase):
             parse_search(page,1,search_url())
 
     def test_duplicate_cards_unknown_price_and_single_page(self):
-        page = search_page(ids=('79589391','79589391','79806723'))
+        page = search_page(ids=('79589391','79589391','79806723'), total=2)
         page['current_page'], page['last_page'] = None, None
         self.assertEqual(2,len(parse_search(page,1,search_url())['listings']))
         page['cards'][0]['price'] = 'unexpected'
         self.assertGreater(parse_search(page,1,search_url())['rejected'],0)
+
+    def test_missing_pagination_cannot_prove_a_large_search_is_one_page(self):
+        page = search_page(ids=('79589391',), total=47048)
+        page.update(current_page=None, last_page=None)
+        with self.assertRaises(WebsiteReadError):
+            parse_search(page, 1, search_url())
 
     def test_details_use_fields_and_convert_renewal_timezone(self):
         result = parse_detail(detail_page(),'79589391')
@@ -187,6 +195,62 @@ class StoreAndRunTests(unittest.TestCase):
             self.assertTrue(s.get(CarListing,'101').is_active)
             self.assertEqual(0,s.get(CarListing,'101').consecutive_missing_runs)
             self.assertEqual(4,s.query(ListingSnapshot).count())
+
+    def test_unverified_pagination_does_not_advance_clean_collection(self):
+        page = search_page(ids=('200001',), total=47048)
+        page.update(current_page=None, last_page=None)
+        report, calls = self.run_browser(lambda *_: page, search_pages=3, detail_checks=0)
+        self.assertEqual(1, len(calls))
+        self.assertEqual(0, report['discovery_complete'])
+        self.assertNotEqual('completed', report['status'])
+        with self.sessions() as session:
+            self.assertEqual(0, session.query(ScrapingLog).filter_by(status='completed').count())
+
+    def test_verified_terminal_page_can_complete_a_smaller_search(self):
+        page = search_page(ids=('200001',), total=1)
+        page.update(current_page=None, last_page=None)
+        report, calls = self.run_browser(lambda *_: page, search_pages=3, detail_checks=0)
+        self.assertEqual((1, 1, 'completed'),
+                         (len(calls), report['discovery_complete'], report['status']))
+
+    def test_single_page_rejected_price_keeps_valid_observations(self):
+        page = search_page(ids=('200001', '200002'), total=2)
+        page.update(current_page=None, last_page=None)
+        page['cards'][1]['price'] = 'unrecognized price'
+        report, calls = self.run_browser(lambda *_: page, search_pages=3, detail_checks=0)
+        self.assertEqual((1, 1, 1, 'partial'),
+                         (len(calls), report['observations'], report['rejected'], report['status']))
+        with self.sessions() as session:
+            self.assertIsNotNone(session.get(CarListing, '200001'))
+            self.assertIsNone(session.get(CarListing, '200002'))
+
+    def test_contradictory_terminal_controls_cannot_shorten_requested_scope(self):
+        page = search_page(ids=('200001',), total=47048)
+        page['last_page'] = 1
+        report, calls = self.run_browser(lambda *_: page, search_pages=3, detail_checks=0)
+        self.assertEqual((1, 0, 'partial'),
+                         (len(calls), report['discovery_complete'], report['status']))
+
+    def test_verified_empty_search_is_completed_without_new_price_freshness(self):
+        page = search_page(ids=(), total=0)
+        page.update(current_page=None, last_page=None)
+        report, calls = self.run_browser(lambda *_: page, search_pages=3, detail_checks=0)
+        self.assertEqual((1, 1, 0, 'completed'),
+                         (len(calls), report['discovery_complete'], report['observations'], report['status']))
+        with self.sessions() as session:
+            self.assertEqual('partial', session.query(ScrapingLog).one().status)
+
+    def test_committed_observation_is_counted_when_state_write_fails(self):
+        with patch.object(self.store, 'note_listed', side_effect=SQLAlchemyError('injected state failure')):
+            report, _ = self.run_browser(lambda *_: search_page(ids=('200001',)), detail_checks=0)
+        self.assertEqual(('partial', 1, 1),
+                         (report['status'], report['observations'], report['new_listings']))
+        with self.sessions() as session:
+            self.assertIsNotNone(session.get(CarListing, '200001'))
+            self.assertEqual(1, session.query(ListingSnapshot).filter_by(listing_id='200001').count())
+            log = session.query(ScrapingLog).one()
+            self.assertEqual((1, 1, 'partial'),
+                             (log.total_listings_found, log.new_listings_added, log.status))
 
     def test_block_stops_remaining_pages_and_persists_pause(self):
         def read(url,kind):
