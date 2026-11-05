@@ -146,8 +146,8 @@ No values should be pasted into chat or committed. The minimum secret names are:
 - `TELEGRAM_BOT_TOKEN` — created through BotFather;
 - `TELEGRAM_CHAT_ID` — the private Ogi + friend + bot group;
 - `TELEGRAM_ALLOWED_USER_IDS` — needed before Phase 2 interactions;
-- a dedicated least-privilege bot/digest database credential, preferably exposed as
-  `BOT_DATABASE_URL`, rather than giving the bot the broad backup role.
+- `DATABASE_URL` for the existing restricted application role in Vercel Production;
+  the bot does not use the broad backup role or a Supabase service-role key.
 
 For Phase 1, create a private group, add the bot, send one bootstrap command, capture
 and verify the negative group chat ID privately, then allow outbound messages only to
@@ -161,10 +161,9 @@ bot listen to every group message.
   The Telegram MVP should not launch as though collection were fully healthy.
 - **Production approval:** the first GitHub shadow collection will consume source
   budget and write evidence to Supabase; it has not been run yet.
-- **Telegram token and chat:** BotFather bot, token, private group, and chat/user IDs do
-  not exist yet.
-- **Bot database access:** creating a dedicated read-only bot role/password is a
-  production credential/schema action and needs approval.
+- **Telegram activation:** the BotFather bot exists, but the token, webhook secret,
+  private group/user IDs and production database URL still need to be provisioned
+  privately in Vercel Production.
 - **Credits/cost:** no LLM is needed for Phase 1. Phase 2 needs a model/provider and a
   small usage budget only if Ogi chooses natural-language phrasing beyond deterministic
   commands. Standard GitHub-hosted runners for this public repository do not consume
