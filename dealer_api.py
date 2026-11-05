@@ -22,6 +22,7 @@ from database.models import create_engine_and_session
 from scrapers.olx_listing_details import DETAILS_DDL, DetailsUnavailable, fetch_transmission, store_transmission, details_resume_at, pause_details
 from market_labels import LABEL_DDL, refresh_labels
 from database.website_tracking import create_website_tables
+from telegram_bot import TelegramConfig, TelegramConfigurationError, process_update
 
 HOSTED = os.getenv('VERCEL') == '1'
 if HOSTED:
@@ -47,6 +48,7 @@ LISTING_SOURCE = """(SELECT c0.*,
  LEFT JOIN dealer_listing_details e USING(listing_id) LEFT JOIN website_listing_states w USING(listing_id)"""
 detail_jobs = {}
 detail_job_lock = threading.Lock()
+TELEGRAM_WEBHOOK_PATH = '/api/telegram/webhook'
 
 CANDIDATE_DDL = """
 CREATE TABLE IF NOT EXISTS dealer_candidates (
@@ -85,13 +87,15 @@ app.add_middleware(TrustedHostMiddleware, allowed_hosts=hosted_hosts() if HOSTED
 @app.middleware('http')
 async def private_requests(request: Request, call_next):
     # Hobby Standard Protection covers preview URLs. Production must stay closed.
-    if HOSTED and os.getenv('VERCEL_ENV') != 'preview':
+    telegram_webhook = (request.url.path == TELEGRAM_WEBHOOK_PATH and
+                        request.method == 'POST')
+    if HOSTED and os.getenv('VERCEL_ENV') != 'preview' and not telegram_webhook:
         return JSONResponse({'detail': 'This workspace requires a protected preview deployment'}, status_code=503)
     if HOSTED and (request.url.path.startswith('/api/candidates') or
                    request.url.path.startswith('/api/transmission-jobs') or
                    request.url.path == '/api/model-transmission'):
         return JSONResponse({'detail': 'Source refresh is available only in the local collector workspace'}, status_code=409)
-    if request.method not in {'GET', 'HEAD', 'OPTIONS'}:
+    if request.method not in {'GET', 'HEAD', 'OPTIONS'} and not telegram_webhook:
         origin = request.headers.get('origin')
         if not same_origin(origin, request.headers.get('host'), str(request.base_url), HOSTED):
             return JSONResponse({'detail': 'Cross-origin writes are disabled'}, status_code=403)
@@ -107,6 +111,29 @@ async def private_requests(request: Request, call_next):
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['Referrer-Policy'] = 'no-referrer'
     return response
+
+
+@app.post(TELEGRAM_WEBHOOK_PATH)
+async def telegram_webhook(request: Request):
+    """Receive only secret-authenticated updates for one private Telegram group."""
+    try:
+        config = TelegramConfig.from_env()
+    except TelegramConfigurationError:
+        raise HTTPException(503, 'Telegram bot is not configured')
+    if not config.accepts_secret(request.headers.get('x-telegram-bot-api-secret-token')):
+        raise HTTPException(401, 'Invalid Telegram webhook secret')
+    try:
+        content_length = int(request.headers.get('content-length', '0'))
+    except ValueError:
+        raise HTTPException(400, 'Invalid content length')
+    if content_length > 1_000_000:
+        raise HTTPException(413, 'Telegram update is too large')
+    try:
+        update = await request.json()
+    except (ValueError, json.JSONDecodeError):
+        raise HTTPException(400, 'Invalid Telegram update')
+    process_update(update, engine, config)
+    return {'ok': True}
 
 class Filters(BaseModel):
     make: str = Field(default='', max_length=80)

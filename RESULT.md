@@ -16,8 +16,11 @@ database verification are now proven, but the collector has **not yet made a rea
 source visit from GitHub**. Do not cancel DigitalOcean until a controlled shadow run
 and single-scheduler cutover are complete.
 
-Telegram is currently **planning only**: there is no bot process, webhook, polling
-loop, Telegram dependency, token handling, or digest sender in this repository.
+Telegram now has a reviewed local MVP implementation: a secret-authenticated Vercel
+webhook, exact private-group/user allowlist, database-grounded commands and buttons,
+and a setup helper that keeps the token out of source. It is **not live yet**: no
+production variables, public production deployment or Telegram webhook registration
+has been changed.
 
 ## Current system
 
@@ -28,7 +31,7 @@ loop, Telegram dependency, token handling, or digest sender in this repository.
 | Market / Compare / Following | Existing Vercel UI and deterministic API | Keep for deeper inspection; its queries already expose useful overview, listing, comparison, discovery, model-analysis, history, and following structures |
 | Collector | DigitalOcean, `/opt/car-analyzer` | Still the only live scheduler; timer remains at 07:17 UTC |
 | Candidate replacement | GitHub Actions | Image build, tests, Supabase roles, rolled-back writes, and encrypted recovery artifact all passed |
-| Telegram | Nowhere yet | No implementation exists |
+| Telegram | Prepared for the existing Vercel FastAPI service | Structured database interaction is implemented and tested locally; production setup is pending |
 
 The hosted application is already database-grounded. `hosted_runtime.py` rejects any
 host other than the Supabase transaction pooler, requires TLS, and requires the
@@ -107,11 +110,13 @@ GitHub Actions is a better fit than Vercel Cron for this browser collector: the 
 builds/runs a pinned Chromium container and can take several minutes. Vercel remains a
 good home for the short Telegram webhook/API later; Supabase remains the database.
 
-### 3. Build the Telegram MVP on top of the proven data path
+### 3. Activate the Telegram MVP on top of the proven data path
 
-Create the bot with BotFather only when Ogi is ready. Store secrets in GitHub/Vercel,
-never in source. Phase 1 should be one deterministic morning message sent after a
-successful collection, for example:
+The BotFather bot now exists and the structured interaction code is prepared. Store
+secrets in Vercel, never in source. Review and deploy the secret-protected webhook,
+discover the exact private group/user IDs, configure the production environment, then
+register Telegram's webhook. Phase 1 should add one deterministic morning message
+after a successful collection, for example:
 
 > Car Analyzer · 5 Nov, 08:25 Sarajevo  
 > Partial collection: 110 observations · 47 first observed by us · 5 errors  
@@ -127,11 +132,12 @@ The exact digest query should return a compact structured object with:
 4. two or three notable listings selected by explicit, testable rules; and
 5. the time window and sample size for every trend.
 
-Start with GitHub Actions sending the post-run digest through Telegram's HTTPS API.
-For Phase 2, put a webhook on Vercel and answer a small set of commands/buttons with
-structured database queries (`/budget`, compare, trends, listing details). Add an LLM
-only after retrieval and citations are enforced; it may phrase verified results but
-must not invent market advice. Keep long inspection flows in the current UI.
+The prepared Vercel webhook answers `/status`, `/latest`, `/trends`, `/budget` and
+`/compare` with structured database queries and inline buttons. After interaction is
+verified, have GitHub Actions send the post-run digest through Telegram's HTTPS API.
+Add an LLM only after retrieval and citations are enforced; it may phrase verified
+results but must not invent market advice. Keep long inspection flows in the current
+UI.
 
 ## Credentials and private-group setup needed later
 

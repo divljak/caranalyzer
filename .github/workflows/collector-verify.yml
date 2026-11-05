@@ -12,6 +12,8 @@ on:
       - tests/**
       - run_website_sync.py
       - market_labels.py
+      - dealer_api.py
+      - telegram_bot.py
   workflow_dispatch:
     inputs:
       mode:
@@ -58,7 +60,7 @@ jobs:
           --entrypoint python
           --mount type=bind,src="${PWD}/tests",dst=/app/tests,readonly
           "car-analyzer-collector:${GITHUB_SHA}"
-          -m unittest tests.test_direct_collector
+          -m unittest tests.test_direct_collector tests.test_telegram_bot
 
       - name: Verify Supabase or run one confirmed shadow collection
         if: github.event_name == 'workflow_dispatch'
