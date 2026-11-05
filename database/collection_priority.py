@@ -12,7 +12,7 @@ import math
 
 from sqlalchemy import text
 
-POLICY = 'coverage_priority_v1'
+POLICY = 'coverage_priority_v2'
 TRACKED_METHODS = {'olx_api', 'olx_website'}
 CANDIDATE_STATUSES = {'shortlisted', 'contacted', 'inspect'}
 SUCCESS_OUTCOMES = {'listed', 'unavailable', 'source_reported_ended', 'source_reported_sold'}
@@ -102,17 +102,53 @@ def attempt_order(row):
             row['listing_id'])
 
 
-def reason(row, searches):
+def reason(row, searches, now=None):
     if row.get('candidate_status') in CANDIDATE_STATUSES:
         return 'candidate'
     if row.get('status') == 'unavailable_pending':
         return 'availability_recheck'
     matches = [followed_match(row, f) for f in searches]
+    if ('followed_unknown_attributes' in matches and now is not None
+            and utc(row.get('first_seen_at')) is not None
+            and now - timedelta(days=7) <= utc(row['first_seen_at']) <= now):
+        return 'new_followed_details'
     if 'followed_scope' in matches:
         return 'followed_scope'
     if 'followed_unknown_attributes' in matches:
         return 'followed_unknown_attributes'
     return 'tracked_rotation'
+
+
+def refresh_decision(row, now, basis):
+    """Spend details on useful missing fields; keep sightings and detail ages separate.
+
+    These intervals govern eligibility, not promised service deadlines. Never
+    change stored attempt/success clocks or postponed removal confirmations.
+    """
+    details_at = utc(row.get('details_checked_at'))
+    listed_at = utc(row.get('last_listed_at'))
+    interval = 1 if basis == 'candidate' else 7 if basis in {
+        'new_followed_details', 'followed_scope', 'followed_unknown_attributes'} else 30
+    if basis == 'availability_recheck':
+        return {'need': 'confirm_availability', 'interval_days': None, 'deferred_by': None}
+    if row.get('status') in {'removed_unconfirmed', 'source_reported_ended', 'source_reported_sold'}:
+        success = utc(row.get('last_success_at'))
+        return {'need': 'revisit_unavailable', 'interval_days': 30,
+                'deferred_by': 'unavailable_backoff' if success and now - timedelta(days=30) < success <= now else None}
+    if details_at and now - timedelta(days=interval) < details_at <= now:
+        return {'need': 'refresh_details', 'interval_days': interval, 'deferred_by': 'recent_detail_check'}
+    missing = (not row.get('recognized_model') or not row.get('make') or not row.get('model')
+               or row.get('year') is None or row.get('mileage') is None
+               or not row.get('fuel_type') or not row.get('transmission'))
+    if missing:
+        return {'need': 'missing_attributes', 'interval_days': interval, 'deferred_by': None}
+    # Focused cars still get periodic detail refreshes even if search sees them.
+    # For ordinary complete rows, recent positive sightings make availability-only
+    # visits redundant. This does not advance details_checked_at/last_success_at.
+    if basis == 'tracked_rotation' and listed_at and now - timedelta(days=7) < listed_at <= now:
+        return {'need': 'availability', 'interval_days': 7, 'deferred_by': 'recent_positive_sighting'}
+    return {'need': 'refresh_details' if basis != 'tracked_rotation' else 'availability',
+            'interval_days': interval, 'deferred_by': None}
 
 
 def fair_lane(rows, now):
@@ -153,17 +189,24 @@ def select_priority(rows, now, limit=20, *, searches=(), excluded=(), used=0, pa
     if max_selected is not None and (not isinstance(max_selected, int) or not 0 <= max_selected <= 20):
         raise ValueError('Requested queue length must be between 0 and 20')
     now = utc(now)
-    rows = eligible_rows(rows, now, excluded)
+    available = eligible_rows(rows, now, excluded)
+    rows, deferred = [], Counter()
+    for row in available:
+        row['_reason'] = reason(row, searches, now)
+        row['_refresh'] = refresh_decision(row, now, row['_reason'])
+        if row['_refresh']['deferred_by']:
+            deferred[row['_refresh']['deferred_by']] += 1
+        else:
+            rows.append(row)
     capacity = max(0, limit - used)
     paused = utc(pause_until) is not None and utc(pause_until) > now
     if paused:
         capacity = 0
     lanes = defaultdict(list)
     for row in rows:
-        row['_reason'] = reason(row, searches)
         lanes[row['_reason']].append(row)
     ranked = []
-    for name in ('candidate', 'availability_recheck', 'followed_scope',
+    for name in ('candidate', 'availability_recheck', 'new_followed_details', 'followed_scope',
                  'followed_unknown_attributes', 'tracked_rotation'):
         ranked.extend(fair_lane(lanes[name], now))
     ranked = deque(ranked)
@@ -181,14 +224,19 @@ def select_priority(rows, now, limit=20, *, searches=(), excluded=(), used=0, pa
         selected.append({'listing_id': row['listing_id'], 'reason': 'oldest_attempt' if aging else row['_reason'],
                          'priority_basis': row['_reason'], 'make': row.get('make'), 'model': row.get('model'),
                          'last_attempt_at': stamp(row.get('last_checked_at')), 'last_success_at': stamp(row.get('last_success_at')),
-                         'match_confidence': ('attributes_missing' if row['_reason'] == 'followed_unknown_attributes'
+                         'last_listed_at': stamp(row.get('last_listed_at')),
+                         'details_checked_at': stamp(row.get('details_checked_at')),
+                         'check_need': row['_refresh']['need'], 'refresh_interval_days': row['_refresh']['interval_days'],
+                         'match_confidence': ('attributes_missing' if row['_reason'] in {'followed_unknown_attributes', 'new_followed_details'}
                                               else 'recorded_attributes_only')})
     return {'policy': POLICY, 'as_of_utc': now.isoformat() + 'Z', 'daily_detail_limit': limit,
             'detail_used': used, 'remaining_allowance': capacity, 'paused': paused,
             'due_eligible': len(rows), 'priority_counts': dict(sorted(Counter(r['_reason'] for r in rows).items())),
+            'available_before_refresh_policy': len(available), 'refresh_deferred': dict(sorted(deferred.items())),
             'selected': selected, 'selected_ids': [r['listing_id'] for r in selected],
             'oldest_slots': sum(r['reason'] == 'oldest_attempt' for r in selected),
-            'default_basis': 'saved_scopes_and_candidates' if searches or lanes['candidate'] else 'all_existing_tracked_models',
+            'default_basis': ('saved_scopes_and_candidates' if searches or any(
+                r.get('candidate_status') in CANDIDATE_STATUSES for r in available) else 'all_existing_tracked_models'),
             'source_coverage': 'unknown', 'sample_label': 'bounded_known_listing_check_queue',
             'confirmed_sales': None, 'minimum_days_for_one_pass_at_full_success': math.ceil(len(rows) / limit) if limit else None}
 
@@ -203,7 +251,8 @@ SELECT c.listing_id,c.source,c.collection_method,c.first_seen_at,c.last_verified
  CASE WHEN w.details_checked_at IS NOT NULL AND (e.checked_at IS NULL OR w.details_checked_at>=e.checked_at)
       THEN w.transmission ELSE coalesce(e.transmission,c.transmission) END AS transmission,
  (w.details_checked_at IS NOT NULL OR (v.make IS NOT NULL AND v.model IS NOT NULL)) AS recognized_model,
- v.category,d.status AS candidate_status,w.status,w.next_check_at,w.last_checked_at,w.last_success_at
+ v.category,d.status AS candidate_status,w.status,w.next_check_at,w.last_checked_at,w.last_success_at,
+ w.last_listed_at,w.details_checked_at,w.last_outcome
 FROM car_listings c LEFT JOIN website_listing_states w USING(listing_id)
  LEFT JOIN dealer_vehicle_labels v USING(listing_id) LEFT JOIN dealer_listing_details e USING(listing_id)
  LEFT JOIN dealer_candidates d USING(listing_id)

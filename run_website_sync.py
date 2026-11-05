@@ -11,6 +11,7 @@ import uuid
 
 from database.db_manager import db_manager
 from database.models import create_tables
+from database.discovery_coverage import discovery_window, request_efficiency
 from database.website_tracking import BudgetExhausted, SourcePaused, WebsiteStore, create_website_tables
 from scrapers.olx_website_collector import WebsiteBlocked, WebsiteBrowser, WebsiteDOMTimeout, WebsiteReadError, parse_detail, parse_search, search_url
 
@@ -33,6 +34,7 @@ def sync(db, store, browser, *, search_pages=3, detail_checks=20, delay=15, bran
                                 source_query=query, pages_requested=search_pages, source_per_page=None)
     seen, fingerprints, consecutive_errors = set(), set(), 0
     validated_pages, terminal_page = 0, False
+    discovery_pages, baseline = [], None
 
     def visit(url, kind):
         wait = store.reserve(kind, now(), search_pages, detail_checks, delay)
@@ -45,6 +47,8 @@ def sync(db, store, browser, *, search_pages=3, detail_checks=20, delay=15, bran
         budget = store.budget(now())
         remaining_search = max(0, search_pages - budget['search_used'])
         remaining_details = max(0, detail_checks - budget['detail_used'])
+        if remaining_search and not (budget['pause_until'] and budget['pause_until'] > started.isoformat() + 'Z'):
+            baseline = store.discovery_baseline(query, started)
         for page_number in range(1, remaining_search + 1):
             page = parse_search(visit(search_url(page_number, brand, model), 'search'), page_number, query)
             ids = {item['listing_id'] for item in page['listings']}
@@ -57,8 +61,11 @@ def sync(db, store, browser, *, search_pages=3, detail_checks=20, delay=15, bran
             report['page_stats'].append({k: v for k, v in page.items() if k != 'listings'})
             report['known_overlap'] += len(store.known_ids(ids - seen))
             observed_at = now()
+            saved_page = {'page': page_number, 'ids': []}
+            discovery_pages.append(saved_page)
             for item in page['listings']:
                 if item['listing_id'] in seen:
+                    saved_page['ids'].append(item['listing_id'])
                     continue
                 added = db.upsert_verified_listing(item, observed_at=observed_at)
                 # The upsert has committed its immutable observation already.
@@ -66,6 +73,7 @@ def sync(db, store, browser, *, search_pages=3, detail_checks=20, delay=15, bran
                 report['new_listings'] += bool(added)
                 report['observations'] += 1
                 seen.add(item['listing_id'])
+                saved_page['ids'].append(item['listing_id'])
                 store.note_listed(item['listing_id'], observed_at)
             validated_pages += 1
             terminal_page = page['source_total'] == 0 or (
@@ -129,6 +137,10 @@ def sync(db, store, browser, *, search_pages=3, detail_checks=20, delay=15, bran
         if report['status'] == 'completed' and search_pages and not report['discovery_complete']:
             report.update(status='partial', stopped_reason='discovery_budget_incomplete')
         finished = now()
+        report['discovery_window'] = discovery_window(
+            discovery_pages, baseline, complete=bool(report['discovery_complete']),
+            terminal=terminal_page, rejected=report['rejected'], started_at=started)
+        report['request_efficiency'] = request_efficiency(report, discovery_pages)
         report['availability_coverage'] = store.coverage(finished)
         store.finish_run(run_id, finished, report)
         # Failed/partial checks cannot advance the dashboard's successful-collection anchor.
