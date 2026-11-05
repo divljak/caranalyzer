@@ -23,6 +23,7 @@ from scrapers.olx_listing_details import DETAILS_DDL, DetailsUnavailable, fetch_
 from market_labels import LABEL_DDL, refresh_labels
 from database.website_tracking import create_website_tables
 from telegram_bot import TelegramConfig, TelegramConfigurationError, process_update
+from telegram_digest import handle_digest
 
 HOSTED = os.getenv('VERCEL') == '1'
 if HOSTED:
@@ -49,6 +50,7 @@ LISTING_SOURCE = """(SELECT c0.*,
 detail_jobs = {}
 detail_job_lock = threading.Lock()
 TELEGRAM_WEBHOOK_PATH = '/api/telegram/webhook'
+TELEGRAM_DIGEST_PATH = '/api/telegram/digest'
 
 CANDIDATE_DDL = """
 CREATE TABLE IF NOT EXISTS dealer_candidates (
@@ -89,7 +91,9 @@ async def private_requests(request: Request, call_next):
     # Hobby Standard Protection covers preview URLs. Production must stay closed.
     telegram_webhook = (request.url.path == TELEGRAM_WEBHOOK_PATH and
                         request.method == 'POST')
-    if HOSTED and os.getenv('VERCEL_ENV') != 'preview' and not telegram_webhook:
+    telegram_digest = (request.url.path == TELEGRAM_DIGEST_PATH and
+                       request.method == 'GET')
+    if HOSTED and os.getenv('VERCEL_ENV') != 'preview' and not telegram_webhook and not telegram_digest:
         return JSONResponse({'detail': 'This workspace requires a protected preview deployment'}, status_code=503)
     if HOSTED and (request.url.path.startswith('/api/candidates') or
                    request.url.path.startswith('/api/transmission-jobs') or
@@ -134,6 +138,20 @@ async def telegram_webhook(request: Request):
         raise HTTPException(400, 'Invalid Telegram update')
     process_update(update, engine, config)
     return {'ok': True}
+
+
+@app.get(TELEGRAM_DIGEST_PATH)
+def telegram_morning_digest(request: Request, mode: str = ''):
+    """Cron dry-render. Sends only for mode=send or an explicit test-send confirm."""
+    status, body = handle_digest(
+        engine, headers=request.headers, mode=mode, environ=os.environ)
+    if status == 401:
+        raise HTTPException(401, 'Invalid digest cron secret')
+    if status == 503:
+        raise HTTPException(503, 'Telegram digest is not configured')
+    if status == 502:
+        raise HTTPException(502, 'Telegram digest send failed')
+    return body
 
 class Filters(BaseModel):
     make: str = Field(default='', max_length=80)

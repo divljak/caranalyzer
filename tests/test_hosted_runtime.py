@@ -79,6 +79,7 @@ class HostedRuntimeTests(unittest.TestCase):
                 )
                 self.assertEqual(200, response.status_code, response.text)
                 process.assert_called_once_with(update, dealer_api.engine, config)
+                self.assertEqual(401, client.get(dealer_api.TELEGRAM_DIGEST_PATH).status_code)
 
 
 if __name__ == '__main__':

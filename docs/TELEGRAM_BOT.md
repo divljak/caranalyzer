@@ -97,9 +97,10 @@ configuration. `getUpdates` ID discovery cannot operate while a webhook is activ
   normalize year, mileage, fuel or transmission; the response says so.
 - Telegram delivery is at-least-once. A rare retry after a successful send could
   duplicate a response because no new production deduplication table was introduced.
-- The daily morning digest is the next thin layer: call the same status/trend/latest
-  renderers after a successful scheduled collector run. Do not schedule it until the
-  single-scheduler collector cutover is complete and Telegram interaction is verified.
+- The morning digest scaffold is `GET /api/telegram/digest`. It dry-renders unless
+  `mode=send` is armed with `TELEGRAM_DIGEST_SEND=1` inside the 09:45
+  Europe/Sarajevo window, or `mode=test-send` carries `X-Digest-Confirm: SEND_TEST`.
+  Deploy steps and env names are in `NEXT.md`. It is not live.
 
 Implementation follows Telegram's webhook secret and inline keyboard contract and
 Supabase's serverless guidance to use the shared transaction pooler with TLS.

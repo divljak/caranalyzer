@@ -3,6 +3,16 @@
   "framework": "fastapi",
   "buildCommand": "npm ci --prefix frontend && VITE_HOSTED=true npm run build --prefix frontend",
   "regions": ["arn1"],
+  "crons": [
+    {
+      "path": "/api/telegram/digest?mode=send&slot=0745utc",
+      "schedule": "45 7 * * *"
+    },
+    {
+      "path": "/api/telegram/digest?mode=send&slot=0845utc",
+      "schedule": "45 8 * * *"
+    }
+  ],
   "functions": {
     "deploy/vercel_app.py": {
       "maxDuration": 60,
