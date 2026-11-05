@@ -71,6 +71,7 @@ def run_verification(image, environ=None, runner=subprocess.run):
         command = [
             "docker", "run", "--rm", "--read-only", "--cap-drop=ALL",
             "--security-opt=no-new-privileges",
+            "--user", f"{os.getuid()}:{os.getgid()}",
             "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
             "--mount", f"type=bind,src={secrets_dir},dst=/run/car-analyzer-secrets,readonly",
             "--mount", f"type=bind,src={state_dir},dst=/state",

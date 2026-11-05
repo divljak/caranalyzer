@@ -33,7 +33,9 @@ create these repository secrets:
 Do not paste either password into an issue, pull request, chat, workflow input, or
 committed file. The workflow constructs mode-0600 credential files at runtime from
 fixed host, port, database, role, and TLS values. Passwords are not forwarded into
-the collector container environment.
+the collector container environment. The container runs as the GitHub runner's
+UID/GID so it can read those private files and write only to its private ephemeral
+state directory; the container root filesystem remains read-only.
 
 ## First verification
 
