@@ -42,12 +42,38 @@ def write_credential(path, role, password):
     path.chmod(0o600)
 
 
-def run_verification(image, environ=None, runner=subprocess.run):
+def encrypt_latest_backup(state_dir, output, recipient_file, *, environ, runner=subprocess.run):
+    snapshots = list(state_dir.glob("supabase-canonical-*-after.json.gz"))
+    if len(snapshots) != 1:
+        raise ConfigurationError("Expected exactly one verified after snapshot")
+    if not recipient_file.is_file():
+        raise ConfigurationError("Backup recipient file is missing")
+    if output.exists():
+        raise ConfigurationError("Encrypted backup output already exists")
+
+    completed = runner([
+        "age", "--encrypt", "--recipients-file", str(recipient_file),
+        "--output", str(output), str(snapshots[0]),
+    ], env=environ, check=False)
+    if completed.returncode:
+        return completed.returncode
+    if not output.is_file() or output.stat().st_size == 0:
+        raise ConfigurationError("Encrypted backup output was not created")
+    output.chmod(0o600)
+    return 0
+
+
+def run_verification(image, environ=None, runner=subprocess.run, *, encrypted_backup=None,
+                     recipient_file=None):
     environ = dict(os.environ if environ is None else environ)
     if environ.get("GITHUB_ACTIONS") != "true":
         raise ConfigurationError("This wrapper only runs inside GitHub Actions")
     if not image or image.isspace():
         raise ConfigurationError("Collector image name is missing")
+    if bool(encrypted_backup) != bool(recipient_file):
+        raise ConfigurationError("Encrypted backup and recipient file must be provided together")
+    encrypted_backup = Path(encrypted_backup) if encrypted_backup else None
+    recipient_file = Path(recipient_file) if recipient_file else None
 
     collector_password = _password(environ, "COLLECTOR_DB_PASSWORD")
     backup_password = _password(environ, "BACKUP_DB_PASSWORD")
@@ -82,7 +108,10 @@ def run_verification(image, environ=None, runner=subprocess.run):
             "--verify-only",
         ]
         completed = runner(command, env=child_env, check=False)
-        return completed.returncode
+        if completed.returncode or encrypted_backup is None:
+            return completed.returncode
+        return encrypt_latest_backup(
+            state_dir, encrypted_backup, recipient_file, environ=child_env, runner=runner)
     finally:
         shutil.rmtree(root)
 
@@ -90,9 +119,15 @@ def run_verification(image, environ=None, runner=subprocess.run):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", required=True)
+    parser.add_argument("--encrypted-backup", type=Path)
+    parser.add_argument("--recipient-file", type=Path)
     args = parser.parse_args(argv)
     try:
-        return run_verification(args.image)
+        return run_verification(
+            args.image,
+            encrypted_backup=args.encrypted_backup,
+            recipient_file=args.recipient_file,
+        )
     except ConfigurationError as exc:
         print(str(exc), file=sys.stderr)
         return 2
