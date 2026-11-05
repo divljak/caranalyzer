@@ -54,6 +54,8 @@ class GitHubCollectorVerificationTests(unittest.TestCase):
         self.assertEqual(0, run_verification("car-analyzer:test", environ=environ, runner=runner))
         rendered = " ".join(seen["command"])
         self.assertIn("--verify-only", rendered)
+        user_index = seen["command"].index("--user")
+        self.assertEqual(f"{os.getuid()}:{os.getgid()}", seen["command"][user_index + 1])
         self.assertNotIn("collector-test-only", rendered)
         self.assertNotIn("backup-test-only", rendered)
         self.assertNotIn("COLLECTOR_DB_PASSWORD", seen["env"])
