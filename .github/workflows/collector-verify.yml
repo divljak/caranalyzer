@@ -1,6 +1,17 @@
 name: Verify collector migration
 
 on:
+  pull_request:
+    paths:
+      - .github/workflows/collector-verify.yml
+      - Dockerfile.collector
+      - requirements-collector.lock
+      - database/**
+      - scripts/**
+      - scrapers/**
+      - tests/**
+      - run_website_sync.py
+      - market_labels.py
   workflow_dispatch:
 
 permissions:
@@ -34,6 +45,7 @@ jobs:
           -m unittest tests.test_direct_collector
 
       - name: Verify Supabase roles and rolled-back writes
+        if: github.event_name == 'workflow_dispatch'
         env:
           COLLECTOR_DB_PASSWORD: ${{ secrets.COLLECTOR_DB_PASSWORD }}
           BACKUP_DB_PASSWORD: ${{ secrets.BACKUP_DB_PASSWORD }}
