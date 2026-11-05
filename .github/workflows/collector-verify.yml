@@ -1,0 +1,40 @@
+name: Verify collector migration
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: car-analyzer-collector
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify without collecting
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out the live collector baseline
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Run focused unit tests
+        run: python3 -m unittest tests.test_github_collector_verification
+
+      - name: Build the pinned collector image
+        run: docker build --file Dockerfile.collector --tag "car-analyzer-collector:${GITHUB_SHA}" .
+
+      - name: Test the collector inside its pinned image
+        run: >-
+          docker run --rm --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64m
+          --entrypoint python
+          --mount type=bind,src="${PWD}/tests",dst=/app/tests,readonly
+          "car-analyzer-collector:${GITHUB_SHA}"
+          -m unittest tests.test_direct_collector
+
+      - name: Verify Supabase roles and rolled-back writes
+        env:
+          COLLECTOR_DB_PASSWORD: ${{ secrets.COLLECTOR_DB_PASSWORD }}
+          BACKUP_DB_PASSWORD: ${{ secrets.BACKUP_DB_PASSWORD }}
+        run: python3 scripts/github_collector_verification.py --image "car-analyzer-collector:${GITHUB_SHA}"
