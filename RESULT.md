@@ -133,8 +133,11 @@ The exact digest query should return a compact structured object with:
 5. the time window and sample size for every trend.
 
 The prepared Vercel webhook answers `/status`, `/latest`, `/trends`, `/budget` and
-`/compare` with structured database queries and inline buttons. After interaction is
-verified, have GitHub Actions send the post-run digest through Telegram's HTTPS API.
+`/compare` with structured database queries and inline buttons. A one-way morning
+digest scaffold now renders the same evidence at `GET /api/telegram/digest` and can
+send it with Telegram `sendMessage` once `TELEGRAM_DIGEST_SEND=1` is set. It is not
+armed. See `NEXT.md`. After interaction is verified, GitHub Actions can also send a
+post-run digest through Telegram's HTTPS API.
 Add an LLM only after retrieval and citations are enforced; it may phrase verified
 results but must not invent market advice. Keep long inspection flows in the current
 UI.
@@ -157,27 +160,37 @@ bot listen to every group message.
 
 ## Blockers and decisions for Ogi
 
-- **Collector health:** today's run is fresh but partial, and the clean anchor is old.
-  The Telegram MVP should not launch as though collection were fully healthy.
+- **Collector health:** the 5 November run is fresh but partial, and the clean anchor
+  is still 1 October. The digest scaffold always says so. It labels price counts and
+  suppresses trend-index wording while that anchor is stale. It does not call
+  first-observed IDs newly posted, and it does not infer sales.
 - **Production approval:** the first GitHub shadow collection will consume source
-  budget and write evidence to Supabase; it has not been run yet.
-- **Telegram activation:** the BotFather bot exists, but the token, webhook secret,
-  private group/user IDs and production database URL still need to be provisioned
-  privately in Vercel Production.
+  budget and write evidence to Supabase; it has not been run yet. Do not cancel
+  DigitalOcean.
+- **Telegram activation:** the BotFather bot and private group exist. Chat id
+  `-5332163835` is confirmed. The token stays in the vault / Vercel env, never in
+  git. The webhook bot and the morning-digest route are still not deployed. No
+  production variables, webhook registration, or digest send has been turned on.
+  A dedicated read-only bot role was not created; the digest reads with the
+  existing `DATABASE_URL` role and does not change grants.
+- **Digest scaffold:** `GET /api/telegram/digest` dry-renders. Vercel cron is wired
+  for about 09:45 Europe/Sarajevo but sends only when `TELEGRAM_DIGEST_SEND=1`.
+  Checklist: `NEXT.md`.
 - **Credits/cost:** no LLM is needed for Phase 1. Phase 2 needs a model/provider and a
   small usage budget only if Ogi chooses natural-language phrasing beyond deterministic
   commands. Standard GitHub-hosted runners for this public repository do not consume
   paid Actions minutes, but artifact storage is limited; the 30-day encrypted artifact
   retention is intentionally bounded.
 - **DigitalOcean cancellation:** blocked until a real GitHub run, scheduled cutover,
-  and final recovery handoff pass.
+  and final recovery handoff pass. This digest does not start a collector or change
+  the VPS.
 
 ## Open questions for Ogi
 
-1. What Sarajevo delivery time should the digest target: immediately after the current
-   morning run, or a fixed later time such as 09:00?
-2. Should the first digest cover the whole observed market or a small watchlist of
-   makes/models/budgets?
+1. Delivery time is decided for Phase 1: about 09:45 Europe/Sarajevo (Vercel cron at
+   07:45 UTC and 08:45 UTC; the handler sends only when local time is 09:40–09:59).
+2. Phase 1 covers the observed market: collector status, asking-price cuts, and IDs
+   first observed by us. It is not a saved watchlist.
 3. Are slash commands and buttons sufficient for the first interactive release, or is
    free-text conversation a launch requirement?
 4. Should both group members be allowed to query everything, including Following, or
