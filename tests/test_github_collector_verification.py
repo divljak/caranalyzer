@@ -10,6 +10,7 @@ from scripts.github_collector_verification import (
     ConfigurationError,
     HOST,
     PROJECT,
+    encrypt_latest_backup,
     run_verification,
     write_credential,
 )
@@ -61,3 +62,28 @@ class GitHubCollectorVerificationTests(unittest.TestCase):
         self.assertNotIn("COLLECTOR_DB_PASSWORD", seen["env"])
         self.assertNotIn("BACKUP_DB_PASSWORD", seen["env"])
         self.assertFalse(seen["check"])
+
+    def test_verified_after_snapshot_is_encrypted_without_private_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = root / "state"
+            state.mkdir()
+            snapshot = state / "supabase-canonical-20261105-after.json.gz"
+            snapshot.write_bytes(b"test-only-snapshot")
+            recipient = root / "recipient.pub"
+            recipient.write_text("ssh-ed25519 test-only\n", encoding="utf-8")
+            output = root / "backup.age"
+            seen = {}
+
+            def runner(command, *, env, check):
+                seen.update(command=command, env=env, check=check)
+                Path(command[command.index("--output") + 1]).write_bytes(b"encrypted-test-only")
+                return SimpleNamespace(returncode=0)
+
+            self.assertEqual(0, encrypt_latest_backup(
+                state, output, recipient, environ={"PATH": "/test"}, runner=runner))
+            self.assertEqual(0o600, output.stat().st_mode & 0o777)
+            self.assertEqual("age", seen["command"][0])
+            self.assertIn(str(recipient), seen["command"])
+            self.assertIn(str(snapshot), seen["command"])
+            self.assertFalse(seen["check"])

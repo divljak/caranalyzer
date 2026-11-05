@@ -10,8 +10,9 @@ on relevant pull requests without receiving or using database credentials. Its
 Supabase verification step is manual-only and always passes `--verify-only`. It
 performs no source visits and no collection. The collector role's diagnostic writes
 are inside a rolled-back transaction. Full before/after database snapshots and
-checksums are compared in the runner's temporary directory, then deleted; they are
-never uploaded as GitHub artifacts.
+checksums are compared in the runner's temporary directory. The validated after
+snapshot is encrypted with `age` before the private temporary directory is deleted.
+Only the encrypted file is uploaded as a 30-day GitHub artifact.
 
 The workflow uses the same direct collector source as VPS release `80d50ca`. Python
 and Python package versions are pinned to the runtime observed on the VPS on 5
@@ -36,6 +37,31 @@ fixed host, port, database, role, and TLS values. Passwords are not forwarded in
 the collector container environment. The container runs as the GitHub runner's
 UID/GID so it can read those private files and write only to its private ephemeral
 state directory; the container root filesystem remains read-only.
+
+## Encrypted recovery artifact
+
+The repository contains only the Ed25519 public recipient at
+`deploy/recovery/car-analyzer-backup-recipient.pub`. Its matching private key remains
+on Ogi's Mac at `~/.ssh/id_ed25519` with mode 600 and is never sent to GitHub. The
+encrypted artifact is safe to expose as ciphertext, but anyone can download artifacts
+from this public repository. Never upload the unencrypted `.json.gz` snapshot.
+
+The current recovery key has fingerprint
+`SHA256:9uNuYNqbkKtVVhfd3BImsjJZi8wTVWtAEl1cAC1LjvQ`. Retain that private key after the
+DigitalOcean VPS is removed; losing it makes these encrypted artifacts unrecoverable.
+
+To verify a downloaded artifact locally after installing `age`:
+
+```bash
+age --decrypt --identity ~/.ssh/id_ed25519 \
+  --output /private/temp/supabase-backup.json.gz \
+  car-analyzer-recovery-RUN_ID.json.gz.age
+python scripts/verify_delivery_backup.py /private/temp/supabase-backup.json.gz
+```
+
+Use a private mode-700 temporary directory and remove the plaintext immediately after
+verification. A full recovery test still requires restoring into an empty loopback
+`delivery_recovery_*` PostgreSQL database; never restore directly over Supabase.
 
 ## First verification
 

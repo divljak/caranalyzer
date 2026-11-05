@@ -52,4 +52,20 @@ jobs:
         env:
           COLLECTOR_DB_PASSWORD: ${{ secrets.COLLECTOR_DB_PASSWORD }}
           BACKUP_DB_PASSWORD: ${{ secrets.BACKUP_DB_PASSWORD }}
-        run: python3 scripts/github_collector_verification.py --image "car-analyzer-collector:${GITHUB_SHA}"
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends age=1.1.1-1ubuntu0.24.04.3
+          python3 scripts/github_collector_verification.py \
+            --image "car-analyzer-collector:${GITHUB_SHA}" \
+            --recipient-file deploy/recovery/car-analyzer-backup-recipient.pub \
+            --encrypted-backup "${RUNNER_TEMP}/car-analyzer-recovery-${GITHUB_RUN_ID}.json.gz.age"
+
+      - name: Retain encrypted recovery snapshot
+        if: github.event_name == 'workflow_dispatch' && success()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: car-analyzer-recovery-${{ github.run_id }}
+          path: ${{ runner.temp }}/car-analyzer-recovery-${{ github.run_id }}.json.gz.age
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
