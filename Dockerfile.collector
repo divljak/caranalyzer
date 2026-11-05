@@ -1,0 +1,29 @@
+# Keep the migration runtime aligned with the image currently running on the VPS.
+FROM python:3.11.16-slim-trixie@sha256:e41613d42d4891e4930f79523f93f81bbc7632584ec65e36ab055f41a800b41e
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    CHROME_BIN=/usr/bin/chromium \
+    CHROMEDRIVER_PATH=/usr/bin/chromedriver
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates=20250419 \
+        chromium=154.0.8037.57-1~deb13u1 \
+        chromium-driver=154.0.8037.57-1~deb13u1 \
+        fonts-liberation=1:2.1.5-3 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements-collector.lock ./
+RUN python -m pip install --upgrade \
+        pip==26.2.1 \
+        setuptools==79.0.1 \
+        wheel==0.46.3 \
+    && python -m pip install --requirement requirements-collector.lock
+
+COPY . .
+
+ENTRYPOINT ["python", "scripts/direct_collector.py"]
