@@ -1,6 +1,17 @@
 name: Verify collector migration
 
 on:
+  pull_request:
+    paths:
+      - .github/workflows/collector-verify.yml
+      - Dockerfile.collector
+      - requirements-collector.lock
+      - database/**
+      - scripts/**
+      - scrapers/**
+      - tests/**
+      - run_website_sync.py
+      - market_labels.py
   workflow_dispatch:
 
 permissions:
@@ -13,17 +24,20 @@ concurrency:
 jobs:
   verify:
     name: Verify without collecting
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - name: Check out the live collector baseline
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Run focused unit tests
         run: python3 -m unittest tests.test_github_collector_verification
 
       - name: Build the pinned collector image
-        run: docker build --file Dockerfile.collector --tag "car-analyzer-collector:${GITHUB_SHA}" .
+        run: >-
+          docker build --platform linux/amd64
+          --file Dockerfile.collector
+          --tag "car-analyzer-collector:${GITHUB_SHA}" .
 
       - name: Test the collector inside its pinned image
         run: >-
@@ -34,6 +48,7 @@ jobs:
           -m unittest tests.test_direct_collector
 
       - name: Verify Supabase roles and rolled-back writes
+        if: github.event_name == 'workflow_dispatch'
         env:
           COLLECTOR_DB_PASSWORD: ${{ secrets.COLLECTOR_DB_PASSWORD }}
           BACKUP_DB_PASSWORD: ${{ secrets.BACKUP_DB_PASSWORD }}

@@ -5,15 +5,20 @@ period. Canonical data remains in Supabase. The portal remains on Vercel.
 
 ## Current safe stage
 
-`.github/workflows/collector-verify.yml` is intentionally manual-only and always
-passes `--verify-only`. It performs no source visits and no collection. The collector
-role's diagnostic writes are inside a rolled-back transaction. Full before/after
-database snapshots and checksums are compared in the runner's temporary directory,
-then deleted; they are never uploaded as GitHub artifacts.
+`.github/workflows/collector-verify.yml` builds the pinned image and runs unit tests
+on relevant pull requests without receiving or using database credentials. Its
+Supabase verification step is manual-only and always passes `--verify-only`. It
+performs no source visits and no collection. The collector role's diagnostic writes
+are inside a rolled-back transaction. Full before/after database snapshots and
+checksums are compared in the runner's temporary directory, then deleted; they are
+never uploaded as GitHub artifacts.
 
-The workflow uses the same direct collector source as VPS release `80d50ca`. Its
-Python, Chromium, ChromeDriver, and Python package versions are pinned to the runtime
-observed on the VPS on 5 November 2026.
+The workflow uses the same direct collector source as VPS release `80d50ca`. Python
+and Python package versions are pinned to the runtime observed on the VPS on 5
+November 2026. Chromium and ChromeDriver are pinned as a matching pair to Debian's
+current buildable security release. Debian had already rotated the VPS's version 154
+packages out of its live repositories, so the migration uses version 156 and requires
+browser behavior to pass the shadow-run checks before cutover.
 
 ## Secrets Ogi must add
 
