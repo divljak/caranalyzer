@@ -1,4 +1,4 @@
-name: Verify collector migration
+name: Verify or shadow-run collector migration
 
 on:
   pull_request:
@@ -13,6 +13,19 @@ on:
       - run_website_sync.py
       - market_labels.py
   workflow_dispatch:
+    inputs:
+      mode:
+        description: Safe verification or one real shadow collection
+        required: true
+        default: verify
+        type: choice
+        options:
+          - verify
+          - shadow_collect
+      confirm_shadow_collection:
+        description: Type COLLECT_ONCE only for a real shadow collection
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -47,21 +60,33 @@ jobs:
           "car-analyzer-collector:${GITHUB_SHA}"
           -m unittest tests.test_direct_collector
 
-      - name: Verify Supabase roles and rolled-back writes
+      - name: Verify Supabase or run one confirmed shadow collection
         if: github.event_name == 'workflow_dispatch'
         env:
           COLLECTOR_DB_PASSWORD: ${{ secrets.COLLECTOR_DB_PASSWORD }}
           BACKUP_DB_PASSWORD: ${{ secrets.BACKUP_DB_PASSWORD }}
+          COLLECTOR_SHADOW_CONFIRMATION: ${{ inputs.confirm_shadow_collection }}
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends age=1.1.1-1ubuntu0.24.04.3
+          collector_args=()
+          if [[ "${{ inputs.mode }}" == "shadow_collect" ]]; then
+            if [[ "${COLLECTOR_SHADOW_CONFIRMATION}" != "COLLECT_ONCE" ]]; then
+              echo "Shadow collection requires the exact COLLECT_ONCE confirmation." >&2
+              exit 2
+            fi
+            collector_args+=(--collect)
+          fi
           python3 scripts/github_collector_verification.py \
             --image "car-analyzer-collector:${GITHUB_SHA}" \
             --recipient-file deploy/recovery/car-analyzer-backup-recipient.pub \
-            --encrypted-backup "${RUNNER_TEMP}/car-analyzer-recovery-${GITHUB_RUN_ID}.json.gz.age"
+            --encrypted-backup "${RUNNER_TEMP}/car-analyzer-recovery-${GITHUB_RUN_ID}.json.gz.age" \
+            "${collector_args[@]}"
 
       - name: Retain encrypted recovery snapshot
-        if: github.event_name == 'workflow_dispatch' && success()
+        if: >-
+          github.event_name == 'workflow_dispatch' &&
+          (success() || inputs.mode == 'shadow_collect')
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: car-analyzer-recovery-${{ github.run_id }}

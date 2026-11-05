@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the direct collector's no-source verification in an ephemeral container."""
+"""Run the direct collector safely from an ephemeral GitHub Actions container."""
 
 import argparse
 import json
@@ -64,12 +64,16 @@ def encrypt_latest_backup(state_dir, output, recipient_file, *, environ, runner=
 
 
 def run_verification(image, environ=None, runner=subprocess.run, *, encrypted_backup=None,
-                     recipient_file=None):
+                     recipient_file=None, collect=False):
     environ = dict(os.environ if environ is None else environ)
     if environ.get("GITHUB_ACTIONS") != "true":
         raise ConfigurationError("This wrapper only runs inside GitHub Actions")
     if not image or image.isspace():
         raise ConfigurationError("Collector image name is missing")
+    if collect and (environ.get("GITHUB_EVENT_NAME") != "workflow_dispatch" or
+                    environ.get("COLLECTOR_SHADOW_CONFIRMATION") != "COLLECT_ONCE"):
+        raise ConfigurationError(
+            "Shadow collection requires a manual workflow dispatch and COLLECT_ONCE confirmation")
     if bool(encrypted_backup) != bool(recipient_file):
         raise ConfigurationError("Encrypted backup and recipient file must be provided together")
     encrypted_backup = Path(encrypted_backup) if encrypted_backup else None
@@ -105,13 +109,22 @@ def run_verification(image, environ=None, runner=subprocess.run, *, encrypted_ba
             "--credentials", "/run/car-analyzer-secrets/collector.json",
             "--backup-credentials", "/run/car-analyzer-secrets/backup.json",
             "--state-dir", "/state",
-            "--verify-only",
         ]
+        if not collect:
+            command.append("--verify-only")
         completed = runner(command, env=child_env, check=False)
-        if completed.returncode or encrypted_backup is None:
+        if encrypted_backup is None:
             return completed.returncode
-        return encrypt_latest_backup(
-            state_dir, encrypted_backup, recipient_file, environ=child_env, runner=runner)
+        try:
+            encryption_status = encrypt_latest_backup(
+                state_dir, encrypted_backup, recipient_file, environ=child_env, runner=runner)
+        except ConfigurationError:
+            if completed.returncode:
+                return completed.returncode
+            raise
+        if completed.returncode:
+            return completed.returncode
+        return encryption_status
     finally:
         shutil.rmtree(root)
 
@@ -121,12 +134,17 @@ def main(argv=None):
     parser.add_argument("--image", required=True)
     parser.add_argument("--encrypted-backup", type=Path)
     parser.add_argument("--recipient-file", type=Path)
+    parser.add_argument(
+        "--collect", action="store_true",
+        help="Run one manually confirmed source collection instead of no-source verification",
+    )
     args = parser.parse_args(argv)
     try:
         return run_verification(
             args.image,
             encrypted_backup=args.encrypted_backup,
             recipient_file=args.recipient_file,
+            collect=args.collect,
         )
     except ConfigurationError as exc:
         print(str(exc), file=sys.stderr)

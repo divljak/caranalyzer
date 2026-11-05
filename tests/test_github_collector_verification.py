@@ -34,6 +34,74 @@ class GitHubCollectorVerificationTests(unittest.TestCase):
             run_verification("test-image", environ={}, runner=runner)
         runner.assert_not_called()
 
+    def test_collection_requires_manual_dispatch_and_exact_confirmation(self):
+        environ = {
+            "GITHUB_ACTIONS": "true",
+            "COLLECTOR_DB_PASSWORD": "collector-test-only",
+            "BACKUP_DB_PASSWORD": "backup-test-only",
+        }
+        runner = Mock()
+        with self.assertRaisesRegex(ConfigurationError, "COLLECT_ONCE"):
+            run_verification("test-image", environ=environ, runner=runner, collect=True)
+        runner.assert_not_called()
+
+    def test_confirmed_collection_omits_verify_only(self):
+        seen = {}
+
+        def runner(command, *, env, check):
+            seen.update(command=command, env=env, check=check)
+            return SimpleNamespace(returncode=0)
+
+        environ = {
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_EVENT_NAME": "workflow_dispatch",
+            "COLLECTOR_SHADOW_CONFIRMATION": "COLLECT_ONCE",
+            "COLLECTOR_DB_PASSWORD": "collector-test-only",
+            "BACKUP_DB_PASSWORD": "backup-test-only",
+            "PATH": os.environ.get("PATH", ""),
+        }
+        self.assertEqual(0, run_verification(
+            "car-analyzer:test", environ=environ, runner=runner, collect=True))
+        self.assertNotIn("--verify-only", seen["command"])
+        self.assertNotIn("COLLECTOR_DB_PASSWORD", seen["env"])
+        self.assertNotIn("BACKUP_DB_PASSWORD", seen["env"])
+
+    def test_failed_collection_still_encrypts_completed_after_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            recipient = root / "recipient.pub"
+            recipient.write_text("ssh-ed25519 test-only\n", encoding="utf-8")
+            output = root / "backup.age"
+            calls = []
+
+            def runner(command, *, env, check):
+                calls.append(command)
+                if command[0] == "docker":
+                    state_mount = next(
+                        command[index + 1] for index, value in enumerate(command)
+                        if value == "--mount" and "dst=/state" in command[index + 1])
+                    state = Path(state_mount.split(",")[1].removeprefix("src="))
+                    (state / "supabase-canonical-20261105-after.json.gz").write_bytes(
+                        b"test-only-snapshot")
+                    return SimpleNamespace(returncode=1)
+                Path(command[command.index("--output") + 1]).write_bytes(
+                    b"encrypted-test-only")
+                return SimpleNamespace(returncode=0)
+
+            environ = {
+                "GITHUB_ACTIONS": "true",
+                "GITHUB_EVENT_NAME": "workflow_dispatch",
+                "COLLECTOR_SHADOW_CONFIRMATION": "COLLECT_ONCE",
+                "COLLECTOR_DB_PASSWORD": "collector-test-only",
+                "BACKUP_DB_PASSWORD": "backup-test-only",
+            }
+            self.assertEqual(1, run_verification(
+                "car-analyzer:test", environ=environ, runner=runner,
+                encrypted_backup=output, recipient_file=recipient, collect=True))
+            self.assertTrue(output.is_file())
+            self.assertEqual("docker", calls[0][0])
+            self.assertEqual("age", calls[1][0])
+
     def test_verification_uses_files_and_does_not_forward_password_env(self):
         seen = {}
 
