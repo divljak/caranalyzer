@@ -229,6 +229,29 @@ either language. Gemini is told which language to reply in.
 message that is **replaced by the answer** (edited in place; if editing fails the answer is sent as a new
 message and the placeholder removed). Nothing is shown for commands, buttons, or a thank-you that gets no reply.
 
+## Following models from chat
+
+`prati Golf` / `follow Golf` (or `/follow Golf`) follows a model; `šta pratim` / `what am I following`
+(or `/following`) lists what you follow and what is new on it.
+
+- **Same list as the web Following page.** It uses the existing `dealer_model_searches` table, which the
+  bot's database role is already allowed to insert into and delete from (that is how the web workspace
+  follows a model). The bot can write nothing else. A model is identified exactly as the web does
+  (`dealer_api.LISTING_SOURCE` → `market_make` / `market_model`), is saved with the web's own
+  evidence as its baseline and the web's fingerprint, so following from chat or from the web is
+  the same row (never a duplicate), and the stored make/model are the database's spelling.
+- **Asks first.** The bot finds real models matching the words (up to three), and only a tap on a
+  confirm button saves anything. The button's text is never trusted: the make and model are checked
+  against real listings before saving. Unfollowing is also a button.
+- **What the list shows:** listings seen in the last 90 days, the median asking price, and how many
+  were **first seen by us after you started following** (not necessarily newly posted). It is
+  counted from live data, not from the web workspace's last-clean-run snapshot.
+- **Shared.** There is one list for the whole workspace, so everyone allowed to use the bot sees and
+  edits the same follows. A followed model includes all years; the list stores the model, not a budget.
+- Not available yet (needs a database permission change, see
+  `docs/proposed-migrations/bot_state_and_candidates.sql`): saving a specific car to the shortlist and
+  durable chat memory.
+
 ## Known MVP limits
 
 - Phrasing outside the parser's vocabulary gets the "can't answer" reply; widening it
