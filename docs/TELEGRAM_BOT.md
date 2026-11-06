@@ -248,9 +248,28 @@ message and the placeholder removed). Nothing is shown for commands, buttons, or
   counted from live data, not from the web workspace's last-clean-run snapshot.
 - **Shared.** There is one list for the whole workspace, so everyone allowed to use the bot sees and
   edits the same follows. A followed model includes all years; the list stores the model, not a budget.
-- Not available yet (needs a database permission change, see
-  `docs/proposed-migrations/bot_state_and_candidates.sql`): saving a specific car to the shortlist and
-  durable chat memory.
+- Not on the list: durable chat memory (it needs a new table; see the optional, unused
+  `docs/proposed-migrations/bot_chat_state.sql`).
+
+## Saving cars to the shortlist
+
+Under search results there is a **⭐ <year> · <price>** button for each car shown (two to a row). Tapping
+one adds that car to the web workspace's shortlist (`dealer_candidates`); `/shortlist`, "my shortlist",
+"moja lista" or "šta sam sačuvao" lists the saved cars with their status, price, price change since
+you saved it, and how long ago each was last seen (⚠ when old).
+
+- **Never overwrites the web's work.** The bot adds a car only if it is not already there
+  (`ON CONFLICT DO NOTHING`), so a status or note you set on the web is never touched, and it removes only a
+  car it added itself (still `shortlisted` with an empty note); otherwise it says the car has a status or note
+  on the web and leaves it.
+- **Needs one database change, which is not applied.** The bot's role can only read `dealer_candidates`
+  today. Until the owner runs `docs/proposed-migrations/shortlist_write_access.sql` (least privilege:
+  `INSERT` and `DELETE` only, no `UPDATE`, with policies and a rollback) the bot answers "saving cars isn't
+  switched on in the database yet" instead of failing. The file is outside `supabase/migrations`, so nothing
+  applies it automatically. A test applies it to a role shaped like the bot's, with row-level security on,
+  and checks that saving then works, an update is still refused, and the rollback restores the refusal.
+- Listing ids in buttons are validated (letters, digits, `_`, `-`, ≤ 50) and checked against real listings.
+  The list is shared with everyone allowed to use the bot, like Following.
 
 ## Known MVP limits
 

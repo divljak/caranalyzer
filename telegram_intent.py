@@ -92,6 +92,7 @@ recommend recommendation recommendations preporuci preporuka preporuke preporuci
 suggest suggestion imam najbolje najbolji najbolja najpametnije najpametniji pametno smart smartest sells selling sell
 prodaje prodaju prodavati prodaje-se najtrazenije najtrazeniji popular worthwhile savjet advice
 value follow following followed track watch watching prati pratiti pratim zaprati pracenje praceni am im ive whats
+shortlist shortlisted saved sacuvao sacuvani sacuvan sam lista auti spisak
 moj moja moje my nesto family porodica porodicu porodicni porodicno familiju sporty
 """.split())
 
@@ -275,6 +276,7 @@ def context_from_reply(reply_text):
 
 
 _FOLLOW = r"\b(?:follow\w*|track\w*|watch\w*|prati\w*|zaprati\w*|pracenj\w*|praceni\w*)\b"
+_SHORTLIST = r"\b(?:shortlist\w*|saved (?:cars?|ads?|listings?)|sacuvan\w*|sacuva\w*|moja lista|moj spisak|my list)\b"
 _STATUS = r"\b(?:status|fresh\w*|up to date|stale|collector|how old|when was|azurn\w*|kolektor)\b"
 _LATEST = r"\b(?:latest|newest|what'?s new|whats new|new listings|interesting|finds|najnovij\w*|sta ima novo|novo)\b"
 _TRENDS = (r"\b(?:trend\w*|price changes?|prices? (?:drop|fall|rise|change)\w*|pojeftin\w*|poskup\w*)|"
@@ -319,6 +321,9 @@ def parse_question(text_value, context=None):
     tokens = _search_tokens(rest)
     named = tokens if any(not token.isdigit() for token in tokens) else []
     filters = replace(filters, search=clean_search(" ".join(named)))
+
+    if re.search(_SHORTLIST, folded) and not filters.search and filters.budget is None:
+        return Intent("shortlist")
 
     if re.search(_FOLLOW, folded):
         generic = {"model", "modeli", "modela", "models", "cars", "auta", "automobili"}

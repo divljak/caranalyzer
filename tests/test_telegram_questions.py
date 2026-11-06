@@ -504,9 +504,10 @@ class QuestionQueryTests(unittest.TestCase):
         self.seed_many()
         text_value, page = telegram_bot.answer_intent(self.engine, Intent("find", Filters("golf", 15000)), CONFIG)
         self.assertEqual(5, page.next_offset)
-        buttons = keyboard(CONFIG, page)["inline_keyboard"]
-        self.assertEqual("Show more (6–10)", buttons[0][0]["text"])
-        self.assertEqual("f:15000:0:0:5:golf", buttons[0][0]["callback_data"])
+        flat = [b for row in keyboard(CONFIG, page)["inline_keyboard"] for b in row]
+        more = next(b for b in flat if b["text"].startswith("Show more"))
+        self.assertEqual("Show more (6–10)", more["text"])
+        self.assertEqual("f:15000:0:0:5:golf", more["callback_data"])
         text_value, last = telegram_bot.answer_intent(
             self.engine, Intent("find", Filters("golf", 15000), offset=5), CONFIG)
         self.assertIsNone(last.next_offset)

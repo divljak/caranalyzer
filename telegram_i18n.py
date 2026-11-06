@@ -96,7 +96,7 @@ STRINGS = {
         "latest_no_ids": "No first-observed IDs were attributable to this run window.",
         "latest_note": "First observed by us does not mean newly posted on OLX.",
         # help
-        "help": "Car Analyzer reads our Supabase evidence only.\n\n/status — collector health and freshness\n/latest — latest observations and a few finds\n/trends 7 — observed price changes (1–90 days)\n/budget 25000 Golf — recently observed matches\n/compare Volkswagen Golf | Škoda Octavia — broad database comparison\n/ask Golf under 15000 KM from 2016 — ask in plain English or Bosnian\n/follow Golf — follow a model\n/following — what you follow and what's new\n/help — show this guide\n\nYou can also @mention me or reply to one of my answers with a question, e.g. “Octavia under 20000 KM”, “how much is a Golf”, “Golf vs Octavia”, or a refinement such as “from 2018”. Database coverage is bounded; the bot never treats first seen as posted or absence as sold.",
+        "help": "Car Analyzer reads our Supabase evidence only.\n\n/status — collector health and freshness\n/latest — latest observations and a few finds\n/trends 7 — observed price changes (1–90 days)\n/budget 25000 Golf — recently observed matches\n/compare Volkswagen Golf | Škoda Octavia — broad database comparison\n/ask Golf under 15000 KM from 2016 — ask in plain English or Bosnian\n/follow Golf — follow a model\n/following — what you follow and what's new\n/shortlist — the cars you saved\n/help — show this guide\n\nYou can also @mention me or reply to one of my answers with a question, e.g. “Octavia under 20000 KM”, “how much is a Golf”, “Golf vs Octavia”, or a refinement such as “from 2018”. Database coverage is bounded; the bot never treats first seen as posted or absence as sold.",
         "welcome": "Hi! I'm Garaža. Ask me about used cars from our olx.ba database, in English or Bosnian. Tap an example or just write.",
         # buttons
         "btn_status": "Status",
@@ -132,6 +132,29 @@ STRINGS = {
         "btn_follow": "✅ Follow {label}",
         "btn_unfollow": "✖ Unfollow {label}",
         "btn_following": "👀 What I follow",
+        # shortlist
+        "save_done": "⭐ Saved to your shortlist: {label}",
+        "save_exists": "{label} is already on your shortlist.",
+        "save_gone": "I couldn't find that listing any more.",
+        "save_not_enabled": "Saving cars isn't switched on in the database yet. Following models works; ask the owner to enable the shortlist.",
+        "save_failed": "I couldn't save that right now. Please try again shortly.",
+        "remove_done": "Removed from your shortlist: {label}",
+        "remove_gone": "That car is no longer on your shortlist.",
+        "remove_kept": "{label} has a status or note set on the web, so I left it on your shortlist. Remove it there.",
+        "shortlist_empty": "Your shortlist is empty. Tap ⭐ under a result to save a car.",
+        "shortlist_title": "Your shortlist",
+        "shortlist_row": "• {label} · {price} · {status}",
+        "shortlist_cut": "  ↓ price changed since you saved it: was {was}",
+        "shortlist_rise": "  ↑ price changed since you saved it: was {was}",
+        "shortlist_seen": "  {seen} · {url}",
+        "shortlist_foot": "Statuses come from the web workspace. The list is shared with everyone allowed to use this bot. Asking prices only; availability is not verified.",
+        "cand_shortlisted": "shortlisted",
+        "cand_contacted": "contacted",
+        "cand_inspect": "to inspect",
+        "cand_passed": "passed",
+        "btn_save": "⭐ {label}",
+        "btn_remove": "✖ Remove from shortlist",
+        "btn_shortlist": "⭐ My shortlist",
         "btn_show_listings": "🔎 Show listings",
     },
     "bs": {
@@ -206,7 +229,7 @@ STRINGS = {
         "latest_few": "Nekoliko ID-jeva koje smo u ovom prolazu prvi put vidjeli:",
         "latest_no_ids": "Nijedan prvi put viđen ID nije povezan s ovim prolazom.",
         "latest_note": "Prvi put viđeno kod nas ne znači da je tek objavljeno na OLX-u.",
-        "help": "Car Analyzer čita samo naše podatke iz Supabase baze.\n\n/status — stanje i svježina kolektora\n/latest — najnovija zapažanja i nekoliko oglasa\n/trends 7 — promjene cijena (1–90 dana)\n/budget 25000 Golf — nedavno viđeni oglasi\n/compare Volkswagen Golf | Škoda Octavia — šire poređenje iz baze\n/ask Golf do 15000 KM od 2016 — pitaj običnim jezikom, bosanski ili engleski\n/follow Golf — prati model\n/following — šta pratiš i šta je novo\n/help — ovaj vodič\n\nMožeš i da me @označiš ili odgovoriš na neku moju poruku pitanjem, npr. „Octavia do 20000 KM“, „koliko košta Golf“, „Golf vs Octavia“, ili suženjem poput „od 2018“. Pokrivenost baze je ograničena; prvo viđenje ne računam kao objavu, a nestanak iz pretrage kao prodaju.",
+        "help": "Car Analyzer čita samo naše podatke iz Supabase baze.\n\n/status — stanje i svježina kolektora\n/latest — najnovija zapažanja i nekoliko oglasa\n/trends 7 — promjene cijena (1–90 dana)\n/budget 25000 Golf — nedavno viđeni oglasi\n/compare Volkswagen Golf | Škoda Octavia — šire poređenje iz baze\n/ask Golf do 15000 KM od 2016 — pitaj običnim jezikom, bosanski ili engleski\n/follow Golf — prati model\n/following — šta pratiš i šta je novo\n/shortlist — auta koja si sačuvao\n/help — ovaj vodič\n\nMožeš i da me @označiš ili odgovoriš na neku moju poruku pitanjem, npr. „Octavia do 20000 KM“, „koliko košta Golf“, „Golf vs Octavia“, ili suženjem poput „od 2018“. Pokrivenost baze je ograničena; prvo viđenje ne računam kao objavu, a nestanak iz pretrage kao prodaju.",
         "welcome": "Zdravo! Ja sam Garaža. Pitaj me za polovne aute iz naše olx.ba baze, na bosanskom ili engleskom. Dodirni primjer ili jednostavno piši.",
         "btn_status": "Stanje",
         "btn_latest": "Novo",
@@ -240,6 +263,28 @@ STRINGS = {
         "btn_follow": "✅ Prati {label}",
         "btn_unfollow": "✖ Prestani pratiti {label}",
         "btn_following": "👀 Šta pratim",
+        "save_done": "⭐ Sačuvano na tvoju listu: {label}",
+        "save_exists": "{label} je već na tvojoj listi.",
+        "save_gone": "Taj oglas više ne mogu naći.",
+        "save_not_enabled": "Čuvanje auta još nije uključeno u bazi. Praćenje modela radi; zamoli vlasnika da uključi listu.",
+        "save_failed": "Trenutno ne mogu to sačuvati. Pokušaj ponovo za koji trenutak.",
+        "remove_done": "Uklonjeno s tvoje liste: {label}",
+        "remove_gone": "Tog auta više nema na tvojoj listi.",
+        "remove_kept": "{label} ima status ili bilješku postavljenu na webu, pa sam ga ostavio na listi. Ukloni ga tamo.",
+        "shortlist_empty": "Tvoja lista je prazna. Dodirni ⭐ ispod rezultata da sačuvaš auto.",
+        "shortlist_title": "Tvoja lista",
+        "shortlist_row": "• {label} · {price} · {status}",
+        "shortlist_cut": "  ↓ cijena se promijenila otkad si ga sačuvao: bila {was}",
+        "shortlist_rise": "  ↑ cijena se promijenila otkad si ga sačuvao: bila {was}",
+        "shortlist_seen": "  {seen} · {url}",
+        "shortlist_foot": "Statusi dolaze iz web aplikacije. Lista je zajednička sa svima koji smiju koristiti ovog bota. Samo tražene cijene; dostupnost nije provjerena.",
+        "cand_shortlisted": "na listi",
+        "cand_contacted": "kontaktirano",
+        "cand_inspect": "za pregled",
+        "cand_passed": "odbačeno",
+        "btn_save": "⭐ {label}",
+        "btn_remove": "✖ Ukloni s liste",
+        "btn_shortlist": "⭐ Moja lista",
         "btn_show_listings": "🔎 Pokaži oglase",
     },
 }
@@ -251,7 +296,7 @@ je se da li ima imam imas trebam treba mi ti za do od sta šta koliko košta kos
 auto auta autom kupim kupiti kupovinu hvala molim bok zdravo pozdrav dobro dobar kako gdje gdje mogu hocu
 hoću zelim želim trazim tražim nesto nešto jeftino jeftinije novije stariji uporedi usporedi ispod preko
 budzet budžet godina godište kilometara kilometraža pokazi pokaži daj daj mi vise više manje najbolje
-najpametnije prodaje prati pratim pratiti zaprati praćeni nova novo novi nove koji koja koje ovo ono moje tvoje je li jel sam smo ste su
+najpametnije prodaje prati pratim pratiti zaprati praćeni sačuvao sačuvani sacuvao sacuvani lista nova novo novi nove koji koja koje ovo ono moje tvoje je li jel sam smo ste su
 """.split())
 _EN_WORDS = set("""
 the an is are was what which how much many show me find get buy want need looking for under below
