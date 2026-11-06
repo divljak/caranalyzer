@@ -54,7 +54,9 @@ login `t.me` (id 3166033). Copy it from there. Do not invent a new bot.
 | `TELEGRAM_DIGEST_LEDGER` | Optional file path for the one-send-per-day claim. On Vercel the default is process memory, so a cold start can repeat a send. Set a durable file only on a long-lived host, or accept one retry risk until a durable claim exists. Do not add a table or change grants for this scaffold. |
 
 Webhook-only variables stay as in `docs/TELEGRAM_BOT.md` (`TELEGRAM_WEBHOOK_SECRET`,
-`TELEGRAM_ALLOWED_USER_IDS`). The digest does not use them.
+`TELEGRAM_ALLOWED_USER_IDS`). The digest does not use them. Phase 2 questions add one
+optional name, `TELEGRAM_BOT_USERNAME` (`mojagaraza_bot`); it is not required and nothing in
+Production changes until Ogi approves a deploy.
 
 ## Deploy checklist
 

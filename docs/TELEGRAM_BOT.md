@@ -88,11 +88,52 @@ or candidate mutations to Telegram.
 approval. Telegram retries non-2xx webhook responses; inspect before retrying a failed
 configuration. `getUpdates` ID discovery cannot operate while a webhook is active.
 
+## Plain-language questions (Phase 2, code only until deployed)
+
+Ogi can ask ordinary questions in English or Bosnian. There is still **no LLM**: a
+deterministic parser (`telegram_intent.py`) turns a question into one of a few fixed,
+parameterized, read-only queries (status, latest, trends, find, model prices, compare).
+Anything it cannot map becomes an explicit "I can't answer that" reply, never a guess.
+It cannot run arbitrary SQL and cannot change data.
+
+Examples: `Golf from 2016 under 15000 KM`, `Škoda Octavia under 150000 km mileage`,
+`how much is an Octavia`, `Golf vs Octavia`, `what's new`, `kako se mijenjaju cijene
+zadnjih 14 dana`, and `what car should I buy` (answered with a request for a budget,
+because the database can show observed listings but cannot pick a car).
+
+How a message reaches the bot (Telegram privacy mode stays ON):
+
+- `/ask <question>`;
+- `@mojagaraza_bot <question>`; or
+- a reply to one of the bot's own answers.
+
+Other group chatter, even from an allowed user, is ignored. Setting
+`TELEGRAM_BOT_USERNAME` is optional; when set, only mentions of that exact username and
+replies to that bot count. Unset, any `@...bot` mention or reply to a bot counts.
+
+**Follow-ups.** Nothing is stored. A reply such as `from 2018`, `under 12000`, `what
+about Passat` or `and 30 days?` is combined with the scope parsed from the bot answer it
+replies to, and only from that message in the same update. Context therefore cannot cross
+users or chats, and replying to a human message gives no context. Find answers also carry
+`Budget −10%` / `Budget +10%` buttons that encode the whole query in the callback.
+
+**Honesty rules in answers.** Matching is over listings observed in the last 90 days and
+priced listings only. Results state "N of M matches". Year and mileage filters say that
+listings without those fields are excluded. Empty results, a database with no
+observations, data older than 48 hours, and a latest collector run that was not
+`completed` are each stated. Samples under 5 priced listings carry a thin-sample
+warning. Forecasts and non-KM currencies are refused. A database error returns a generic
+notice with no internals.
+
 ## Known MVP limits
 
-- This is structured conversation, not unlimited natural-language advice. Simple
-  phrases such as “status,” “latest,” and “trends” work; buying queries use explicit
-  commands so the evidence scope is unambiguous.
+- Phrasing outside the parser's vocabulary gets the "can't answer" reply; widening it
+  is a vocabulary change, not a model change. Fuel and transmission are not filters
+  because collector coverage of those fields is unverified.
+- A conversational reply is only a refinement of an answer it replies to; there is no
+  longer memory.
+- A plain model word that is not a real make or model (`joke`) is searched like any
+  other and returns "No matching listings" with a hint.
 - Comparison is a broad label match over a 90-day observed cohort. It does not yet
   normalize year, mileage, fuel or transmission; the response says so.
 - Telegram delivery is at-least-once. A rare retry after a successful send could
