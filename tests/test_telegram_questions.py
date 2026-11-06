@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError
 
+import telegram_bot
 from telegram_bot import (
     DB_UNAVAILABLE,
     TelegramConfig,
@@ -20,7 +21,7 @@ from telegram_bot import (
     status_message,
     compare_message,
 )
-from telegram_intent import Filters, context_from_reply, parse_question
+from telegram_intent import Filters, Intent, context_from_reply, parse_question
 
 ENV = {
     "TELEGRAM_BOT_TOKEN": "test-only-token",
@@ -45,6 +46,17 @@ def message(text_value, *, user=123, chat=None, reply=None, uid=10):
 
 def bot_reply(text_value=BOT_ANSWER):
     return {"from": {"id": 999, "is_bot": True, "username": "mojagaraza_bot"}, "text": text_value}
+
+
+def setUpModule():
+    patcher = patch.dict(os.environ, {}, clear=False)
+    patcher.start()
+    os.environ.pop("GEMINI_API_KEY", None)
+    globals()["_env_patch"] = patcher
+
+
+def tearDownModule():
+    _env_patch.stop()
 
 
 class ParserTests(unittest.TestCase):
@@ -83,6 +95,31 @@ class ParserTests(unittest.TestCase):
         self.assertEqual("unsupported", self.kinds(""))
         self.assertEqual("unsupported", self.kinds(
             "please could you maybe explain how olx works for foreigners in bosnia"))
+
+    def test_plural_model_words_search_as_the_singular(self):
+        for text, expected in (("show me the golfs under 15000 KM", "golf"), ("golfovi do 12000 KM", "golf"),
+                               ("octavias under 9000 KM", "octavia"), ("passati do 8000 KM", "passati"),
+                               ("mercedes under 9000 KM", "mercedes"), ("focus under 9000 KM", "focus"),
+                               ("audi a4 under 9000 KM", "audi a4")):
+            self.assertEqual(expected, parse_question(text).filters.search, text)
+
+    def test_budget_plus_what_should_i_buy_is_a_suggestion_request(self):
+        for text, budget, year, km in (
+            ("imam 50k budzet, sta se najbolje prodaje i sta je najpametnije da kupim", 50000, None, None),
+            ("Imam 20000 KM, šta da kupim?", 20000, None, None),
+            ("preporuci mi nesto do 15000 KM, nesto za porodicu", 15000, None, None),
+            ("suggest something under 9000 KM from 2012", 9000, 2012, None),
+            ("what is the best value car under 30k with less than 150k km mileage", 30000, None, 150000),
+        ):
+            intent = parse_question(text)
+            self.assertEqual(("suggest", Filters("", budget, year, km)), (intent.kind, intent.filters), text)
+
+    def test_suggestions_need_a_budget_and_named_models_stay_searches(self):
+        self.assertEqual("clarify", parse_question("what car should I buy").kind)
+        for text, search in (("best golf under 20000 KM", "golf"), ("recommend a golf under 20000 KM", "golf"),
+                             ("mg under 9000 KM", "mg")):
+            intent = parse_question(text)
+            self.assertEqual(("find", search), (intent.kind, intent.filters.search), text)
 
     def test_search_text_cannot_carry_like_wildcards(self):
         self.assertEqual("golf", parse_question("% _ golf under 9000").filters.search)
@@ -241,10 +278,40 @@ class HandlerTests(unittest.TestCase):
                     "f:9000:3000:0:golf", "f:9999999:0:0:golf"):
             self.assertIsNone(parse_refine_callback(bad), bad)
 
+    def test_age_labels_are_plain_language(self):
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(timezone.utc)
+        for days, label in ((0, "today"), (1, "yesterday"), (5, "5 days ago"), (14, "2 weeks ago"),
+                            (30, "4 weeks ago"), (59, "8 weeks ago"), (75, "2 months ago")):
+            self.assertEqual(label, telegram_bot._age(now - timedelta(days=days, minutes=1)), days)
+        self.assertEqual("at an unknown time", telegram_bot._age(None))
+        self.assertTrue(telegram_bot._is_fresh(now - timedelta(days=13)))
+        self.assertFalse(telegram_bot._is_fresh(now - timedelta(days=15)))
+        self.assertFalse(telegram_bot._is_fresh(None))
+
+    def test_older_five_field_buttons_still_work_and_offsets_are_bounded(self):
+        self.assertEqual((Filters("golf", 13500, 2016), 0), telegram_bot.parse_refine_page("f:13500:2016:0:golf"))
+        self.assertEqual((Filters("golf", 13500, 2016), 10), telegram_bot.parse_refine_page("f:13500:2016:0:10:golf"))
+        for bad in ("f:13500:0:0:-5:golf", "f:13500:0:0:96:golf", "f:13500:0:0:x:golf",
+                    "f:1:2:3:4:5:golf", "f:0:0:0:5:"):
+            self.assertIsNone(telegram_bot.parse_refine_page(bad), bad)
+        data = refine_callback(Filters("golf", 9000), 95)
+        self.assertLessEqual(len(data.encode()), 64)
+
+    def test_show_more_button_runs_a_find_at_that_offset(self):
+        update = {"update_id": 8, "callback_query": {
+            "id": "c", "from": {"id": 123}, "data": "f:15000:0:0:5:golf",
+            "message": {"chat": {"id": CONFIG.chat_id}}}}
+        captured = []
+        with patch("telegram_bot.answer_intent",
+                   side_effect=lambda e, i, c: captured.append(i) or ("answer", None)):
+            process_update(update, Mock(), CONFIG, call=Mock())
+        self.assertEqual((Filters("golf", 15000), 5), (captured[0].filters, captured[0].offset))
+
     def test_find_answers_offer_budget_buttons_others_do_not(self):
         buttons = keyboard(CONFIG, Filters("golf", 15000))["inline_keyboard"]
         first_row = [b["callback_data"] for b in buttons[0]]
-        self.assertEqual(["f:13500:0:0:golf", "f:16500:0:0:golf"], first_row)
+        self.assertEqual(["f:13500:0:0:0:golf", "f:16500:0:0:0:golf"], first_row)
         plain = keyboard(CONFIG)["inline_keyboard"]
         self.assertEqual(2, len(plain))
 
@@ -322,7 +389,7 @@ class QuestionQueryTests(unittest.TestCase):
         self.seed()
         reply = find_message(self.engine, Filters("golf", None, None, 200000))
         self.assertNotIn("__tg_2", reply)  # unknown mileage
-        self.assertIn("Showing 2 of 2", reply)
+        self.assertIn("Showing 1–2 of 2", reply)
         self.assertIn("without a recorded year or mileage", reply)
         octavia = find_message(self.engine, Filters("octavia"))
         self.assertNotIn("__tg_5", octavia)  # no price
@@ -374,6 +441,138 @@ class QuestionQueryTests(unittest.TestCase):
         self.assertIn("Sample: 3 listings", reply)
         self.assertIn("Sample: 2 listings · 1 priced", reply)
         self.assertEqual(2, reply.count("Thin sample"))
+
+    def seed_many(self):
+        rows = [  # id, year, mileage, price
+            ("__tg_p1", 2015, 120000, 9000), ("__tg_p2", 2020, 90000, 14000),
+            ("__tg_p3", 2020, 30000, 14500), ("__tg_p4", 2018, 50000, 11000),
+            ("__tg_p5", 2018, None, 10000), ("__tg_p6", 2012, 200000, 5000),
+            ("__tg_p7", 2019, 70000, 13000),
+        ]
+        with self.engine.begin() as c:
+            for lid, year, mileage, price in rows:
+                c.execute(text("""INSERT INTO car_listings(listing_id,make,model,year,price,price_status,
+                    mileage,source,collection_method,last_verified_at,first_seen_at,is_active,
+                    consecutive_missing_runs) VALUES (:id,'Volkswagen','Golf',:year,:price,'priced',:mileage,
+                    'olx.ba','olx_api',:seen,:seen,true,0)"""),
+                    {"id": lid, "year": year, "price": price, "mileage": mileage,
+                     "seen": self.now - timedelta(days=1)})
+
+    def test_results_are_ranked_newest_year_then_lowest_mileage(self):
+        self.seed_many()
+        first = find_message(self.engine, Filters("golf", 15000))
+        order = [first.index(f"__tg_p{n}") for n in (3, 2, 7, 4, 5)]
+        self.assertEqual(sorted(order), order)  # p3(2020,30k) p2(2020,90k) p7(2019) p4(2018,50k) p5(2018,?)
+        self.assertIn("Showing 1–5 of 7", first)
+        self.assertIn("newest model year first", first)
+        self.assertNotIn("__tg_p1", first)
+
+    def test_recently_seen_listings_rank_first_within_a_year_and_old_ones_are_flagged(self):
+        with self.engine.begin() as c:
+            for lid, mileage, days in (("__tg_fresh", 150000, 2), ("__tg_old", 40000, 30)):
+                c.execute(text("""INSERT INTO car_listings(listing_id,make,model,year,price,price_status,
+                    mileage,source,collection_method,last_verified_at,first_seen_at,is_active,
+                    consecutive_missing_runs) VALUES (:id,'Volkswagen','Golf',2018,12000,'priced',:mileage,
+                    'olx.ba','olx_api',:seen,:seen,true,0)"""),
+                    {"id": lid, "mileage": mileage, "seen": self.now - timedelta(days=days)})
+        reply = find_message(self.engine, Filters("golf", 15000))
+        self.assertLess(reply.index("__tg_fresh"), reply.index("__tg_old"))  # fresh first despite higher mileage
+        self.assertIn("Seen 2 days ago", reply)
+        self.assertIn("⚠ Seen 4 weeks ago", reply)
+        self.assertEqual(1, reply.count("⚠ Seen"))
+        self.assertIn("may no longer be listed", reply)
+        self.assertIn("then recently seen, then lowest mileage", reply)
+
+    def test_no_age_warning_when_everything_is_fresh(self):
+        self.seed()
+        reply = find_message(self.engine, Filters("golf", 15000, 2015))
+        self.assertIn("Seen yesterday", reply)
+        self.assertNotIn("⚠", reply)
+
+    def test_show_more_pages_through_every_match_exactly_once(self):
+        self.seed_many()
+        second = find_message(self.engine, Filters("golf", 15000), 5)
+        self.assertIn("Showing 6–7 of 7", second)
+        for lid in ("__tg_p1", "__tg_p6"):
+            self.assertIn(lid, second)
+        self.assertNotIn("__tg_p3", second)
+        beyond = find_message(self.engine, Filters("golf", 15000), 95)
+        self.assertIn("No more matches", beyond)
+        self.assertTrue(beyond.startswith("Observed listings · golf · up to 15.000 KM"))
+
+    def test_answer_intent_offers_show_more_only_when_more_exist(self):
+        self.seed_many()
+        text_value, page = telegram_bot.answer_intent(self.engine, Intent("find", Filters("golf", 15000)), CONFIG)
+        self.assertEqual(5, page.next_offset)
+        buttons = keyboard(CONFIG, page)["inline_keyboard"]
+        self.assertEqual("Show more (6–10)", buttons[0][0]["text"])
+        self.assertEqual("f:15000:0:0:5:golf", buttons[0][0]["callback_data"])
+        text_value, last = telegram_bot.answer_intent(
+            self.engine, Intent("find", Filters("golf", 15000), offset=5), CONFIG)
+        self.assertIsNone(last.next_offset)
+        self.assertFalse(any("Show more" in b["text"] for row in keyboard(CONFIG, last)["inline_keyboard"] for b in row))
+
+    def seed_suggest(self):
+        rows = [  # id, model, year, price, mileage, days since seen
+            ("__tg_s1", "Golf", 2016, 9900, 150000, 1), ("__tg_s2", "Golf", 2016, 12000, 160000, 1),
+            ("__tg_s3", "Golf", 2016, 12500, 170000, 1), ("__tg_s4", "Golf", 2016, 13000, 180000, 1),
+            ("__tg_s5", "Golf", 2016, 13500, 190000, 1), ("__tg_s6", "Golf", 2016, 8000, 100000, 30),
+            ("__tg_s7", "Golf", 2016, 30000, 50000, 1),
+            ("__tg_s8", "Octavia", 2018, 15000, 90000, 1), ("__tg_s9", "Octavia", 2018, 16000, 95000, 1),
+            ("__tg_s10", "Octavia", 2018, 17000, 99000, 1),
+        ]
+        with self.engine.begin() as c:
+            for lid, model, year, price, mileage, days in rows:
+                c.execute(text("""INSERT INTO car_listings(listing_id,make,model,year,price,price_status,
+                    mileage,source,collection_method,last_verified_at,first_seen_at,is_active,
+                    consecutive_missing_runs) VALUES (:id,:make,:model,:year,:price,'priced',:mileage,
+                    'olx.ba','olx_api',:seen,:seen,true,0)"""),
+                    {"id": lid, "make": "Volkswagen" if model == "Golf" else "Škoda", "model": model,
+                     "year": year, "price": price, "mileage": mileage, "seen": self.now - timedelta(days=days)})
+            c.execute(text("""INSERT INTO listing_snapshots(listing_id,observed_at,asking_price,price_status,
+                source_url,title,is_active) VALUES ('__tg_s1',:seen,9900,'priced','https://olx.ba/artikal/x','t',true)"""),
+                {"seen": self.now - timedelta(hours=1)})
+
+    def test_shortlist_lists_the_most_listed_models_for_a_budget(self):
+        self.seed_suggest()
+        reply = telegram_bot.suggest_message(self.engine, Filters("", 20000))
+        self.assertTrue(reply.startswith("Data-based shortlist · up to 20.000 KM"))
+        self.assertIn("• Volkswagen Golf · 6 listings · median 12.250 KM · median 165.000 km · newest 2016", reply)
+        self.assertIn("• Škoda Octavia · 3 listings · median 16.000 KM", reply)
+        self.assertLess(reply.index("Volkswagen Golf · 6"), reply.index("Škoda Octavia · 3"))
+        self.assertNotIn("30.000 KM", reply)  # over budget
+        self.assertIn("not best selling", reply)
+
+    def test_shortlist_flags_only_fresh_listings_priced_well_under_similar_ones(self):
+        self.seed_suggest()
+        reply = telegram_bot.suggest_message(self.engine, Filters("", 20000))
+        # the comparison group is every similar recent ad (7, including the over-budget one), not only the budget
+        self.assertIn("21% under the 12.500 KM median of 7 similar", reply)
+        self.assertIn("__tg_s1", reply)
+        self.assertIn("Seen yesterday", reply)
+        for other in ("__tg_s6", "__tg_s2", "__tg_s8", "__tg_s7"):  # stale, typical price, thin group, over budget
+            self.assertNotIn(other, reply)
+        self.assertNotIn("no stored observations", reply)
+
+    def test_shortlist_respects_budget_year_and_mileage_and_admits_gaps(self):
+        self.seed_suggest()
+        tight = telegram_bot.suggest_message(self.engine, Filters("", 10000))
+        self.assertIn("Not enough listings to compare models here", tight)
+        self.assertIn("__tg_s1", tight)  # still under the budget and well below similar ads
+        nothing = telegram_bot.suggest_message(self.engine, Filters("", 20000, 2018))
+        self.assertIn("No fresh listing stands out right now.", nothing)
+        self.assertNotIn("Volkswagen Golf", nothing)
+        km = telegram_bot.suggest_message(self.engine, Filters("", 20000, None, 100000))
+        self.assertNotIn("__tg_s1", km)
+        empty = telegram_bot.suggest_message(self.engine, Filters("", 1000))
+        self.assertIn("Not enough listings", empty)
+        self.assertIn("No fresh listing stands out", empty)
+
+    def test_shortlist_never_changes_the_database(self):
+        self.seed_suggest()
+        before = self.counts()
+        telegram_bot.suggest_message(self.engine, Filters("", 20000))
+        self.assertEqual(before, self.counts())
 
     def test_existing_status_still_reads_a_seeded_run(self):
         self.seed()

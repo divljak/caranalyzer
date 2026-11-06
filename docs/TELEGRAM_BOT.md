@@ -118,20 +118,98 @@ users or chats, and replying to a human message gives no context. Find answers a
 `Budget −10%` / `Budget +10%` buttons that encode the whole query in the callback.
 
 **Honesty rules in answers.** Matching is over listings observed in the last 90 days and
-priced listings only. Results state "N of M matches". Year and mileage filters say that
+priced listings only, ranked newest model year first, then recently seen (last 14 days), then lowest mileage, five per page with a **Show more** button. Each listing shows how long ago it was last seen; sightings older than 14 days get a ⚠ because the ad may no longer be listed. Results state "N of M matches". Year and mileage filters say that
 listings without those fields are excluded. Empty results, a database with no
 observations, data older than 48 hours, and a latest collector run that was not
 `completed` are each stated. Samples under 5 priced listings carry a thin-sample
 warning. Forecasts and non-KM currencies are refused. A database error returns a generic
 notice with no internals.
 
+## Private chat and the Gemini fallback
+
+**Private chat.** An allowlisted user can message the bot directly (open the bot, press
+Start) and type plain language: no `/ask`, no `@mention`. Access requires that the sender
+is in `TELEGRAM_ALLOWED_USER_IDS` **and** that the chat is a private chat whose id equals
+the sender's id, so another account, a group, or a spoofed chat id gets no reply. Replies go
+to the chat the message came from. The Garaža group works exactly as before.
+
+**Short memory (private chat only).** Follow-ups like `from 2018` or `under 9000` apply to
+the last find/trend answer for 30 minutes. This memory is in-process only (a serverless
+instance may not share it, in which case the message is simply read on its own), keyed by
+chat **and** user, bounded to 64 entries, and never used in the group.
+
+**Gemini planning (free tier).** The built-in parser runs first and costs nothing. Gemini
+is consulted when that parser cannot read the message (gibberish, or a loose sentence
+such as "something sensible for my family"). Gemini never supplies facts: it returns a small JSON
+request that is validated against fixed limits (price 1,000–1,000,000 KM, years 1980–2035,
+mileage, 1–90 days, sanitised search text) and then answered by the same read-only database
+queries. In planning mode it sees only the user's message, recent turns and the previous answer's
+scope; the conversation mode below also sends the database answer text. No token or key is sent. If the key is missing, the free quota is used up,
+or the call fails, the bot falls back to its normal reply and never errors.
+
+- Env names: `GEMINI_API_KEY` (secret, Production) and `TELEGRAM_LLM_MODEL` (default
+  `gemini-3.5-flash-lite`). The key is sent in an `x-goog-api-key` header, never in a URL.
+- **Privacy:** on Google's free tier, prompts and responses may be used to improve Google's
+  products and reviewed by humans. Do not type personal details into the bot. Enabling
+  billing on the Google project moves it to the paid tier, which excludes this.
+- `/llm` (allowlisted users only) runs one tiny test request and reports whether Gemini
+  works (key rejected, quota reached, model not found, ok). It never prints a secret.
+
+## Conversation mode (Gemini writes the reply)
+
+When `GEMINI_API_KEY` is set, plain messages (not commands or buttons) get a chat-style
+reply instead of a results dump:
+
+- **Small talk and vague questions.** A greeting, thanks, "something for my family" or a
+  bare word ("golf", "bok") goes to Gemini, which decides between a search and a friendly
+  reply or a question (it asks for a budget in KM first). A message with a price, year or
+  mileage is read by the free parser.
+- **Searches are phrased.** The database runs the same read-only query as before, then
+  Gemini rewrites *that answer* in a few natural sentences in the user's language. The
+  listings (with links, ages and the ⚠ markers) are attached only when the user asked to see
+  cars; otherwise the reply offers to show them. Buttons, commands and **Show more** stay
+  exactly as before.
+- **Grounding checks.** A model-written reply is accepted only if every number in it already
+  appears in the database answer, the user's message or the recent turns, and it contains no
+  links, `@` mentions or code. Otherwise the bot sends the plain database answer (or the fixed
+  text). It never gives general car advice, picks a car, or forecasts prices.
+- **Memory.** The last 6 chat turns are kept in-process for 30 minutes in a private chat
+  (same limits as the scope memory: per chat and user, bounded, never in groups). It can be
+  lost when the serverless instance changes; the bot then simply answers without it.
+- A "typing…" indicator is sent while the model works.
+
+**What Gemini sees:** the user's message, up to 6 recent turns, and the database answer text
+(public olx.ba listing details such as model, price, mileage, year and age, plus counts). It
+never receives tokens, keys or any other data. On Google's free tier this text may be used to
+improve Google's products and reviewed by humans. Each chat message costs one or two Gemini
+requests against the free quota; when the quota is used up or a call fails, the bot falls back
+to its previous behaviour.
+
+## Suggestions ("I have 50k, what should I buy?")
+
+A budget plus a "what should I buy / what is best / what sells best" question returns a
+**data-based shortlist** (not a recommendation):
+
+- **Most listed models** within the budget (ads seen in the last 90 days, at least 3 per
+  model), with listing count, median price, median mileage and newest year. "Most listed"
+  means the most ads in our database; it is **not** best selling, because there is no sales
+  data, and the bot says so.
+- **Priced well below similar listings:** fresh ads (seen in the last 14 days) whose price is
+  at least 15% under the median of the same model and year (at least 4 similar ads, compared
+  across every recent ad, not only those under the budget) and whose mileage is at or under
+  that median. Each shows the discount, mileage, age and link.
+- Caveats are always attached: a low price can mean damage or a wrong entry; check each ad.
+  Without a budget the bot asks for one. Gemini may summarise what stands out but still cannot
+  invent numbers, call a car "the best", or give general car advice, and the listings are always
+  attached to a suggestion.
+
 ## Known MVP limits
 
 - Phrasing outside the parser's vocabulary gets the "can't answer" reply; widening it
   is a vocabulary change, not a model change. Fuel and transmission are not filters
   because collector coverage of those fields is unverified.
-- A conversational reply is only a refinement of an answer it replies to; there is no
-  longer memory.
+- In the group a follow-up must reply to a bot answer. Private chats remember the last
+  answer for 30 minutes, best-effort.
 - A plain model word that is not a real make or model (`joke`) is searched like any
   other and returns "No matching listings" with a hint.
 - Comparison is a broad label match over a 90-day observed cohort. It does not yet
