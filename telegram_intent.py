@@ -43,6 +43,8 @@ class Intent:
     days: int = 7
     labels: tuple[str, ...] = ()
     note: str = ""
+    question: str = ""
+    offset: int = 0
 
 
 def fold(value):
@@ -193,6 +195,23 @@ def _days_from(folded):
     if re.search(r"\b(?:week|sedmic|sedmica)\w*", folded):
         return 7
     return 7
+
+
+_FOLLOWUP_CUE = re.compile(
+    r"^(?:and|also|what about|how about|and what about|a sta je sa|sta sa|a|i|only|just)\b", re.I)
+
+
+def looks_like_followup(text_value):
+    """True when a message reads as a refinement of the previous answer.
+
+    Used only for the best-effort memory of a private chat: filter-only messages
+    ("from 2018", "under 12000") or ones opening with "what about ...".
+    """
+    original = strip_mentions((text_value or "")[:MAX_QUESTION]).strip()
+    if _FOLLOWUP_CUE.match(original):
+        return True
+    filters, rest = _extract_filters(fold(original), original)
+    return not filters.is_empty() and not _search_tokens(rest)
 
 
 def context_from_reply(reply_text):

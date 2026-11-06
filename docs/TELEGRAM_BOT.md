@@ -125,13 +125,43 @@ observations, data older than 48 hours, and a latest collector run that was not
 warning. Forecasts and non-KM currencies are refused. A database error returns a generic
 notice with no internals.
 
+## Private chat and the Gemini fallback
+
+**Private chat.** An allowlisted user can message the bot directly (open the bot, press
+Start) and type plain language: no `/ask`, no `@mention`. Access requires that the sender
+is in `TELEGRAM_ALLOWED_USER_IDS` **and** that the chat is a private chat whose id equals
+the sender's id, so another account, a group, or a spoofed chat id gets no reply. Replies go
+to the chat the message came from. The Garaža group works exactly as before.
+
+**Short memory (private chat only).** Follow-ups like `from 2018` or `under 9000` apply to
+the last find/trend answer for 30 minutes. This memory is in-process only (a serverless
+instance may not share it, in which case the message is simply read on its own), keyed by
+chat **and** user, bounded to 64 entries, and never used in the group.
+
+**Gemini fallback (free tier).** The built-in parser runs first and costs nothing. Gemini
+is called only when that parser cannot read the message (gibberish, or a loose sentence
+such as "something sensible for my family"). Gemini never answers: it returns a small JSON
+request that is validated against fixed limits (price 1,000–1,000,000 KM, years 1980–2035,
+mileage, 1–90 days, sanitised search text) and then answered by the same read-only database
+queries. It sees only the user's message and, for a follow-up, the previous answer's scope.
+No database content, token or key is sent. If the key is missing, the free quota is used up,
+or the call fails, the bot falls back to its normal reply and never errors.
+
+- Env names: `GEMINI_API_KEY` (secret, Production) and `TELEGRAM_LLM_MODEL` (default
+  `gemini-3.5-flash-lite`). The key is sent in an `x-goog-api-key` header, never in a URL.
+- **Privacy:** on Google's free tier, prompts and responses may be used to improve Google's
+  products and reviewed by humans. Do not type personal details into the bot. Enabling
+  billing on the Google project moves it to the paid tier, which excludes this.
+- `/llm` (allowlisted users only) runs one tiny test request and reports whether Gemini
+  works (key rejected, quota reached, model not found, ok). It never prints a secret.
+
 ## Known MVP limits
 
 - Phrasing outside the parser's vocabulary gets the "can't answer" reply; widening it
   is a vocabulary change, not a model change. Fuel and transmission are not filters
   because collector coverage of those fields is unverified.
-- A conversational reply is only a refinement of an answer it replies to; there is no
-  longer memory.
+- In the group a follow-up must reply to a bot answer. Private chats remember the last
+  answer for 30 minutes, best-effort.
 - A plain model word that is not a real make or model (`joke`) is searched like any
   other and returns "No matching listings" with a hint.
 - Comparison is a broad label match over a 90-day observed cohort. It does not yet

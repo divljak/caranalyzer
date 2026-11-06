@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import time
 import hmac
 import os
 import re
@@ -21,8 +22,10 @@ from telegram_intent import (
     clean_search,
     context_from_reply,
     fold,
+    looks_like_followup,
     parse_question,
 )
+import telegram_llm
 
 
 SARAJEVO = ZoneInfo("Europe/Sarajevo")
@@ -388,7 +391,20 @@ def _filter_title(filters):
     return " · ".join(parts)
 
 
-def find_message(engine, filters):
+PAGE_SIZE = 5
+MAX_OFFSET = 95
+
+
+@dataclass(frozen=True)
+class Page:
+    """What the keyboard needs to know about a find answer."""
+    filters: Filters
+    next_offset: int | None = None
+
+
+def find_page(engine, filters, offset=0):
+    """Return (message text, total matches) for one page of find results."""
+    offset = max(0, min(int(offset), MAX_OFFSET))
     with engine.begin() as connection:
         _statement_timeout(connection)
         matches = _all(connection, f"""
@@ -405,24 +421,30 @@ def find_message(engine, filters):
             AND (CAST(:year_min AS integer) IS NULL OR c.year>=CAST(:year_min AS integer))
             AND (CAST(:mileage_max AS integer) IS NULL OR c.mileage<=CAST(:mileage_max AS integer))
             AND (:search='' OR {_LABEL_SQL} LIKE :pattern ESCAPE '\\')
-          ORDER BY c.last_verified_at DESC,c.year DESC NULLS LAST,c.price DESC,c.listing_id
-          LIMIT 5
+          ORDER BY c.year DESC NULLS LAST,c.mileage ASC NULLS LAST,
+            c.last_verified_at DESC,c.listing_id
+          LIMIT {PAGE_SIZE} OFFSET CAST(:offset AS integer)
         """, {
             "budget": filters.budget,
             "year_min": filters.year_min,
             "mileage_max": filters.mileage_max,
             "search": filters.search,
             "pattern": _like_pattern(filters.search),
+            "offset": offset,
         })
         note = _freshness_note(connection)
     lines = [_filter_title(filters)]
+    total = 0
     if not matches:
-        lines.append("No matching listings in the last 90 days.")
-        if filters.search and not (filters.budget or filters.year_min or filters.mileage_max):
+        lines.append("No more matches." if offset else "No matching listings in the last 90 days.")
+        if offset == 0 and filters.search and not (filters.budget or filters.year_min or filters.mileage_max):
             lines.append("If that was not a car make or model, send /help to see what I can answer.")
     else:
         total = matches[0]["total"]
-        lines.append(f"Showing {len(matches)} of {total} database matches, most recently observed first:")
+        first, last = offset + 1, offset + len(matches)
+        span = f"{first}" if first == last else f"{first}–{last}"
+        lines.append(f"Showing {span} of {total} database matches, newest model year first, "
+                     "then lowest mileage:")
         for item in matches:
             label = " ".join(value for value in (item["make"], item["model"]) if value) or "Unparsed model"
             year = f" · {item['year']}" if item["year"] else ""
@@ -435,10 +457,21 @@ def find_message(engine, filters):
     if note:
         lines.extend(["", note])
     lines.extend(["", "These are observed asking prices, not recommendations or verified availability."])
-    return "\n".join(lines)
+    return "\n".join(lines), total
 
 
-def clarify_message(note=""):
+def find_message(engine, filters, offset=0):
+    return find_page(engine, filters, offset)[0]
+
+
+def chitchat_message():
+    return ("Hi! I answer questions about used cars from our olx.ba database, for example "
+            "“Golf under 15000 KM”, “how much is an Octavia” or “Golf vs Octavia”. What are you looking for?")
+
+
+def clarify_message(note="", question=""):
+    if question:
+        return question + "\n\n(I can only show what our database has observed; I can't pick a car for you.)"
     if note == "currency":
         return "Prices in our database are asking prices in KM. Please give the amount in KM, e.g. “Golf under 15000 KM”."
     return "\n".join([
@@ -569,29 +602,40 @@ def _round_budget(value):
     return max(1_000, int(round(value / 500.0)) * 500)
 
 
-def refine_callback(filters):
-    data = f"f:{filters.budget or 0}:{filters.year_min or 0}:{filters.mileage_max or 0}:{filters.search}"
+def refine_callback(filters, offset=0):
+    data = (f"f:{filters.budget or 0}:{filters.year_min or 0}:{filters.mileage_max or 0}:"
+            f"{offset}:{filters.search}")
     return data if len(data.encode()) <= 64 else None
 
 
-def parse_refine_callback(data):
-    parts = (data or "").split(":", 4)
-    if len(parts) != 5 or parts[0] != "f":
+def parse_refine_page(data):
+    """Return (Filters, offset) from a find button, or None. Accepts the older 5-field form."""
+    parts = (data or "").split(":", 5)
+    if not parts or parts[0] != "f" or len(parts) not in (5, 6):
         return None
     try:
         budget, year, mileage = (int(value) for value in parts[1:4])
+        offset = int(parts[4]) if len(parts) == 6 else 0
     except ValueError:
         return None
-    filters = Filters(clean_search(parts[4]), budget or None, year or None, mileage or None)
+    filters = Filters(clean_search(parts[-1]), budget or None, year or None, mileage or None)
     in_range = (
         (filters.budget is None or 1_000 <= filters.budget <= 1_000_000)
         and (filters.year_min is None or 1980 <= filters.year_min <= 2035)
         and (filters.mileage_max is None or 1_000 <= filters.mileage_max <= 1_000_000)
+        and 0 <= offset <= MAX_OFFSET
     )
-    return filters if in_range and not filters.is_empty() else None
+    return (filters, offset) if in_range and not filters.is_empty() else None
 
 
-def keyboard(config, filters=None):
+def parse_refine_callback(data):
+    parsed = parse_refine_page(data)
+    return parsed[0] if parsed else None
+
+
+def keyboard(config, page=None):
+    filters = page.filters if isinstance(page, Page) else page
+    next_offset = page.next_offset if isinstance(page, Page) else None
     buttons = [
         [
             {"text": "Status", "callback_data": "status"},
@@ -612,6 +656,11 @@ def keyboard(config, filters=None):
                 row.append({"text": label, "callback_data": data})
         if row:
             buttons.insert(0, row)
+    if filters is not None and next_offset is not None:
+        data = refine_callback(filters, next_offset)
+        if data:
+            buttons.insert(0, [{"text": f"Show more ({next_offset + 1}–{next_offset + PAGE_SIZE})",
+                                "callback_data": data}])
     if config.market_url:
         buttons.append([{"text": "Open Market", "url": config.market_url}])
     return {"inline_keyboard": buttons}
@@ -638,7 +687,44 @@ def _identity(update):
     message = callback.get("message") or update.get("message") or {}
     sender = callback.get("from") or message.get("from") or {}
     chat = message.get("chat") or {}
-    return chat.get("id"), sender.get("id"), message, callback
+    return chat, sender.get("id"), message, callback
+
+
+def is_authorized(chat, user_id, config):
+    """Allowlisted user, in the configured group or in their own private chat with the bot."""
+    if not isinstance(chat, dict) or user_id not in config.allowed_user_ids:
+        return False
+    chat_id = chat.get("id")
+    if chat_id == config.chat_id:
+        return True
+    return chat.get("type") == "private" and chat_id == user_id
+
+
+# Best-effort memory of the last answer's scope in a private chat. It lives only in this
+# process (serverless instances may not share it), is keyed by chat AND user, expires, and
+# is never used for the group: group follow-ups must reply to a bot message instead.
+SCOPE_TTL_SECONDS = 1800
+SCOPE_MAX_ENTRIES = 64
+_SCOPES = {}
+
+
+def _remember_scope(key, intent):
+    if intent.kind not in {"find", "trends"}:
+        return
+    now = time.monotonic()
+    for stale in [k for k, (_, at) in _SCOPES.items() if now - at > SCOPE_TTL_SECONDS]:
+        _SCOPES.pop(stale, None)
+    if len(_SCOPES) >= SCOPE_MAX_ENTRIES:
+        _SCOPES.pop(min(_SCOPES, key=lambda k: _SCOPES[k][1]), None)
+    _SCOPES[key] = (intent, now)
+
+
+def _recall_scope(key):
+    entry = _SCOPES.get(key)
+    if not entry or time.monotonic() - entry[1] > SCOPE_TTL_SECONDS:
+        _SCOPES.pop(key, None)
+        return None
+    return entry[0]
 
 
 DB_UNAVAILABLE = "The database is temporarily unavailable, so I can't answer right now. Please try again shortly."
@@ -647,6 +733,8 @@ DB_UNAVAILABLE = "The database is temporarily unavailable, so I can't answer rig
 def is_addressed(message, config):
     """Free text counts only when it is a reply to the bot or mentions it."""
     text_value = message.get("text") or ""
+    if (message.get("chat") or {}).get("type") == "private":
+        return True
     reply_from = (message.get("reply_to_message") or {}).get("from") or {}
     if reply_from.get("is_bot") and (
             not config.bot_username
@@ -674,29 +762,50 @@ def answer_intent(engine, intent, config):
     if intent.kind == "trends":
         return trends_message(engine, intent.days), None
     if intent.kind == "find":
-        return find_message(engine, intent.filters), intent.filters
+        offset = max(0, min(intent.offset, MAX_OFFSET))
+        text_value, total = find_page(engine, intent.filters, offset)
+        following = offset + PAGE_SIZE
+        return text_value, Page(intent.filters, following if following < total and following <= MAX_OFFSET else None)
     if intent.kind == "model_stats":
         return model_stats_message(engine, intent.filters.search), None
     if intent.kind == "compare":
         return compare_message(engine, " | ".join(intent.labels)), None
+    if intent.kind == "chitchat":
+        return chitchat_message(), None
     if intent.kind == "clarify":
-        return clarify_message(intent.note), None
+        return clarify_message(intent.note, intent.question), None
     return unsupported_message(intent.note), None
 
 
-def process_update(update: dict[str, Any], engine, config: TelegramConfig, *, call=telegram_call):
+_DEFAULT_LLM = object()
+
+
+def _default_llm():
+    config = telegram_llm.LLMConfig.from_env()
+    if config is None:
+        return None
+    return lambda message, previous: telegram_llm.interpret(message, previous, config)
+
+
+def process_update(update: dict[str, Any], engine, config: TelegramConfig, *, call=telegram_call,
+                   llm=_DEFAULT_LLM):
     if not isinstance(update, dict) or not isinstance(update.get("update_id"), int):
         return {"handled": False, "reason": "invalid_update"}
-    chat_id, user_id, message, callback = _identity(update)
-    if chat_id != config.chat_id or user_id not in config.allowed_user_ids:
+    chat, user_id, message, callback = _identity(update)
+    if not is_authorized(chat, user_id, config):
         return {"handled": False, "reason": "unauthorized"}
+    chat_id = chat["id"]
+    private = chat.get("type") == "private"
+    scope_key = (chat_id, user_id)
     callback_data = callback.get("data") if callback else None
     intent = None
     command, argument = "help", ""
+    if llm is _DEFAULT_LLM:
+        llm = _default_llm()
     if callback_data:
-        refine = parse_refine_callback(callback_data)
+        refine = parse_refine_page(callback_data)
         if refine:
-            intent = Intent("find", refine)
+            intent = Intent("find", refine[0], offset=refine[1])
             command = "find"
         elif callback_data.startswith("trends:"):
             command, argument = "trends", callback_data.partition(":")[2]
@@ -709,11 +818,13 @@ def process_update(update: dict[str, Any], engine, config: TelegramConfig, *, ca
             return {"handled": False, "reason": "no_text"}
         if body.lstrip().startswith("/"):
             command, argument = command_for(body)
-            if command == "ask":
-                intent = parse_question(argument, reply_context(message))
+            if command == "llm":
+                intent = Intent("llm_check")
+            elif command == "ask":
+                intent = _understand(argument, message, private and scope_key, llm)
                 command = intent.kind
         elif is_addressed(message, config):
-            intent = parse_question(body, reply_context(message))
+            intent = _understand(body, message, private and scope_key, llm)
             command = intent.kind
         else:
             return {"handled": False, "reason": "not_addressed"}
@@ -721,16 +832,47 @@ def process_update(update: dict[str, Any], engine, config: TelegramConfig, *, ca
         return {"handled": False, "reason": "acknowledgement"}
     markup_filters = None
     try:
-        if intent is not None:
+        if intent is not None and intent.kind == "llm_check":
+            response = telegram_llm.check_message(telegram_llm.LLMConfig.from_env())
+            command = "llm"
+        elif intent is not None:
             response, markup_filters = answer_intent(engine, intent, config)
+            if private:
+                _remember_scope(scope_key, intent)
         else:
             response = render_command(engine, command, argument)
     except SQLAlchemyError:
         response = DB_UNAVAILABLE
     call(config, "sendMessage", {
-        "chat_id": config.chat_id,
+        "chat_id": chat_id,
         "text": response[:MAX_MESSAGE],
         "disable_web_page_preview": True,
         "reply_markup": keyboard(config, markup_filters),
     })
     return {"handled": True, "command": command}
+
+
+def _needs_interpreter(intent, text_value):
+    """True when the parse is unreadable or just a loose sentence turned into a search term."""
+    if intent.kind == "unsupported":
+        return not intent.note
+    if intent.kind != "find":
+        return False
+    f = intent.filters
+    if f.budget or f.year_min or f.mileage_max:
+        return False
+    return len(f.search.split()) >= 4 or len((text_value or "").split()) > 5
+
+
+def _understand(text_value, message, scope_key, llm):
+    """Deterministic parse first; Gemini only when that cannot read the message."""
+    context = reply_context(message)
+    remembered = _recall_scope(scope_key) if scope_key else None
+    if context is None and remembered is not None and looks_like_followup(text_value):
+        context = remembered
+    intent = parse_question(text_value, context)
+    if llm is not None and _needs_interpreter(intent, text_value):
+        interpreted = llm(text_value, context or remembered)
+        if interpreted is not None:
+            return interpreted
+    return intent

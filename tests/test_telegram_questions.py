@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError
 
+import telegram_bot
 from telegram_bot import (
     DB_UNAVAILABLE,
     TelegramConfig,
@@ -20,7 +21,7 @@ from telegram_bot import (
     status_message,
     compare_message,
 )
-from telegram_intent import Filters, context_from_reply, parse_question
+from telegram_intent import Filters, Intent, context_from_reply, parse_question
 
 ENV = {
     "TELEGRAM_BOT_TOKEN": "test-only-token",
@@ -45,6 +46,17 @@ def message(text_value, *, user=123, chat=None, reply=None, uid=10):
 
 def bot_reply(text_value=BOT_ANSWER):
     return {"from": {"id": 999, "is_bot": True, "username": "mojagaraza_bot"}, "text": text_value}
+
+
+def setUpModule():
+    patcher = patch.dict(os.environ, {}, clear=False)
+    patcher.start()
+    os.environ.pop("GEMINI_API_KEY", None)
+    globals()["_env_patch"] = patcher
+
+
+def tearDownModule():
+    _env_patch.stop()
 
 
 class ParserTests(unittest.TestCase):
@@ -241,10 +253,29 @@ class HandlerTests(unittest.TestCase):
                     "f:9000:3000:0:golf", "f:9999999:0:0:golf"):
             self.assertIsNone(parse_refine_callback(bad), bad)
 
+    def test_older_five_field_buttons_still_work_and_offsets_are_bounded(self):
+        self.assertEqual((Filters("golf", 13500, 2016), 0), telegram_bot.parse_refine_page("f:13500:2016:0:golf"))
+        self.assertEqual((Filters("golf", 13500, 2016), 10), telegram_bot.parse_refine_page("f:13500:2016:0:10:golf"))
+        for bad in ("f:13500:0:0:-5:golf", "f:13500:0:0:96:golf", "f:13500:0:0:x:golf",
+                    "f:1:2:3:4:5:golf", "f:0:0:0:5:"):
+            self.assertIsNone(telegram_bot.parse_refine_page(bad), bad)
+        data = refine_callback(Filters("golf", 9000), 95)
+        self.assertLessEqual(len(data.encode()), 64)
+
+    def test_show_more_button_runs_a_find_at_that_offset(self):
+        update = {"update_id": 8, "callback_query": {
+            "id": "c", "from": {"id": 123}, "data": "f:15000:0:0:5:golf",
+            "message": {"chat": {"id": CONFIG.chat_id}}}}
+        captured = []
+        with patch("telegram_bot.answer_intent",
+                   side_effect=lambda e, i, c: captured.append(i) or ("answer", None)):
+            process_update(update, Mock(), CONFIG, call=Mock())
+        self.assertEqual((Filters("golf", 15000), 5), (captured[0].filters, captured[0].offset))
+
     def test_find_answers_offer_budget_buttons_others_do_not(self):
         buttons = keyboard(CONFIG, Filters("golf", 15000))["inline_keyboard"]
         first_row = [b["callback_data"] for b in buttons[0]]
-        self.assertEqual(["f:13500:0:0:golf", "f:16500:0:0:golf"], first_row)
+        self.assertEqual(["f:13500:0:0:0:golf", "f:16500:0:0:0:golf"], first_row)
         plain = keyboard(CONFIG)["inline_keyboard"]
         self.assertEqual(2, len(plain))
 
@@ -322,7 +353,7 @@ class QuestionQueryTests(unittest.TestCase):
         self.seed()
         reply = find_message(self.engine, Filters("golf", None, None, 200000))
         self.assertNotIn("__tg_2", reply)  # unknown mileage
-        self.assertIn("Showing 2 of 2", reply)
+        self.assertIn("Showing 1–2 of 2", reply)
         self.assertIn("without a recorded year or mileage", reply)
         octavia = find_message(self.engine, Filters("octavia"))
         self.assertNotIn("__tg_5", octavia)  # no price
@@ -374,6 +405,54 @@ class QuestionQueryTests(unittest.TestCase):
         self.assertIn("Sample: 3 listings", reply)
         self.assertIn("Sample: 2 listings · 1 priced", reply)
         self.assertEqual(2, reply.count("Thin sample"))
+
+    def seed_many(self):
+        rows = [  # id, year, mileage, price
+            ("__tg_p1", 2015, 120000, 9000), ("__tg_p2", 2020, 90000, 14000),
+            ("__tg_p3", 2020, 30000, 14500), ("__tg_p4", 2018, 50000, 11000),
+            ("__tg_p5", 2018, None, 10000), ("__tg_p6", 2012, 200000, 5000),
+            ("__tg_p7", 2019, 70000, 13000),
+        ]
+        with self.engine.begin() as c:
+            for lid, year, mileage, price in rows:
+                c.execute(text("""INSERT INTO car_listings(listing_id,make,model,year,price,price_status,
+                    mileage,source,collection_method,last_verified_at,first_seen_at,is_active,
+                    consecutive_missing_runs) VALUES (:id,'Volkswagen','Golf',:year,:price,'priced',:mileage,
+                    'olx.ba','olx_api',:seen,:seen,true,0)"""),
+                    {"id": lid, "year": year, "price": price, "mileage": mileage,
+                     "seen": self.now - timedelta(days=1)})
+
+    def test_results_are_ranked_newest_year_then_lowest_mileage(self):
+        self.seed_many()
+        first = find_message(self.engine, Filters("golf", 15000))
+        order = [first.index(f"__tg_p{n}") for n in (3, 2, 7, 4, 5)]
+        self.assertEqual(sorted(order), order)  # p3(2020,30k) p2(2020,90k) p7(2019) p4(2018,50k) p5(2018,?)
+        self.assertIn("Showing 1–5 of 7", first)
+        self.assertIn("newest model year first", first)
+        self.assertNotIn("__tg_p1", first)
+
+    def test_show_more_pages_through_every_match_exactly_once(self):
+        self.seed_many()
+        second = find_message(self.engine, Filters("golf", 15000), 5)
+        self.assertIn("Showing 6–7 of 7", second)
+        for lid in ("__tg_p1", "__tg_p6"):
+            self.assertIn(lid, second)
+        self.assertNotIn("__tg_p3", second)
+        beyond = find_message(self.engine, Filters("golf", 15000), 95)
+        self.assertIn("No more matches", beyond)
+        self.assertTrue(beyond.startswith("Observed listings · golf · up to 15.000 KM"))
+
+    def test_answer_intent_offers_show_more_only_when_more_exist(self):
+        self.seed_many()
+        text_value, page = telegram_bot.answer_intent(self.engine, Intent("find", Filters("golf", 15000)), CONFIG)
+        self.assertEqual(5, page.next_offset)
+        buttons = keyboard(CONFIG, page)["inline_keyboard"]
+        self.assertEqual("Show more (6–10)", buttons[0][0]["text"])
+        self.assertEqual("f:15000:0:0:5:golf", buttons[0][0]["callback_data"])
+        text_value, last = telegram_bot.answer_intent(
+            self.engine, Intent("find", Filters("golf", 15000), offset=5), CONFIG)
+        self.assertIsNone(last.next_offset)
+        self.assertFalse(any("Show more" in b["text"] for row in keyboard(CONFIG, last)["inline_keyboard"] for b in row))
 
     def test_existing_status_still_reads_a_seeded_run(self):
         self.seed()
