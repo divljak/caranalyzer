@@ -91,7 +91,8 @@ bosnia bih right now something anything one status fresh freshness stale collect
 recommend recommendation recommendations preporuci preporuka preporuke preporucite worth deal besides novo najnovije
 suggest suggestion imam najbolje najbolji najbolja najpametnije najpametniji pametno smart smartest sells selling sell
 prodaje prodaju prodavati prodaje-se najtrazenije najtrazeniji popular worthwhile savjet advice
-value nesto family porodica porodicu porodicni porodicno familiju sporty
+value follow following followed track watch watching prati pratiti pratim zaprati pracenje praceni am im ive whats
+moj moja moje my nesto family porodica porodicu porodicni porodicno familiju sporty
 """.split())
 
 _MENTION = re.compile(r"@\w+")
@@ -273,6 +274,7 @@ def context_from_reply(reply_text):
     return None
 
 
+_FOLLOW = r"\b(?:follow\w*|track\w*|watch\w*|prati\w*|zaprati\w*|pracenj\w*|praceni\w*)\b"
 _STATUS = r"\b(?:status|fresh\w*|up to date|stale|collector|how old|when was|azurn\w*|kolektor)\b"
 _LATEST = r"\b(?:latest|newest|what'?s new|whats new|new listings|interesting|finds|najnovij\w*|sta ima novo|novo)\b"
 _TRENDS = (r"\b(?:trend\w*|price changes?|prices? (?:drop|fall|rise|change)\w*|pojeftin\w*|poskup\w*)|"
@@ -317,6 +319,13 @@ def parse_question(text_value, context=None):
     tokens = _search_tokens(rest)
     named = tokens if any(not token.isdigit() for token in tokens) else []
     filters = replace(filters, search=clean_search(" ".join(named)))
+
+    if re.search(_FOLLOW, folded):
+        generic = {"model", "modeli", "modela", "models", "cars", "auta", "automobili"}
+        named = " ".join(word for word in filters.search.split() if fold(word) not in generic)
+        if named and filters.budget is None and filters.year_min is None and filters.mileage_max is None:
+            return Intent("follow", Filters(search=named))
+        return Intent("following")
 
     model_words = [t for t in tokens if len(t) > 2 or any(c.isdigit() for c in t)]
     if filters.budget and re.search(_SUGGEST, folded) and (not model_words or len(model_words) >= 3):

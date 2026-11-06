@@ -774,6 +774,21 @@ def parse_suggest_callback(data):
     return budget if 1_000 <= budget <= 1_000_000 else None
 
 
+def follow_callback(make, model):
+    data = f"p:{make}|{model}"
+    return data if len(data.encode()) <= 64 else None
+
+
+def parse_follow_callback(data):
+    """Return (make, model) from a 'p:<make>|<model>' button, or None."""
+    if not isinstance(data, str) or not data.startswith("p:") or data.count("|") != 1:
+        return None
+    make, model = (part.strip() for part in data[2:].split("|"))
+    if not make or not model or len(make) > 80 or len(model) > 100 or re.search(r"[\x00-\x1f]", data):
+        return None
+    return make, model
+
+
 def _thousands(value):
     return f"{int(value):,}".replace(",", ".")
 
@@ -955,6 +970,48 @@ def reply_context(message):
     return context_from_reply(reply.get("text"))
 
 
+def _follow_answer(engine, intent, lang):
+    """Follow / unfollow / list. State changes happen only from a confirm button (follow_do, unfollow)."""
+    import telegram_follow  # lazy: telegram_follow imports this module
+
+    if intent.kind == "follow":
+        query = intent.filters.search
+        candidates = telegram_follow.resolve_models(engine, query)
+        rows = [((t(lang, "btn_follow", label=f"{c['make']} {c['model']}"[:40]),
+                  follow_callback(c["make"], c["model"])),) for c in candidates]
+        rows = [row for row in rows if row[0][1]]
+        if not rows:
+            return t(lang, "follow_none", query=query), False
+        key = "follow_ask_one" if len(candidates) == 1 else "follow_ask"
+        return t(lang, key, label=f"{candidates[0]['make']} {candidates[0]['model']}"), Choices(tuple(rows))
+    if intent.kind == "follow_do":
+        make, model = intent.labels
+        label = f"{make} {model}"
+        try:
+            result = telegram_follow.follow_model(engine, make, model)
+        except SQLAlchemyError:
+            return t(lang, "follow_failed"), False
+        if result is None:
+            return t(lang, "follow_none", query=label), False
+        search_id, created = result
+        text_value = t(lang, "follow_done" if created else "follow_exists", label=label)
+        return text_value, Choices((
+            ((t(lang, "btn_unfollow", label=label[:30]), f"u:{search_id}"),),
+            ((t(lang, "btn_following"), "following"),),
+        ))
+    if intent.kind == "unfollow":
+        try:
+            label = telegram_follow.unfollow(engine, intent.note)
+        except SQLAlchemyError:
+            return t(lang, "follow_failed"), False
+        if label is None:
+            return t(lang, "unfollow_gone"), Choices((((t(lang, "btn_following"), "following"),),))
+        return t(lang, "unfollow_done", label=label), Choices((((t(lang, "btn_following"), "following"),),))
+    text_value, follows = telegram_follow.following_message(engine, lang)
+    rows = tuple(((t(lang, "btn_unfollow", label=label[:30]), f"u:{search_id}"),) for search_id, label in follows[:4])
+    return text_value, (Choices(rows) if rows else False)
+
+
 def answer_intent(engine, intent, config, lang=DEFAULT_LANGUAGE):
     """Map a parsed Intent onto the read-only helpers. Returns (text, buttons).
 
@@ -986,6 +1043,8 @@ def answer_intent(engine, intent, config, lang=DEFAULT_LANGUAGE):
     if intent.kind == "compare":
         buttons = tuple((f"🔎 {label[:24]}", refine_callback(Filters(label))) for label in intent.labels)
         return compare_message(engine, " | ".join(intent.labels), lang), Choices((buttons,))
+    if intent.kind in {"follow", "follow_do", "unfollow", "following"}:
+        return _follow_answer(engine, intent, lang)
     if intent.kind in {"chitchat", "clarify", "unsupported"}:
         if intent.reply:
             text_value = intent.reply
@@ -1132,7 +1191,17 @@ def process_update(update: dict[str, Any], engine, config: TelegramConfig, *, ca
     if callback_data:
         refine = parse_refine_page(callback_data)
         suggest_budget = parse_suggest_callback(callback_data)
-        if refine:
+        follow_target = parse_follow_callback(callback_data)
+        if follow_target:
+            intent = Intent("follow_do", labels=follow_target)
+            command = "follow"
+        elif callback_data.startswith("u:"):
+            intent = Intent("unfollow", note=callback_data[2:])
+            command = "unfollow"
+        elif callback_data == "following":
+            intent = Intent("following")
+            command = "following"
+        elif refine:
             intent = Intent("find", refine[0], offset=refine[1])
             command = "find"
         elif suggest_budget:
@@ -1151,6 +1220,11 @@ def process_update(update: dict[str, Any], engine, config: TelegramConfig, *, ca
             command, argument = command_for(body)
             if command == "llm":
                 intent = Intent("llm_check")
+            elif command == "follow":
+                intent = (Intent("follow", Filters(search=clean_search(argument))) if clean_search(argument)
+                          else Intent("following"))
+            elif command == "following":
+                intent = Intent("following")
             elif command == "ask":
                 free_text = argument
         elif is_addressed(message, config):

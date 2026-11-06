@@ -104,7 +104,7 @@ class StringTableTests(unittest.TestCase):
             ("imam 50k budzet, sta da kupim", "bs"), ("Golf do 15000 KM", "bs"), ("hvala ti", "bs"),
             ("koliko košta passat", "bs"), ("šta ima novo", "bs"), ("what car should I buy", "en"),
             ("Golf under 15000 KM", "en"), ("thanks a lot", "en"), ("show me the latest", "en"),
-            ("golf", None), ("", None), ("12345", None), ("Golf 7", None),
+            ("follow zzzz", "en"), ("prati golf", "bs"), ("golf", None), ("", None), ("12345", None), ("Golf 7", None),
         ):
             self.assertEqual(expected, detect_language(text_value), text_value)
 
