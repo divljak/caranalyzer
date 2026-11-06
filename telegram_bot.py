@@ -391,7 +391,20 @@ def _filter_title(filters):
     return " · ".join(parts)
 
 
-def find_message(engine, filters):
+PAGE_SIZE = 5
+MAX_OFFSET = 95
+
+
+@dataclass(frozen=True)
+class Page:
+    """What the keyboard needs to know about a find answer."""
+    filters: Filters
+    next_offset: int | None = None
+
+
+def find_page(engine, filters, offset=0):
+    """Return (message text, total matches) for one page of find results."""
+    offset = max(0, min(int(offset), MAX_OFFSET))
     with engine.begin() as connection:
         _statement_timeout(connection)
         matches = _all(connection, f"""
@@ -408,24 +421,30 @@ def find_message(engine, filters):
             AND (CAST(:year_min AS integer) IS NULL OR c.year>=CAST(:year_min AS integer))
             AND (CAST(:mileage_max AS integer) IS NULL OR c.mileage<=CAST(:mileage_max AS integer))
             AND (:search='' OR {_LABEL_SQL} LIKE :pattern ESCAPE '\\')
-          ORDER BY c.last_verified_at DESC,c.year DESC NULLS LAST,c.price DESC,c.listing_id
-          LIMIT 5
+          ORDER BY c.year DESC NULLS LAST,c.mileage ASC NULLS LAST,
+            c.last_verified_at DESC,c.listing_id
+          LIMIT {PAGE_SIZE} OFFSET CAST(:offset AS integer)
         """, {
             "budget": filters.budget,
             "year_min": filters.year_min,
             "mileage_max": filters.mileage_max,
             "search": filters.search,
             "pattern": _like_pattern(filters.search),
+            "offset": offset,
         })
         note = _freshness_note(connection)
     lines = [_filter_title(filters)]
+    total = 0
     if not matches:
-        lines.append("No matching listings in the last 90 days.")
-        if filters.search and not (filters.budget or filters.year_min or filters.mileage_max):
+        lines.append("No more matches." if offset else "No matching listings in the last 90 days.")
+        if offset == 0 and filters.search and not (filters.budget or filters.year_min or filters.mileage_max):
             lines.append("If that was not a car make or model, send /help to see what I can answer.")
     else:
         total = matches[0]["total"]
-        lines.append(f"Showing {len(matches)} of {total} database matches, most recently observed first:")
+        first, last = offset + 1, offset + len(matches)
+        span = f"{first}" if first == last else f"{first}–{last}"
+        lines.append(f"Showing {span} of {total} database matches, newest model year first, "
+                     "then lowest mileage:")
         for item in matches:
             label = " ".join(value for value in (item["make"], item["model"]) if value) or "Unparsed model"
             year = f" · {item['year']}" if item["year"] else ""
@@ -438,7 +457,11 @@ def find_message(engine, filters):
     if note:
         lines.extend(["", note])
     lines.extend(["", "These are observed asking prices, not recommendations or verified availability."])
-    return "\n".join(lines)
+    return "\n".join(lines), total
+
+
+def find_message(engine, filters, offset=0):
+    return find_page(engine, filters, offset)[0]
 
 
 def chitchat_message():
@@ -579,29 +602,40 @@ def _round_budget(value):
     return max(1_000, int(round(value / 500.0)) * 500)
 
 
-def refine_callback(filters):
-    data = f"f:{filters.budget or 0}:{filters.year_min or 0}:{filters.mileage_max or 0}:{filters.search}"
+def refine_callback(filters, offset=0):
+    data = (f"f:{filters.budget or 0}:{filters.year_min or 0}:{filters.mileage_max or 0}:"
+            f"{offset}:{filters.search}")
     return data if len(data.encode()) <= 64 else None
 
 
-def parse_refine_callback(data):
-    parts = (data or "").split(":", 4)
-    if len(parts) != 5 or parts[0] != "f":
+def parse_refine_page(data):
+    """Return (Filters, offset) from a find button, or None. Accepts the older 5-field form."""
+    parts = (data or "").split(":", 5)
+    if not parts or parts[0] != "f" or len(parts) not in (5, 6):
         return None
     try:
         budget, year, mileage = (int(value) for value in parts[1:4])
+        offset = int(parts[4]) if len(parts) == 6 else 0
     except ValueError:
         return None
-    filters = Filters(clean_search(parts[4]), budget or None, year or None, mileage or None)
+    filters = Filters(clean_search(parts[-1]), budget or None, year or None, mileage or None)
     in_range = (
         (filters.budget is None or 1_000 <= filters.budget <= 1_000_000)
         and (filters.year_min is None or 1980 <= filters.year_min <= 2035)
         and (filters.mileage_max is None or 1_000 <= filters.mileage_max <= 1_000_000)
+        and 0 <= offset <= MAX_OFFSET
     )
-    return filters if in_range and not filters.is_empty() else None
+    return (filters, offset) if in_range and not filters.is_empty() else None
 
 
-def keyboard(config, filters=None):
+def parse_refine_callback(data):
+    parsed = parse_refine_page(data)
+    return parsed[0] if parsed else None
+
+
+def keyboard(config, page=None):
+    filters = page.filters if isinstance(page, Page) else page
+    next_offset = page.next_offset if isinstance(page, Page) else None
     buttons = [
         [
             {"text": "Status", "callback_data": "status"},
@@ -622,6 +656,11 @@ def keyboard(config, filters=None):
                 row.append({"text": label, "callback_data": data})
         if row:
             buttons.insert(0, row)
+    if filters is not None and next_offset is not None:
+        data = refine_callback(filters, next_offset)
+        if data:
+            buttons.insert(0, [{"text": f"Show more ({next_offset + 1}–{next_offset + PAGE_SIZE})",
+                                "callback_data": data}])
     if config.market_url:
         buttons.append([{"text": "Open Market", "url": config.market_url}])
     return {"inline_keyboard": buttons}
@@ -723,7 +762,10 @@ def answer_intent(engine, intent, config):
     if intent.kind == "trends":
         return trends_message(engine, intent.days), None
     if intent.kind == "find":
-        return find_message(engine, intent.filters), intent.filters
+        offset = max(0, min(intent.offset, MAX_OFFSET))
+        text_value, total = find_page(engine, intent.filters, offset)
+        following = offset + PAGE_SIZE
+        return text_value, Page(intent.filters, following if following < total and following <= MAX_OFFSET else None)
     if intent.kind == "model_stats":
         return model_stats_message(engine, intent.filters.search), None
     if intent.kind == "compare":
@@ -761,9 +803,9 @@ def process_update(update: dict[str, Any], engine, config: TelegramConfig, *, ca
     if llm is _DEFAULT_LLM:
         llm = _default_llm()
     if callback_data:
-        refine = parse_refine_callback(callback_data)
+        refine = parse_refine_page(callback_data)
         if refine:
-            intent = Intent("find", refine)
+            intent = Intent("find", refine[0], offset=refine[1])
             command = "find"
         elif callback_data.startswith("trends:"):
             command, argument = "trends", callback_data.partition(":")[2]

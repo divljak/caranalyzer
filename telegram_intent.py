@@ -44,6 +44,7 @@ class Intent:
     labels: tuple[str, ...] = ()
     note: str = ""
     question: str = ""
+    offset: int = 0
 
 
 def fold(value):
