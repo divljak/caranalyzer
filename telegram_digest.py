@@ -1,9 +1,11 @@
 """Deterministic morning digest. Read-only evidence, no inferred sales."""
 
 from dataclasses import dataclass
+import html
 from datetime import datetime, timedelta, timezone
 import hmac
 import json
+import logging
 import os
 import tempfile
 import threading
@@ -16,16 +18,20 @@ from telegram_bot import (
     SARAJEVO,
     TelegramAPIError,
     TelegramConfigurationError,
+    _AUTO,
     _all,
     _money,
     _one,
     _statement_timeout,
     _utc,
     telegram_call,
+    telegram_upload,
 )
 
 
 MAX_DIGEST_CHARS = 1200
+MAX_CAPTION_CHARS = 1000
+LOG = logging.getLogger("telegram_digest")
 STALE_CLEAN_DAYS = 14
 PRICE_WINDOW_DAYS = 7
 SEND_HOUR = 9
@@ -48,6 +54,24 @@ CLEAN_SQL = """
   WHERE status='completed' AND coalesce(errors_count,0)=0
 """
 SNAPSHOT_SQL = "SELECT max(observed_at) FROM listing_snapshots"
+RUNS_SQL = """
+  SELECT status,started_at,finished_at,observations,new_listings,errors
+  FROM website_collection_runs
+  WHERE finished_at IS NOT NULL
+  ORDER BY started_at DESC,id DESC LIMIT 7
+"""
+MIX_SQL = """
+  SELECT label,count(*) AS n FROM (
+    SELECT trim(concat_ws(' ',coalesce(l.make,c.make),coalesce(l.model,c.model))) AS label
+    FROM car_listings c
+    LEFT JOIN dealer_vehicle_labels l USING(listing_id)
+    WHERE c.source='olx.ba'
+      AND c.collection_method IN ('olx_api','olx_website')
+      AND c.first_seen_at BETWEEN :started AND :finished
+  ) q
+  WHERE label<>''
+  GROUP BY label ORDER BY n DESC,label LIMIT 5
+"""
 PRICE_SQL = """
   WITH unique_observations AS (
     SELECT DISTINCT ON (listing_id,observed_at)
@@ -442,12 +466,13 @@ def load_digest_evidence(engine, now):
         latest = connection.execute(text(SNAPSHOT_SQL)).scalar()
         prices = _one(connection, PRICE_SQL, {"cutoff": cutoff, "as_of": as_of}) or {}
         cuts = _all(connection, CUTS_SQL, {"cutoff": cutoff, "as_of": as_of})
+        recent_runs = _all(connection, RUNS_SQL)
         seen = []
+        mix = []
         if run and run.get("started_at") and run.get("finished_at"):
-            seen = _all(connection, SEEN_SQL, {
-                "started": run["started_at"],
-                "finished": run["finished_at"],
-            })
+            window = {"started": run["started_at"], "finished": run["finished_at"]}
+            seen = _all(connection, SEEN_SQL, window)
+            mix = _all(connection, MIX_SQL, window)
     return {
         "generated_at": as_of,
         "run": run,
@@ -458,7 +483,97 @@ def load_digest_evidence(engine, now):
         "price_increases": int(prices.get("increases") or 0),
         "notable_cuts": cuts,
         "first_seen": seen,
+        "recent_runs": recent_runs,
+        "new_by_model": mix,
     }
+
+
+_STATE_EMOJI = {"ČISTO": "🟢", "DJELIMIČNO": "🟡", "NEUSPJELO": "🔴", "NEMA PODATAKA": "⚪"}
+_DAYS = ("pon", "uto", "sri", "čet", "pet", "sub", "ned")
+
+
+def build_caption(evidence, tz=SARAJEVO):
+    """Short rich-text (HTML) caption for the card. Escapes every dynamic value."""
+    import telegram_card
+
+    esc = html.escape
+    flags = assess(evidence)
+    now = _aware(evidence.get("generated_at")) or datetime.now(timezone.utc)
+    local = now.astimezone(tz)
+    label, _colour = telegram_card.card_state(evidence)
+    run = evidence.get("run") or {}
+    lines = [f"<b>Garaža · {_DAYS[local.weekday()]}, {local.day}. {_MONTHS[local.month - 1]}</b> · "
+             f"{_STATE_EMOJI.get(label, '⚪')} <b>{esc(label.lower())}</b>"]
+    if evidence.get("run"):
+        lines.append(f"📡 <b>{int(run.get('observations') or 0)}</b> zapažanja · "
+                     f"🆕 <b>{int(run.get('new_listings') or 0)}</b> prvi put viđeno · "
+                     f"⚠️ <b>{int(run.get('errors') or 0)}</b> grešaka")
+    else:
+        lines.append("Nema završenog prolaza kolektora.")
+    if flags["trends_stale"]:
+        lines.append("📉 Trend potisnut: zadnji čist prolaz je star ili ga nema.")
+    else:
+        lines.append(f"📉 7 dana: <b>{int(evidence.get('price_drops') or 0)}</b> padova · "
+                     f"📈 <b>{int(evidence.get('price_increases') or 0)}</b> rastova "
+                     f"(uzorak {int(evidence.get('price_sample') or 0)})")
+    cuts = evidence.get("notable_cuts") or []
+    if cuts:
+        item = cuts[0]
+        name = _label(item.get("make"), item.get("model"), item.get("year"))
+        before, now_price = item.get("previous_price"), item.get("asking_price")
+        pct = round((before - now_price) * 100 / before) if before else 0
+        lines.append(f"🏷 Najveći pad: <a href=\"https://olx.ba/artikal/{esc(str(item.get('listing_id')))}\">"
+                     f"{esc(name)}</a> −{pct}% ({esc(_money(now_price))} ← {esc(_money(before))})")
+    lines.append("<i>Nestanak iz pretrage nije prodaja. Tražene cijene nisu prodajne cijene.</i>")
+    caption = "\n".join(lines)
+    return caption if len(caption) <= MAX_CAPTION_CHARS else caption[:MAX_CAPTION_CHARS - 1] + "…"
+
+
+def make_card(evidence, tz=SARAJEVO):
+    """PNG bytes, or None when the card cannot be drawn (the text digest is sent instead)."""
+    try:
+        import telegram_card
+
+        return telegram_card.render_card(evidence, tz)
+    except Exception as exc:  # missing Pillow/font or any drawing problem: never block the digest
+        LOG.warning("digest card unavailable: %s", type(exc).__name__)
+        return None
+
+
+def deliver(config, chat_id, market_url, evidence, tz, text, *, call, upload, png=None, note=""):
+    """Send the card (photo + caption) or, on any problem, the plain text digest.
+
+    Returns ``(format, telegram result)``. Raises TelegramAPIError only if the text send fails too.
+    """
+    markup = digest_keyboard(market_url)
+    if png and upload is not None:
+        fields = {"chat_id": str(chat_id), "caption": build_caption(evidence, tz), "parse_mode": "HTML"}
+        if markup:
+            fields["reply_markup"] = json.dumps(markup)
+        try:
+            return "card", upload(config, "sendPhoto", fields,
+                                  {"photo": ("garaza-pregled.png", png, "image/png")})
+        except TelegramAPIError:
+            LOG.warning("digest photo send failed; sending text")
+    payload = {"chat_id": chat_id, "text": (note + text)[:MAX_DIGEST_CHARS],
+               "disable_web_page_preview": True}
+    if markup:
+        payload["reply_markup"] = markup
+    return "text", call(config, "sendMessage", payload)
+
+
+def send_card_to_chat(engine, config, chat_id, *, call=telegram_call, upload=None, now=None, tz=SARAJEVO):
+    """On-demand digest for /digest. Not the scheduled morning send and not subject to its gates."""
+    now = now or datetime.now(timezone.utc)
+    evidence = load_digest_evidence(engine, now)
+    text = render_digest(evidence, tz)
+    png = make_card(evidence, tz) if upload is not None else None
+    note = ""
+    if upload is not None and png is None:
+        note = "Kartica nije mogla biti napravljena, pa šaljem tekstualni pregled.\n\n"
+    shown, _result = deliver(config, chat_id, config.market_url, evidence, tz, text,
+                             call=call, upload=upload, png=png, note=note)
+    return shown
 
 
 def digest_keyboard(market_url):
@@ -496,7 +611,7 @@ def plan_delivery(*, mode, now, tz, send_enabled, confirmed, ledger):
 
 
 def handle_digest(engine, *, headers, mode, environ=None, now=None, ledger=None,
-                  call=telegram_call):
+                  call=telegram_call, upload=_AUTO):
     """Dry-render by default. Send only through the scheduled or test-send gate."""
     if not cron_authorized(headers, environ):
         return 401, {"ok": False, "reason": "unauthorized"}
@@ -531,22 +646,34 @@ def handle_digest(engine, *, headers, mode, environ=None, now=None, ledger=None,
     }
     if plan["action"] != "send":
         return 200, body
-    payload = {
-        "chat_id": config.chat_id,
-        "text": text[:MAX_DIGEST_CHARS],
-        "disable_web_page_preview": True,
-    }
-    markup = digest_keyboard(config.market_url)
-    if markup:
-        payload["reply_markup"] = markup
+    if upload is _AUTO:  # a fake `call` (tests) must never trigger a real upload
+        upload = telegram_upload if call is telegram_call else None
+    png = make_card(evidence, config.timezone) if upload is not None else None
     try:
-        result = call(config, "sendMessage", payload)
+        shown, result = deliver(config, config.chat_id, config.market_url, evidence, config.timezone, text,
+                                call=call, upload=upload, png=png)
     except TelegramAPIError:
         ledger.release(plan["day"])
         return 502, {"ok": False, "reason": "telegram_send_failed"}
     except Exception:
         ledger.release(plan["day"])
         raise
+    body["format"] = shown
     if isinstance(result, dict):
         body["message_id"] = result.get("message_id")
     return 200, body
+
+
+def preview_card(engine, *, headers, environ=None, now=None):
+    """Authorised dry preview of the card as PNG bytes. Never sends anything to Telegram."""
+    if not cron_authorized(headers, environ):
+        return 401, {"ok": False, "reason": "unauthorized"}
+    try:
+        config = DigestConfig.from_env(environ)
+    except TelegramConfigurationError as exc:
+        return 503, {"ok": False, "reason": "not_configured", "detail": str(exc)}
+    evidence = load_digest_evidence(engine, now or datetime.now(timezone.utc))
+    png = make_card(evidence, config.timezone)
+    if png is None:
+        return 503, {"ok": False, "reason": "card_unavailable"}
+    return 200, png

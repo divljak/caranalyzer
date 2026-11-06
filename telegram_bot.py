@@ -679,6 +679,7 @@ def help_message():
         "/budget 25000 Golf — recently observed matches",
         "/compare Volkswagen Golf | Škoda Octavia — broad database comparison",
         "/ask Golf under 15000 KM from 2016 — ask in plain English or Bosnian",
+        "/digest — visual overview of what is happening on the platform",
         "/help — show this guide",
         "",
         "You can also @mention me or reply to one of my answers with a question, e.g. “Octavia under 20000 KM”, "
@@ -810,6 +811,22 @@ def telegram_call(config, method, payload, *, post=requests.post):
     if not result.get("ok"):
         raise TelegramAPIError(f"Telegram {method} returned an error")
     return result.get("result")
+
+
+def telegram_upload(config, method, fields, files, *, post=requests.post):
+    """Multipart call (e.g. sendPhoto). Errors never contain the bot token."""
+    try:
+        response = post(f"{TELEGRAM_API}/bot{config.bot_token}/{method}", data=fields, files=files, timeout=25)
+        response.raise_for_status()
+        result = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise TelegramAPIError(f"Telegram {method} upload failed") from exc
+    if not result.get("ok"):
+        raise TelegramAPIError(f"Telegram {method} returned an error")
+    return result.get("result")
+
+
+_AUTO = object()
 
 
 def _identity(update):
@@ -964,7 +981,7 @@ def _typing(call, config, chat_id):
 
 
 def process_update(update: dict[str, Any], engine, config: TelegramConfig, *, call=telegram_call,
-                   llm=_DEFAULT_LLM, phraser=_DEFAULT_LLM):
+                   llm=_DEFAULT_LLM, phraser=_DEFAULT_LLM, upload=_AUTO):
     if not isinstance(update, dict) or not isinstance(update.get("update_id"), int):
         return {"handled": False, "reason": "invalid_update"}
     chat, user_id, message, callback = _identity(update)
@@ -997,6 +1014,8 @@ def process_update(update: dict[str, Any], engine, config: TelegramConfig, *, ca
             command, argument = command_for(body)
             if command == "llm":
                 intent = Intent("llm_check")
+            elif command == "digest":
+                intent = Intent("digest_card")
             elif command == "ask":
                 free_text = argument
         elif is_addressed(message, config):
@@ -1016,6 +1035,12 @@ def process_update(update: dict[str, Any], engine, config: TelegramConfig, *, ca
         if intent is not None and intent.kind == "llm_check":
             response = telegram_llm.check_message(telegram_llm.LLMConfig.from_env())
             command = "llm"
+        elif intent is not None and intent.kind == "digest_card":
+            import telegram_digest  # lazy: telegram_digest imports this module
+            if upload is _AUTO:
+                upload = telegram_upload if call is telegram_call else None
+            shown = telegram_digest.send_card_to_chat(engine, config, chat_id, call=call, upload=upload)
+            return {"handled": True, "command": "digest", "format": shown}
         elif intent is not None:
             response, markup_filters = answer_intent(engine, intent, config)
             if private:

@@ -203,6 +203,32 @@ A budget plus a "what should I buy / what is best / what sells best" question re
   invent numbers, call a car "the best", or give general car advice, and the listings are always
   attached to a suggestion.
 
+## Visual digest card
+
+The morning digest (and `/digest`) can be a picture instead of a wall of text: a dark **card**
+(1080 px wide PNG, `telegram_card.py`) with a status badge (ČISTO / DJELIMIČNO / NEUSPJELO),
+four number tiles (observations, first seen by us, errors, price cuts in 7 days), a bar chart
+of the last 7 collector runs coloured by run quality, price cuts vs rises, new listings by model,
+the three biggest asking-price cuts, and the freshness footer. It is sent with `sendPhoto`, a
+short HTML caption (status, counts, the biggest cut as a link) and the usual Market / Compare /
+Following buttons. Same honesty rules as the text digest: trends are suppressed when the last
+clean run is stale, nothing implies a sale.
+
+- **Fallback:** if Pillow or the font is unavailable, drawing fails, or Telegram rejects the photo,
+  the previous plain-text digest is sent instead; a send only fails if the text send fails too.
+- **Gates unchanged:** the scheduled morning send is exactly as before (dry by default; `mode=send`
+  needs `TELEGRAM_DIGEST_SEND=1` inside the 09:40–09:59 window; `test-send` needs
+  `X-Digest-Confirm: SEND_TEST`; once per day). Only the *format* of an allowed send changed.
+  Production keeps `TELEGRAM_DIGEST_SEND` unset, so nothing is sent automatically.
+- **`/digest`** (allowlisted users, private chat or the group) sends the card to the chat it was
+  asked from, on demand. It is not the morning send, is not subject to its gates, and does not
+  touch the once-per-day ledger. If the picture cannot be drawn it says so and sends the text.
+- **Preview:** `GET /api/telegram/digest?format=png` with the cron secret returns the card as an
+  image and never sends anything.
+- **Packaging:** needs `pillow` (in `pyproject.toml` + `uv.lock`, which Vercel installs from) and the
+  bundled DejaVu fonts in `assets/fonts/` (free licence, `LICENSE_DEJAVU.txt`), included in the
+  function through `vercel.json` `includeFiles`. Pillow's built-in font cannot draw š đ č ć ž.
+
 ## Known MVP limits
 
 - Phrasing outside the parser's vocabulary gets the "can't answer" reply; widening it

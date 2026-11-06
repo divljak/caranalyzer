@@ -7,3 +7,4 @@ youtube-transcript-api>=0.6.1
 selenium>=4.20.0
 webdriver-manager>=4.0.0
 requests>=2.31.0
+pillow>=11.0.0

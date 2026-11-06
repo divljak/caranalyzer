@@ -13,7 +13,7 @@ import os
 import requests
 
 from fastapi import FastAPI, Depends, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, Field, model_validator
@@ -23,7 +23,7 @@ from scrapers.olx_listing_details import DETAILS_DDL, DetailsUnavailable, fetch_
 from market_labels import LABEL_DDL, refresh_labels
 from database.website_tracking import create_website_tables
 from telegram_bot import TelegramConfig, TelegramConfigurationError, process_update
-from telegram_digest import handle_digest
+from telegram_digest import handle_digest, preview_card
 
 HOSTED = os.getenv('VERCEL') == '1'
 if HOSTED:
@@ -141,8 +141,18 @@ async def telegram_webhook(request: Request):
 
 
 @app.get(TELEGRAM_DIGEST_PATH)
-def telegram_morning_digest(request: Request, mode: str = ''):
-    """Cron dry-render. Sends only for mode=send or an explicit test-send confirm."""
+def telegram_morning_digest(request: Request, mode: str = '', format: str = ''):
+    """Cron dry-render. Sends only for mode=send or an explicit test-send confirm.
+
+    format=png returns the visual card as an image (cron secret required) and never sends.
+    """
+    if format == 'png':
+        status, body = preview_card(engine, headers=request.headers, environ=os.environ)
+        if status == 401:
+            raise HTTPException(401, 'Invalid digest cron secret')
+        if status != 200:
+            raise HTTPException(503, 'Digest card is not available')
+        return Response(content=body, media_type='image/png', headers={'Cache-Control': 'no-store'})
     status, body = handle_digest(
         engine, headers=request.headers, mode=mode, environ=os.environ)
     if status == 401:

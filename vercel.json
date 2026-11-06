@@ -16,7 +16,7 @@
   "functions": {
     "deploy/vercel_app.py": {
       "maxDuration": 60,
-      "includeFiles": "frontend/dist/**",
+      "includeFiles": "{frontend/dist/**,assets/fonts/**}",
       "excludeFiles": "{.private/**,.venv/**,venv/**,node_modules/**,frontend/node_modules/**,api/**,tests/**,design/**,docs/**,logs/**,supabase/**}"
     }
   }
