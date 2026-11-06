@@ -253,6 +253,17 @@ class HandlerTests(unittest.TestCase):
                     "f:9000:3000:0:golf", "f:9999999:0:0:golf"):
             self.assertIsNone(parse_refine_callback(bad), bad)
 
+    def test_age_labels_are_plain_language(self):
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(timezone.utc)
+        for days, label in ((0, "today"), (1, "yesterday"), (5, "5 days ago"), (14, "2 weeks ago"),
+                            (30, "4 weeks ago"), (59, "8 weeks ago"), (75, "2 months ago")):
+            self.assertEqual(label, telegram_bot._age(now - timedelta(days=days, minutes=1)), days)
+        self.assertEqual("at an unknown time", telegram_bot._age(None))
+        self.assertTrue(telegram_bot._is_fresh(now - timedelta(days=13)))
+        self.assertFalse(telegram_bot._is_fresh(now - timedelta(days=15)))
+        self.assertFalse(telegram_bot._is_fresh(None))
+
     def test_older_five_field_buttons_still_work_and_offsets_are_bounded(self):
         self.assertEqual((Filters("golf", 13500, 2016), 0), telegram_bot.parse_refine_page("f:13500:2016:0:golf"))
         self.assertEqual((Filters("golf", 13500, 2016), 10), telegram_bot.parse_refine_page("f:13500:2016:0:10:golf"))
@@ -430,6 +441,28 @@ class QuestionQueryTests(unittest.TestCase):
         self.assertIn("Showing 1–5 of 7", first)
         self.assertIn("newest model year first", first)
         self.assertNotIn("__tg_p1", first)
+
+    def test_recently_seen_listings_rank_first_within_a_year_and_old_ones_are_flagged(self):
+        with self.engine.begin() as c:
+            for lid, mileage, days in (("__tg_fresh", 150000, 2), ("__tg_old", 40000, 30)):
+                c.execute(text("""INSERT INTO car_listings(listing_id,make,model,year,price,price_status,
+                    mileage,source,collection_method,last_verified_at,first_seen_at,is_active,
+                    consecutive_missing_runs) VALUES (:id,'Volkswagen','Golf',2018,12000,'priced',:mileage,
+                    'olx.ba','olx_api',:seen,:seen,true,0)"""),
+                    {"id": lid, "mileage": mileage, "seen": self.now - timedelta(days=days)})
+        reply = find_message(self.engine, Filters("golf", 15000))
+        self.assertLess(reply.index("__tg_fresh"), reply.index("__tg_old"))  # fresh first despite higher mileage
+        self.assertIn("Seen 2 days ago", reply)
+        self.assertIn("⚠ Seen 4 weeks ago", reply)
+        self.assertEqual(1, reply.count("⚠ Seen"))
+        self.assertIn("may no longer be listed", reply)
+        self.assertIn("then recently seen, then lowest mileage", reply)
+
+    def test_no_age_warning_when_everything_is_fresh(self):
+        self.seed()
+        reply = find_message(self.engine, Filters("golf", 15000, 2015))
+        self.assertIn("Seen yesterday", reply)
+        self.assertNotIn("⚠", reply)
 
     def test_show_more_pages_through_every_match_exactly_once(self):
         self.seed_many()

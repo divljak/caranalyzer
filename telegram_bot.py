@@ -116,6 +116,31 @@ def _time(value):
     return value.astimezone(SARAJEVO).strftime("%d %b, %H:%M") if value else "unknown"
 
 
+FRESH_DAYS = 14
+
+
+def _age(value):
+    """Plain-language age of an observation, e.g. 'today', '3 days ago', '4 weeks ago'."""
+    value = _utc(value)
+    if value is None:
+        return "at an unknown time"
+    days = max(0, (datetime.now(timezone.utc) - value).days)
+    if days == 0:
+        return "today"
+    if days == 1:
+        return "yesterday"
+    if days < FRESH_DAYS:
+        return f"{days} days ago"
+    if days < 60:
+        return f"{days // 7} weeks ago"
+    return f"{days // 30} months ago"
+
+
+def _is_fresh(value):
+    value = _utc(value)
+    return value is not None and (datetime.now(timezone.utc) - value).days < FRESH_DAYS
+
+
 def _money(value):
     return f"{int(round(value)):,} KM".replace(",", ".") if value is not None else "price unavailable"
 
@@ -421,8 +446,9 @@ def find_page(engine, filters, offset=0):
             AND (CAST(:year_min AS integer) IS NULL OR c.year>=CAST(:year_min AS integer))
             AND (CAST(:mileage_max AS integer) IS NULL OR c.mileage<=CAST(:mileage_max AS integer))
             AND (:search='' OR {_LABEL_SQL} LIKE :pattern ESCAPE '\\')
-          ORDER BY c.year DESC NULLS LAST,c.mileage ASC NULLS LAST,
-            c.last_verified_at DESC,c.listing_id
+          ORDER BY c.year DESC NULLS LAST,
+            (c.last_verified_at < (now() AT TIME ZONE 'UTC') - interval '14 days') ASC,
+            c.mileage ASC NULLS LAST,c.last_verified_at DESC,c.listing_id
           LIMIT {PAGE_SIZE} OFFSET CAST(:offset AS integer)
         """, {
             "budget": filters.budget,
@@ -435,6 +461,7 @@ def find_page(engine, filters, offset=0):
         note = _freshness_note(connection)
     lines = [_filter_title(filters)]
     total = 0
+    older = 0
     if not matches:
         lines.append("No more matches." if offset else "No matching listings in the last 90 days.")
         if offset == 0 and filters.search and not (filters.budget or filters.year_min or filters.mileage_max):
@@ -444,14 +471,21 @@ def find_page(engine, filters, offset=0):
         first, last = offset + 1, offset + len(matches)
         span = f"{first}" if first == last else f"{first}–{last}"
         lines.append(f"Showing {span} of {total} database matches, newest model year first, "
-                     "then lowest mileage:")
+                     "then recently seen, then lowest mileage:")
         for item in matches:
             label = " ".join(value for value in (item["make"], item["model"]) if value) or "Unparsed model"
             year = f" · {item['year']}" if item["year"] else ""
             mileage = f" · {int(item['mileage']):,} km".replace(",", ".") if item["mileage"] is not None else ""
+            fresh = _is_fresh(item["last_verified_at"])
+            older += not fresh
+            seen = f"Seen {_age(item['last_verified_at'])} ({_time(item['last_verified_at'])})"
+            marker = "" if fresh else "⚠ "
             lines.append(
                 f"• {label}{year} · {_money(item['price'])}{mileage}\n"
-                f"  Observed {_time(item['last_verified_at'])} · https://olx.ba/artikal/{item['listing_id']}")
+                f"  {marker}{seen} · https://olx.ba/artikal/{item['listing_id']}")
+    if older:
+        lines.extend(["", f"⚠ Last seen more than {FRESH_DAYS} days ago: the ad may no longer be listed. "
+                          "Check the link before relying on it."])
     if filters.year_min or filters.mileage_max:
         lines.extend(["", "Listings without a recorded year or mileage are not included when those filters are used."])
     if note:
