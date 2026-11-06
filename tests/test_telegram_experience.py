@@ -235,7 +235,7 @@ class ContextualButtonTests(unittest.TestCase):
 
     def test_a_phrased_answer_without_listings_points_the_button_at_page_one(self):
         call = Mock(return_value={"message_id": 1})
-        page = Page(Filters("golf", 15000), next_offset=5, min_year=2012, max_km=250000)
+        page = Page(Filters("golf", 15000), next_offset=5, min_year=2012, max_km=250000, items=(("id1", 2016, 9000),))
         with patch("telegram_bot.answer_intent", return_value=("Rezultati", page)):
             process_update(dm("Golf do 15000 KM"), Mock(), CONFIG, call=call, llm=None,
                            phraser=Mock(return_value=("Našao sam ih. Hoćeš da vidiš?", False)))
@@ -245,7 +245,9 @@ class ContextualButtonTests(unittest.TestCase):
         with patch("telegram_bot.answer_intent", return_value=("Rezultati", page)):
             process_update(dm("Golf do 15000 KM", uid=2), Mock(), CONFIG, call=call, llm=None,
                            phraser=Mock(return_value=("Evo.", True)))
-        self.assertEqual("Još rezultata (6–10)", last_payload(call)["reply_markup"]["inline_keyboard"][0][0]["text"])
+        labels = [b["text"] for row in last_payload(call)["reply_markup"]["inline_keyboard"] for b in row]
+        self.assertIn("Još rezultata (6–10)", labels)
+        self.assertNotIn("Pokaži oglase (1–5)", labels)
 
     def test_the_same_buttons_in_bosnian(self):
         page = Page(Filters("golf", 15000), next_offset=5, min_year=2012, max_km=250000)

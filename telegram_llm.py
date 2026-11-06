@@ -25,6 +25,7 @@ import re
 
 import requests
 
+from telegram_intent import _search_tokens
 from telegram_intent import (
     Filters,
     Intent,
@@ -221,7 +222,7 @@ def intent_from_plan(plan, previous=None, message="", history=None):
         if first and second and first.lower() != second.lower():
             return Intent("compare", labels=(first, second))
         return Intent("clarify")
-    search = clean_search(str(plan.get("search") or ""))
+    search = clean_search(" ".join(_search_tokens(str(plan.get("search") or ""))))
     if kind == "model_stats":
         return Intent("model_stats", Filters(search)) if search else Intent("clarify")
     if kind == "follow":

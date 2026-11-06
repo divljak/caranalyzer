@@ -93,6 +93,11 @@ suggest suggestion imam najbolje najbolji najbolja najpametnije najpametniji pam
 prodaje prodaju prodavati prodaje-se najtrazenije najtrazeniji popular worthwhile savjet advice
 value follow following followed track watch watching prati pratiti pratim zaprati pracenje praceni am im ive whats
 shortlist shortlisted saved sacuvao sacuvani sacuvan sam lista auti spisak
+je jel jeste jesi jesu li bi cu ces ce cemo cete ja mene me ti te vi vas vam nam nas on ona ono oni to ta taj ova ovaj ove
+kakav kakva kakvo neki neka neko nesto svi sve sav dosta dovoljno malo mnogo vrlo bas samo jos vec onda pa ali jer ako dok
+mogu mozes moze mozemo mozete mogao mogla htio htjela zelio zelim volio bih bi nadji nadi nades nadjes nadjem pronadji pronadi naci vidi vidjeti
+reci kazi pitam pitao hocu hoces dobar dobra dobro dobre bolji bolja bolje fin fina fino lijep lijepa cao cao-cao ej hej
+hi hey hello thx yes no yeah ok okay maybe also just really very quite enough something anything
 moj moja moje my nesto family porodica porodicu porodicni porodicno familiju sporty
 """.split())
 
@@ -166,7 +171,7 @@ def _singular(token):
 def _search_tokens(rest):
     tokens = []
     for raw in re.split(r"\s+", rest.lower().replace("'", "").replace("\u2019", "")):
-        token = clean_search(raw)
+        token = clean_search(raw).strip(".-")
         if token and fold(token) not in _STOPWORDS and fold(token.rstrip("s")) not in _STOPWORDS:
             tokens.append(_singular(token))
     return tokens
@@ -348,8 +353,9 @@ def parse_question(text_value, context=None):
     if context and context.kind == "trends" and tokens and all(t.isdigit() for t in tokens):
         return Intent("trends", days=max(1, min(int(tokens[0]), 90)))
 
-    if len(tokens) > 4:
-        return Intent("unsupported")
+    if len(tokens) > 4 or (not (filters.budget or filters.year_min or filters.mileage_max)
+                           and len(original.split()) >= 9):
+        return Intent("unsupported")  # a sentence, not a car name
 
     if context and context.kind == "find" and not filters.is_empty():
         return Intent("find", Filters(
