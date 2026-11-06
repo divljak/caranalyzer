@@ -19,6 +19,7 @@ STRINGS = {
         "price_unavailable": "price unavailable",
         "unparsed_model": "Unparsed model",
         "looking": "🔎 Looking…",
+        "anonymous_admin": "I can't tell who is writing because the message was sent as an anonymous group admin. Turn off “Remain anonymous” for your admin rights in this group, then write to me again.",
         "chat_not_set_up": "I'm not set up to answer in this chat yet (chat id: {chat_id}). The owner needs to add that id to the TELEGRAM_CHAT_ID setting in Vercel (separated by a comma from the current one) and redeploy.",
         "db_unavailable": "The database is temporarily unavailable, so I can't answer right now. Please try again shortly.",
         # status
@@ -98,7 +99,7 @@ STRINGS = {
         "latest_no_ids": "No first-observed IDs were attributable to this run window.",
         "latest_note": "First observed by us does not mean newly posted on OLX.",
         # help
-        "help": "Car Analyzer reads our Supabase evidence only.\n\n/status — collector health and freshness\n/latest — latest observations and a few finds\n/trends 7 — observed price changes (1–90 days)\n/budget 25000 Golf — recently observed matches\n/compare Volkswagen Golf | Škoda Octavia — broad database comparison\n/ask Golf under 15000 KM from 2016 — ask in plain English or Bosnian\n/follow Golf — follow a model\n/following — what you follow and what's new\n/shortlist — the cars you saved\n/help — show this guide\n\nYou can also @mention me or reply to one of my answers with a question, e.g. “Octavia under 20000 KM”, “how much is a Golf”, “Golf vs Octavia”, or a refinement such as “from 2018”. Database coverage is bounded; the bot never treats first seen as posted or absence as sold.",
+        "help": "Car Analyzer reads our Supabase evidence only.\n\n/status — collector health and freshness\n/latest — latest observations and a few finds\n/trends 7 — observed price changes (1–90 days)\n/budget 25000 Golf — recently observed matches\n/compare Volkswagen Golf | Škoda Octavia — broad database comparison\n/ask Golf under 15000 KM from 2016 — ask in plain English or Bosnian\n/follow Golf — follow a model\n/following — what you follow and what's new\n/shortlist — the cars you saved\n/help — show this guide\n\nYou can also @mention me or reply to one of my answers with a question, e.g. “Octavia under 20000 KM”, “how much is a Golf”, “Golf vs Octavia”, or a refinement such as “from 2018”. In a group, tag me or reply to one of my messages; after I answer you, keep writing for a few minutes without tagging me. In a private chat just write. Database coverage is bounded; the bot never treats first seen as posted or absence as sold.",
         "welcome": "Hi! I'm Garaža. Ask me about used cars from our olx.ba database, in English or Bosnian. Tap an example or just write.",
         # buttons
         "btn_status": "Status",
@@ -164,6 +165,7 @@ STRINGS = {
         "price_unavailable": "cijena nije dostupna",
         "unparsed_model": "Neprepoznat model",
         "looking": "🔎 Tražim…",
+        "anonymous_admin": "Ne mogu znati ko piše jer je poruka poslana kao anonimni admin grupe. Isključi „Ostani anoniman“ u svojim admin pravima u ovoj grupi pa mi piši ponovo.",
         "chat_not_set_up": "Još nisam podešen da odgovaram u ovom četu (id četa: {chat_id}). Vlasnik treba dodati taj id u postavku TELEGRAM_CHAT_ID u Vercelu (odvojen zarezom od trenutnog) i ponovo deployati.",
         "db_unavailable": "Baza je trenutno nedostupna, pa ne mogu odgovoriti. Pokušaj ponovo za koji trenutak.",
         "status_none": "Car Analyzer još nema nijedan završen prolaz kolektora.",
@@ -233,7 +235,7 @@ STRINGS = {
         "latest_few": "Nekoliko ID-jeva koje smo u ovom prolazu prvi put vidjeli:",
         "latest_no_ids": "Nijedan prvi put viđen ID nije povezan s ovim prolazom.",
         "latest_note": "Prvi put viđeno kod nas ne znači da je tek objavljeno na OLX-u.",
-        "help": "Car Analyzer čita samo naše podatke iz Supabase baze.\n\n/status — stanje i svježina kolektora\n/latest — najnovija zapažanja i nekoliko oglasa\n/trends 7 — promjene cijena (1–90 dana)\n/budget 25000 Golf — nedavno viđeni oglasi\n/compare Volkswagen Golf | Škoda Octavia — šire poređenje iz baze\n/ask Golf do 15000 KM od 2016 — pitaj običnim jezikom, bosanski ili engleski\n/follow Golf — prati model\n/following — šta pratiš i šta je novo\n/shortlist — auta koja si sačuvao\n/help — ovaj vodič\n\nMožeš i da me @označiš ili odgovoriš na neku moju poruku pitanjem, npr. „Octavia do 20000 KM“, „koliko košta Golf“, „Golf vs Octavia“, ili suženjem poput „od 2018“. Pokrivenost baze je ograničena; prvo viđenje ne računam kao objavu, a nestanak iz pretrage kao prodaju.",
+        "help": "Car Analyzer čita samo naše podatke iz Supabase baze.\n\n/status — stanje i svježina kolektora\n/latest — najnovija zapažanja i nekoliko oglasa\n/trends 7 — promjene cijena (1–90 dana)\n/budget 25000 Golf — nedavno viđeni oglasi\n/compare Volkswagen Golf | Škoda Octavia — šire poređenje iz baze\n/ask Golf do 15000 KM od 2016 — pitaj običnim jezikom, bosanski ili engleski\n/follow Golf — prati model\n/following — šta pratiš i šta je novo\n/shortlist — auta koja si sačuvao\n/help — ovaj vodič\n\nMožeš i da me @označiš ili odgovoriš na neku moju poruku pitanjem, npr. „Octavia do 20000 KM“, „koliko košta Golf“, „Golf vs Octavia“, ili suženjem poput „od 2018“. U grupi me označi ili odgovori na neku moju poruku; nakon što ti odgovorim, nekoliko minuta možeš pisati i bez označavanja. U privatnom četu samo piši. Pokrivenost baze je ograničena; prvo viđenje ne računam kao objavu, a nestanak iz pretrage kao prodaju.",
         "welcome": "Zdravo! Ja sam Garaža. Pitaj me za polovne aute iz naše olx.ba baze, na bosanskom ili engleskom. Dodirni primjer ili jednostavno piši.",
         "btn_status": "Stanje",
         "btn_latest": "Novo",

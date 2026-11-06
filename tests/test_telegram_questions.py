@@ -148,6 +148,9 @@ class ParserTests(unittest.TestCase):
 
 
 class HandlerTests(unittest.TestCase):
+    def setUp(self):
+        telegram_bot._ACTIVE.clear()
+
     def run_update(self, update, **patches):
         call = Mock()
         with patch("telegram_bot.answer_intent", return_value=("answer", None)) as answer, \

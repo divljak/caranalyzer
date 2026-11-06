@@ -57,7 +57,7 @@ def buttons(payload):
 
 class ButtonTests(unittest.TestCase):
     def setUp(self):
-        for store in (telegram_bot._SCOPES, telegram_bot._HISTORY, telegram_bot._LANGS):
+        for store in (telegram_bot._SCOPES, telegram_bot._HISTORY, telegram_bot._LANGS, telegram_bot._ACTIVE):
             store.clear()
 
     def test_star_buttons_sit_under_the_results_two_to_a_row(self):
@@ -115,7 +115,7 @@ class ParsingTests(unittest.TestCase):
 
 class FlowTests(unittest.TestCase):
     def setUp(self):
-        for store in (telegram_bot._SCOPES, telegram_bot._HISTORY, telegram_bot._LANGS):
+        for store in (telegram_bot._SCOPES, telegram_bot._HISTORY, telegram_bot._LANGS, telegram_bot._ACTIVE):
             store.clear()
         self.call = Mock(return_value={"message_id": 1})
         self.row = {"listing_id": "80138618", "make": "Volkswagen", "model": "Golf", "year": 2016, "price": 12000}

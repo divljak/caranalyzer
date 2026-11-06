@@ -1191,12 +1191,14 @@ def _resolve_llm(llm, phraser):
     if llm is _DEFAULT_LLM or phraser is _DEFAULT_LLM:
         llm_config = telegram_llm.LLMConfig.from_env()
     if llm is _DEFAULT_LLM:
-        llm = (lambda message, previous, history=None, language="":
-               telegram_llm.interpret(message, previous, llm_config, history=history, language=language)
+        llm = (lambda message, previous, history=None, language="", chat_kind="":
+               telegram_llm.interpret(message, previous, llm_config, history=history, language=language,
+                                      chat_kind=chat_kind)
                ) if llm_config else None
     if phraser is _DEFAULT_LLM:
-        phraser = (lambda message, facts, history=None, mode="", language="":
-                   telegram_llm.phrase(message, facts, llm_config, history=history, mode=mode, language=language)
+        phraser = (lambda message, facts, history=None, mode="", language="", chat_kind="":
+                   telegram_llm.phrase(message, facts, llm_config, history=history, mode=mode, language=language,
+                                       chat_kind=chat_kind)
                    ) if llm_config else None
     return llm, phraser
 
@@ -1262,6 +1264,71 @@ def _hint_unconfigured_chat(chat, user_id, message, callback, config, call):
         pass
 
 
+# In a group the bot normally answers only when tagged or replied to. After it has answered someone it keeps
+# listening to *that person* for a few minutes, so a conversation doesn't need a tag on every line. In-process
+# and best-effort like the other memory: per (chat, user), bounded, expiring. Private chats are always open.
+GROUP_WINDOW_SECONDS = 300
+_ACTIVE = {}
+
+
+def group_window_seconds():
+    raw = (os.environ.get("TELEGRAM_GROUP_WINDOW_SECONDS") or "").strip()
+    try:
+        return max(0, min(int(raw), 3600)) if raw else GROUP_WINDOW_SECONDS
+    except ValueError:
+        return GROUP_WINDOW_SECONDS
+
+
+def _mark_conversation(key):
+    window = group_window_seconds()
+    if not key or window <= 0:
+        return
+    now = time.monotonic()
+    for stale in [k for k, at in _ACTIVE.items() if now - at > window]:
+        _ACTIVE.pop(stale, None)
+    if len(_ACTIVE) >= SCOPE_MAX_ENTRIES and key not in _ACTIVE:
+        _ACTIVE.pop(min(_ACTIVE, key=_ACTIVE.get), None)
+    _ACTIVE[key] = now
+
+
+def _in_conversation(key):
+    window = group_window_seconds()
+    at = _ACTIVE.get(key)
+    return bool(key) and window > 0 and at is not None and time.monotonic() - at <= window
+
+
+ANONYMOUS_ADMIN_ID = 1087968824  # Telegram's "GroupAnonymousBot": what an anonymous group admin appears as
+
+
+def _handle_unauthorized(chat, user_id, message, callback, config, call):
+    """Stay silent, except to help someone who is clearly trying to use the bot.
+
+    Strangers, private chats, buttons and chatter get nothing. A line (no ids, no text) is logged when an
+    addressed message is ignored, so "why didn't it answer?" can be answered from the logs.
+    """
+    if callback:
+        return
+    body = message.get("text")
+    addressed = isinstance(body, str) and body.strip() and (
+        body.lstrip().startswith("/") or is_addressed(message, config))
+    in_group = chat.get("type") in {"group", "supergroup"}
+    if user_id == ANONYMOUS_ADMIN_ID and in_group and chat.get("id") in config.allowed_chats and addressed:
+        LOG.warning("telegram update ignored: anonymous admin in a configured group")
+        lang = detect_language(body) or default_language()
+        try:
+            call(config, "sendMessage", {"chat_id": chat["id"], "text": t(lang, "anonymous_admin"),
+                                         "disable_web_page_preview": True})
+        except TelegramAPIError:
+            pass
+        return
+    if user_id in config.allowed_user_ids and in_group:
+        _hint_unconfigured_chat(chat, user_id, message, callback, config, call)
+        return
+    if addressed:
+        LOG.warning("telegram update ignored: chat_type=%s chat_configured=%s user_allowed=%s",
+                    chat.get("type"), chat.get("id") in config.allowed_chats, user_id in config.allowed_user_ids)
+
+
 def _send_placeholder(call, config, chat_id, lang):
     """Send "looking…" right away and return its message id, so the answer can replace it."""
     try:
@@ -1300,10 +1367,11 @@ def process_update(update: dict[str, Any], engine, config: TelegramConfig, *, ca
         return {"handled": False, "reason": "invalid_update"}
     chat, user_id, message, callback = _identity(update)
     if not is_authorized(chat, user_id, config):
-        _hint_unconfigured_chat(chat, user_id, message, callback, config, call)
+        _handle_unauthorized(chat, user_id, message, callback, config, call)
         return {"handled": False, "reason": "unauthorized"}
     chat_id = chat["id"]
     private = chat.get("type") == "private"
+    chat_kind = "private" if private else "group"
     scope_key = (chat_id, user_id)
     history_key = scope_key if private else None
     sender = callback.get("from") or message.get("from") or {}
@@ -1365,7 +1433,7 @@ def process_update(update: dict[str, Any], engine, config: TelegramConfig, *, ca
                 intent = Intent("shortlist")
             elif command == "ask":
                 free_text = argument
-        elif is_addressed(message, config):
+        elif is_addressed(message, config) or (not private and _in_conversation(scope_key)):
             free_text = body
         else:
             return {"handled": False, "reason": "not_addressed"}
@@ -1374,7 +1442,8 @@ def process_update(update: dict[str, Any], engine, config: TelegramConfig, *, ca
     if free_text is not None:
         if llm is not None or phraser is not None:
             placeholder_id = _send_placeholder(call, config, chat_id, lang)
-        intent = _understand(free_text, message, private and scope_key, llm, _recall_history(history_key), lang)
+        intent = _understand(free_text, message, private and scope_key, llm, _recall_history(history_key), lang,
+                             chat_kind)
         command = intent.kind
     if intent is not None and intent.kind == "ignore":
         if placeholder_id is not None:
@@ -1395,7 +1464,7 @@ def process_update(update: dict[str, Any], engine, config: TelegramConfig, *, ca
                 _remember_scope(scope_key, intent)
             if free_text is not None and phraser is not None and intent.kind in DB_KINDS:
                 phrased = phraser(free_text, response, _recall_history(history_key), mode=intent.kind,
-                                  language=lang)
+                                  language=lang, chat_kind=chat_kind)
                 if phrased:
                     chat_text, show_details = phrased
                     show_details = show_details or intent.kind == "suggest"  # the user wants to see them
@@ -1416,6 +1485,8 @@ def process_update(update: dict[str, Any], engine, config: TelegramConfig, *, ca
              delete_on_failure=placeholder_id is not None)
     if free_text is not None:
         _remember_turn(history_key, free_text, chat_text or response.split("\n", 1)[0])
+    if not private:
+        _mark_conversation(scope_key)  # keep listening to this person for a few minutes
     return {"handled": True, "command": command}
 
 
@@ -1432,7 +1503,7 @@ def _needs_interpreter(intent, text_value):
         intent.filters.budget or intent.filters.year_min or intent.filters.mileage_max)
 
 
-def _understand(text_value, message, scope_key, llm, history=None, lang=DEFAULT_LANGUAGE):
+def _understand(text_value, message, scope_key, llm, history=None, lang=DEFAULT_LANGUAGE, chat_kind=""):
     """Deterministic parse first; Gemini for anything conversational or unreadable."""
     context = reply_context(message)
     remembered = _recall_scope(scope_key) if scope_key else None
@@ -1440,7 +1511,7 @@ def _understand(text_value, message, scope_key, llm, history=None, lang=DEFAULT_
         context = remembered
     intent = parse_question(text_value, context)
     if llm is not None and _needs_interpreter(intent, text_value):
-        interpreted = llm(text_value, context or remembered, history or [], language=lang)
+        interpreted = llm(text_value, context or remembered, history or [], language=lang, chat_kind=chat_kind)
         if interpreted is not None:
             return interpreted
     return intent

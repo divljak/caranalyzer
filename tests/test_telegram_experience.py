@@ -119,7 +119,7 @@ class StringTableTests(unittest.TestCase):
 
 class ReplyLanguageTests(unittest.TestCase):
     def setUp(self):
-        for store in (telegram_bot._SCOPES, telegram_bot._HISTORY, telegram_bot._LANGS):
+        for store in (telegram_bot._SCOPES, telegram_bot._HISTORY, telegram_bot._LANGS, telegram_bot._ACTIVE):
             store.clear()
         self.call = Mock(return_value={"message_id": 1})
 
@@ -209,7 +209,7 @@ class ReplyLanguageTests(unittest.TestCase):
 
 class ContextualButtonTests(unittest.TestCase):
     def setUp(self):
-        for store in (telegram_bot._SCOPES, telegram_bot._HISTORY, telegram_bot._LANGS):
+        for store in (telegram_bot._SCOPES, telegram_bot._HISTORY, telegram_bot._LANGS, telegram_bot._ACTIVE):
             store.clear()
 
     def rows(self, page, config=PLAIN, lang="en"):
@@ -354,7 +354,7 @@ class ContextualButtonTests(unittest.TestCase):
 
 class PlaceholderTests(unittest.TestCase):
     def setUp(self):
-        for store in (telegram_bot._SCOPES, telegram_bot._HISTORY, telegram_bot._LANGS):
+        for store in (telegram_bot._SCOPES, telegram_bot._HISTORY, telegram_bot._LANGS, telegram_bot._ACTIVE):
             store.clear()
 
     def test_a_looking_message_is_sent_first_and_replaced_by_the_answer(self):

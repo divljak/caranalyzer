@@ -309,6 +309,26 @@ chats, buttons and ordinary group chatter, and the reply contains nothing but th
 (chat type and id, never the message) is written to the runtime logs. To diagnose without that hint, look at
 `vercel logs requests` for the webhook: `200`s with no reply mean the bot received the message and ignored it.
 
+## Talking in a group: tag once, then just write
+
+In a **private chat** the bot reads everything. In a **group** it answers when it is tagged (`@mojagaraza_bot …`),
+replied to, or used with a command. After it has answered someone it keeps listening to **that person** for
+**5 minutes** (every answer restarts the timer), so a conversation doesn't need a tag on every line:
+`@mojagaraza_bot Golf do 15000 KM` … `a do 9000 KM?` … `Octavia`. It is per person and per group, in-process
+and bounded like the other memory (it can be lost when the server instance changes, then tag it again),
+and never lets a stranger in. `TELEGRAM_GROUP_WINDOW_SECONDS` changes it (0 turns it off, max 3600).
+
+Telegram only *delivers* un-tagged group messages to a bot that is a group **admin** or has privacy mode off
+in BotFather; otherwise the bot never sees them and tagging is the only way.
+
+Gemini is told whether it is in a private chat or a group and may not claim that people can write without tagging
+it, which it had done ("no need to tag me") while ignoring the next message. The help text explains the rule.
+
+**Why didn't it answer?** When the bot ignores a message that addressed it, one line is written to the runtime logs:
+`telegram update ignored: chat_type=… chat_configured=… user_allowed=…` (no ids, no text). If the sender is
+Telegram's anonymous-admin account (an admin posting with "Remain anonymous" on), the bot cannot know who
+it is and says so, in a configured group only. A group the bot is not configured for is covered above.
+
 ## Known MVP limits
 
 - Phrasing outside the parser's vocabulary gets the "can't answer" reply; widening it
