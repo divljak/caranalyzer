@@ -56,7 +56,7 @@ login `t.me` (id 3166033). Copy it from there. Do not invent a new bot.
 Webhook-only variables stay as in `docs/TELEGRAM_BOT.md` (`TELEGRAM_WEBHOOK_SECRET`,
 `TELEGRAM_ALLOWED_USER_IDS`). The digest does not use them. Phase 2 questions add one
 optional name, `TELEGRAM_BOT_USERNAME` (`mojagaraza_bot`), and the Gemini fallback uses
-`GEMINI_API_KEY` (secret) and `TELEGRAM_LLM_MODEL` (`gemini-3.5-flash-lite`). `TELEGRAM_DEFAULT_LANGUAGE` (`bs`/`en`, optional) sets the language when a person's
+`GEMINI_API_KEY` (secret) and `TELEGRAM_LLM_MODEL` (`gemini-3.5-flash-lite`). `TELEGRAM_GROUP_WINDOW_SECONDS` (default 300; 0 = tag every time) and `TELEGRAM_DEFAULT_LANGUAGE` (`bs`/`en`, optional) sets the language when a person's
 language is unknown. All are optional:
 without the key the bot uses its built-in parser only.
 

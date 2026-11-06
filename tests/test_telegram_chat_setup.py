@@ -87,7 +87,7 @@ class AuthorizationTests(unittest.TestCase):
 
 class NotSetUpHintTests(unittest.TestCase):
     def setUp(self):
-        for store in (telegram_bot._SCOPES, telegram_bot._HISTORY, telegram_bot._LANGS):
+        for store in (telegram_bot._SCOPES, telegram_bot._HISTORY, telegram_bot._LANGS, telegram_bot._ACTIVE):
             store.clear()
         self.call = Mock(return_value={"message_id": 1})
 

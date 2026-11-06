@@ -55,7 +55,12 @@ like a person texting. You know NOTHING about cars, prices or listings yourself:
 may use are the ones given to you from our database. Never state a price, count, year, mileage, \
 date or any car fact (reliability, common faults, value, forecasts) that was not given to you, and \
 never recommend a specific car from your own knowledge or call any car "the best" or "the smartest" \
-choice: you may only point out what the database facts show."""
+choice: you may only point out what the database facts show.
+
+The "chat" field says whether this is a "private" chat or a "group". In a group you only see a message \
+when it tags you, replies to you, or arrives within a few minutes after your last answer to that person. \
+Never tell someone they can just write without tagging you unless chat is "private" or they are \
+continuing right after your answer: say that in a group they should tag you or reply to your message."""
 
 SYSTEM_PROMPT = PERSONA + """
 
@@ -365,16 +370,18 @@ def _generate(config, system, user, schema, max_tokens, post=None):
     return None, last
 
 
-def _language_field(user, language):
+def _language_field(user, language, chat_kind=""):
     name = LANGUAGE_NAMES.get(language)
     if name:
         user["language"] = name
+    if chat_kind in {"private", "group"}:
+        user["chat"] = chat_kind
     return user
 
 
-def call_plan(message, previous, config, *, post=None, history=None, language=""):
+def call_plan(message, previous, config, *, post=None, history=None, language="", chat_kind=""):
     """Return (plan dict | None, status string) for one chat message."""
-    user = _language_field({"message": message[:MAX_QUESTION]}, language)
+    user = _language_field({"message": message[:MAX_QUESTION]}, language, chat_kind)
     turns = _clean_history(history)
     if turns:
         user["recent_turns"] = turns
@@ -384,12 +391,13 @@ def call_plan(message, previous, config, *, post=None, history=None, language=""
     return _generate(config, SYSTEM_PROMPT, user, SCHEMA, 400, post)
 
 
-def interpret(message, previous, config, *, post=None, history=None, language=""):
+def interpret(message, previous, config, *, post=None, history=None, language="", chat_kind=""):
     """Interpret one message. Returns an Intent or None; never raises."""
     if config is None or not isinstance(message, str) or not message.strip():
         return None
     try:
-        plan, status = call_plan(message, previous, config, post=post, history=history, language=language)
+        plan, status = call_plan(message, previous, config, post=post, history=history, language=language,
+                                 chat_kind=chat_kind)
         if plan is None:
             LOG.warning("gemini interpretation unavailable: %s", status)
             return None
@@ -399,7 +407,7 @@ def interpret(message, previous, config, *, post=None, history=None, language=""
         return None
 
 
-def phrase(message, facts, config, *, post=None, history=None, mode="", language=""):
+def phrase(message, facts, config, *, post=None, history=None, mode="", language="", chat_kind=""):
     """Rewrite a database answer as a short chat reply.
 
     Returns ``(reply, show_details)`` or ``None``; never raises. ``None`` means the caller
@@ -408,7 +416,8 @@ def phrase(message, facts, config, *, post=None, history=None, mode="", language
     if config is None or not isinstance(message, str) or not message.strip() or not facts:
         return None
     try:
-        user = _language_field({"message": message[:MAX_QUESTION], "facts": facts[:MAX_FACTS_CHARS]}, language)
+        user = _language_field({"message": message[:MAX_QUESTION], "facts": facts[:MAX_FACTS_CHARS]}, language,
+                               chat_kind)
         turns = _clean_history(history)
         if turns:
             user["recent_turns"] = turns

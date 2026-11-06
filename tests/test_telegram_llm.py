@@ -199,6 +199,7 @@ class PrivateChatTests(unittest.TestCase):
     def setUp(self):
         telegram_bot._SCOPES.clear()
         telegram_bot._HISTORY.clear()
+        telegram_bot._ACTIVE.clear()
         self.call = Mock()
         self.llm = Mock(return_value=None)
 
