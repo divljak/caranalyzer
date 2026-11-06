@@ -44,15 +44,16 @@ MAX_REPLY_CHARS = 600
 MAX_FACTS_CHARS = 3500
 MAX_HISTORY_TURNS = 6
 MAX_TURN_CHARS = 300
-INTENTS = ("status", "latest", "trends", "find", "model_stats", "compare", "clarify", "chitchat",
-           "unsupported")
+INTENTS = ("status", "latest", "trends", "find", "model_stats", "compare", "suggest", "clarify",
+           "chitchat", "unsupported")
 
 PERSONA = """You are Garaža, a friendly, relaxed assistant in a private chat about used cars on \
 olx.ba (Bosnia). Reply in the language the user writes in (Bosnian or English), warmly and briefly, \
 like a person texting. You know NOTHING about cars, prices or listings yourself: the only facts you \
 may use are the ones given to you from our database. Never state a price, count, year, mileage, \
 date or any car fact (reliability, common faults, value, forecasts) that was not given to you, and \
-never give advice about which car to buy."""
+never recommend a specific car from your own knowledge or call any car "the best" or "the smartest" \
+choice: you may only point out what the database facts show."""
 
 SYSTEM_PROMPT = PERSONA + """
 
@@ -66,6 +67,8 @@ and any of budget_km (max price in KM), year_min, mileage_max (km).
 - trends: asks how asking prices changed. Set days (1-90).
 - status: asks whether data is fresh or the collector works.
 - latest: asks what is new.
+- suggest: the user gives a budget and asks what to buy, what is best, smartest or best selling, or \
+for suggestions. Set budget_km (and year_min / mileage_max if given). Without a budget use clarify.
 - clarify: wants a recommendation or is too vague to search. Put ONE short friendly question in \
 reply. Ask for the maximum budget in KM first. Only if the message or the previous scope already \
 gives a budget, ask for a model, year or mileage instead.
@@ -108,6 +111,14 @@ SCHEMA = {
     },
     "required": ["intent"],
 }
+
+SUGGEST_ADDENDUM = """
+
+This answer is a data-based shortlist for the user's budget. You may point out what stands out \
+in it: which models have the most listings and roughly what they cost, and any listings priced well \
+below similar ones, always as "what the data shows" and never as a guarantee or the best choice. \
+Say plainly that we cannot see what actually sells: most listed is not best selling. Remind them \
+to check each ad. Set show_details to true."""
 
 PHRASE_SCHEMA = {
     "type": "object",
@@ -209,6 +220,14 @@ def intent_from_plan(plan, previous=None, message="", history=None):
     search = clean_search(str(plan.get("search") or ""))
     if kind == "model_stats":
         return Intent("model_stats", Filters(search)) if search else Intent("clarify")
+    if kind == "suggest":
+        budget = _bounded(plan.get("budget_km"), PRICE_RANGE)
+        if budget is None:
+            return Intent("clarify", reply=reply)
+        return Intent("suggest", Filters(
+            budget=budget,
+            year_min=_bounded(plan.get("year_min"), YEAR_RANGE),
+            mileage_max=_bounded(plan.get("mileage_max"), MILEAGE_RANGE)))
     filters = Filters(
         search=search,
         budget=_bounded(plan.get("budget_km"), PRICE_RANGE),
@@ -362,7 +381,7 @@ def interpret(message, previous, config, *, post=None, history=None):
         return None
 
 
-def phrase(message, facts, config, *, post=None, history=None):
+def phrase(message, facts, config, *, post=None, history=None, mode=""):
     """Rewrite a database answer as a short chat reply.
 
     Returns ``(reply, show_details)`` or ``None``; never raises. ``None`` means the caller
@@ -375,7 +394,8 @@ def phrase(message, facts, config, *, post=None, history=None):
         turns = _clean_history(history)
         if turns:
             user["recent_turns"] = turns
-        plan, status = _generate(config, PHRASE_PROMPT, user, PHRASE_SCHEMA, 500, post)
+        system = PHRASE_PROMPT + (SUGGEST_ADDENDUM if mode == "suggest" else "")
+        plan, status = _generate(config, system, user, PHRASE_SCHEMA, 500, post)
         if not isinstance(plan, dict):
             LOG.warning("gemini phrasing unavailable: %s", status)
             return None

@@ -76,6 +76,13 @@ class ConfigAndValidationTests(unittest.TestCase):
         self.assertEqual(90, intent_from_plan({"intent": "trends", "days": 90}).days)
         self.assertEqual(7, intent_from_plan({"intent": "trends", "days": 9000}).days)
 
+    def test_suggest_plans_need_a_budget_within_limits(self):
+        ok = intent_from_plan({"intent": "suggest", "budget_km": 50000, "year_min": 2015, "mileage_max": 200000})
+        self.assertEqual(("suggest", Filters("", 50000, 2015, 200000)), (ok.kind, ok.filters))
+        for plan in ({"intent": "suggest"}, {"intent": "suggest", "budget_km": 5},
+                     {"intent": "suggest", "budget_km": True}):
+            self.assertEqual("clarify", intent_from_plan(plan).kind, plan)
+
     def test_clarifying_question_cannot_smuggle_facts_or_links(self):
         ok = intent_from_plan({"intent": "clarify", "clarifying_question": "What budget do you have in mind?"})
         self.assertEqual("What budget do you have in mind?", ok.question)

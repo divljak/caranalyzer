@@ -185,6 +185,24 @@ improve Google's products and reviewed by humans. Each chat message costs one or
 requests against the free quota; when the quota is used up or a call fails, the bot falls back
 to its previous behaviour.
 
+## Suggestions ("I have 50k, what should I buy?")
+
+A budget plus a "what should I buy / what is best / what sells best" question returns a
+**data-based shortlist** (not a recommendation):
+
+- **Most listed models** within the budget (ads seen in the last 90 days, at least 3 per
+  model), with listing count, median price, median mileage and newest year. "Most listed"
+  means the most ads in our database; it is **not** best selling, because there is no sales
+  data, and the bot says so.
+- **Priced well below similar listings:** fresh ads (seen in the last 14 days) whose price is
+  at least 15% under the median of the same model and year (at least 4 similar ads, compared
+  across every recent ad, not only those under the budget) and whose mileage is at or under
+  that median. Each shows the discount, mileage, age and link.
+- Caveats are always attached: a low price can mean damage or a wrong entry; check each ad.
+  Without a budget the bot asks for one. Gemini may summarise what stands out but still cannot
+  invent numbers, call a car "the best", or give general car advice, and the listings are always
+  attached to a suggestion.
+
 ## Known MVP limits
 
 - Phrasing outside the parser's vocabulary gets the "can't answer" reply; widening it
