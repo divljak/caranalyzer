@@ -50,7 +50,8 @@ and any of budget_km (max price in KM), year_min, mileage_max (km).
 - status: asks whether data is fresh or the collector works.
 - latest: asks what is new.
 - clarify: wants a recommendation or is too vague to search. Put ONE short friendly question in \
-clarifying_question asking for a budget, model, year or mileage. No numbers, no facts.
+clarifying_question. Ask for the maximum budget in KM first. Only if the message or the previous \
+scope already gives a budget, ask for a model, year or mileage instead. No numbers, no facts.
 - chitchat: greeting or thanks or small talk.
 - unsupported: anything else, including forecasts and non-car topics.
 Prices are in KM. If a previous scope is provided and the message only refines it (for example \

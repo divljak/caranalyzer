@@ -102,6 +102,12 @@ class CallTests(unittest.TestCase):
         self.assertNotIn(KEY, json.dumps(post.call_args.kwargs["json"]))
         self.assertNotIn("params", post.call_args.kwargs)
 
+    def test_prompt_asks_for_a_budget_first(self):
+        post = Mock(return_value=plan_reply({"intent": "clarify"}))
+        call_plan("something sensible for my family", None, CFG, post=post)
+        prompt = post.call_args.kwargs["json"]["systemInstruction"]["parts"][0]["text"]
+        self.assertIn("Ask for the maximum budget in KM first", prompt)
+
     def test_only_the_message_and_prior_scope_are_sent(self):
         post = Mock(return_value=plan_reply({"intent": "find", "search": "golf"}))
         call_plan("ima li nesto jeftino", Intent("find", Filters("golf", 9000)), CFG, post=post)
