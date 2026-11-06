@@ -46,7 +46,7 @@ MAX_HISTORY_TURNS = 6
 MAX_TURN_CHARS = 300
 LANGUAGE_NAMES = {"bs": "Bosnian", "en": "English"}
 INTENTS = ("status", "latest", "trends", "find", "model_stats", "compare", "suggest", "follow", "following",
-           "clarify", "chitchat", "unsupported")
+           "shortlist", "clarify", "chitchat", "unsupported")
 
 PERSONA = """You are Garaža, a friendly, relaxed assistant in a private chat about used cars on \
 olx.ba (Bosnia). Reply in the language named in the "language" field (Bosnian or English), warmly and briefly, \
@@ -72,6 +72,7 @@ and any of budget_km (max price in KM), year_min, mileage_max (km).
 for suggestions. Set budget_km (and year_min / mileage_max if given). Without a budget use clarify.
 - follow: the user wants to follow or track a model. Set search (make/model words).
 - following: asks what they follow, or what is new on the models they follow.
+- shortlist: asks to see the cars they saved or shortlisted.
 - clarify: wants a recommendation or is too vague to search. Put ONE short friendly question in \
 reply. Ask for the maximum budget in KM first. Only if the message or the previous scope already \
 gives a budget, ask for a model, year or mileage instead.
@@ -227,6 +228,8 @@ def intent_from_plan(plan, previous=None, message="", history=None):
         return Intent("follow", Filters(search)) if search else Intent("clarify", reply=reply)
     if kind == "following":
         return Intent("following")
+    if kind == "shortlist":
+        return Intent("shortlist")
     if kind == "suggest":
         budget = _bounded(plan.get("budget_km"), PRICE_RANGE)
         if budget is None:

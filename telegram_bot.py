@@ -440,6 +440,7 @@ class Page:
     next_offset: int | None = None
     min_year: int | None = None
     max_km: int | None = None
+    items: tuple = ()  # (listing_id, year, price) of the cars shown, for the save buttons
 
 
 @dataclass(frozen=True)
@@ -498,7 +499,8 @@ def find_page(engine, filters, offset=0, lang=DEFAULT_LANGUAGE):
         lines.append(t(lang, "find_showing", span=span, total=total))
         years = [item["year"] for item in matches if item["year"]]
         kms = [int(item["mileage"]) for item in matches if item["mileage"] is not None]
-        stats = {"min_year": min(years) if years else None, "max_km": max(kms) if kms else None}
+        stats = {"min_year": min(years) if years else None, "max_km": max(kms) if kms else None,
+                 "items": tuple((item["listing_id"], item["year"], item["price"]) for item in matches)}
         for item in matches:
             label = " ".join(value for value in (item["make"], item["model"]) if value) or t(lang, "unparsed_model")
             year = f" · {item['year']}" if item["year"] else ""
@@ -789,6 +791,10 @@ def parse_follow_callback(data):
     return make, model
 
 
+def _valid_listing_id(value):
+    return isinstance(value, str) and re.fullmatch(r"[0-9A-Za-z_-]{1,50}", value) is not None
+
+
 def _thousands(value):
     return f"{int(value):,}".replace(",", ".")
 
@@ -809,6 +815,22 @@ def example_choices(lang):
 def budget_choices(lang):
     amounts = (10_000, 20_000, 30_000, 50_000)
     return Choices((tuple((t(lang, "btn_budget", amount=_thousands(a)), suggest_callback(a)) for a in amounts),))
+
+
+def save_callback(listing_id):
+    data = f"c:{listing_id}"
+    return data if len(data.encode()) <= 64 else None
+
+
+def _save_rows(page, lang):
+    """⭐ buttons for the cars on screen, two to a row."""
+    buttons = []
+    for listing_id, year, price in page.items:
+        data = save_callback(listing_id) if _valid_listing_id(listing_id) else None
+        if data:
+            label = " · ".join(str(part) for part in (year, _money(price, lang) if price else None) if part)
+            buttons.append(_button(t(lang, "btn_save", label=label or listing_id[:12]), data))
+    return [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
 
 
 def _find_refinements(filters, page, lang):
@@ -870,7 +892,7 @@ def keyboard(config, page=None, lang=DEFAULT_LANGUAGE):
     if isinstance(page, Filters):
         page = Page(page)
     if isinstance(page, Page):
-        rows = _find_refinements(page.filters, page, lang)
+        rows = _save_rows(page, lang) + _find_refinements(page.filters, page, lang)
         if config.market_url:
             rows.append([{"text": t(lang, "btn_market"), "url": config.market_url}])
         return {"inline_keyboard": rows} if rows else None
@@ -1012,6 +1034,37 @@ def _follow_answer(engine, intent, lang):
     return text_value, (Choices(rows) if rows else False)
 
 
+def _shortlist_answer(engine, intent, lang):
+    """Save / remove / list shortlisted cars. Writes happen only from a button tap."""
+    import telegram_shortlist as sl  # lazy: telegram_shortlist imports this module
+
+    my_list = Choices((((t(lang, "btn_shortlist"), "shortlist"),),))
+    if intent.kind == "shortlist":
+        text_value, items = sl.shortlist_message(engine, lang)
+        rows = tuple(((f"✖ {label[:40]}", f"x:{listing_id}"),) for listing_id, label in items[:4])
+        return text_value, (Choices(rows) if rows else False)
+    try:
+        if intent.kind == "save_car":
+            result = sl.save_listing(engine, intent.note)
+            if result is None:
+                return t(lang, "save_gone"), False
+            row, created = result
+            label = sl.label_for(row, lang)
+            return t(lang, "save_done" if created else "save_exists", label=label), Choices((
+                ((t(lang, "btn_remove"), f"x:{row['listing_id']}"),), ((t(lang, "btn_shortlist"), "shortlist"),)))
+        row, outcome = sl.remove_listing(engine, intent.note)
+    except sl.NotEnabled:
+        return t(lang, "save_not_enabled"), False
+    except SQLAlchemyError:
+        return t(lang, "save_failed"), False
+    label = sl.label_for(row, lang) if row.get("make") or row.get("model") else intent.note
+    if outcome == "removed":
+        return t(lang, "remove_done", label=label), my_list
+    if outcome == "kept":
+        return t(lang, "remove_kept", label=label), my_list
+    return t(lang, "remove_gone"), my_list
+
+
 def answer_intent(engine, intent, config, lang=DEFAULT_LANGUAGE):
     """Map a parsed Intent onto the read-only helpers. Returns (text, buttons).
 
@@ -1029,7 +1082,7 @@ def answer_intent(engine, intent, config, lang=DEFAULT_LANGUAGE):
         text_value, total, stats = find_page(engine, intent.filters, offset, lang)
         following = offset + PAGE_SIZE
         return text_value, Page(intent.filters, following if following < total and following <= MAX_OFFSET else None,
-                                stats.get("min_year"), stats.get("max_km"))
+                                stats.get("min_year"), stats.get("max_km"), stats.get("items", ()))
     if intent.kind == "model_stats":
         label = intent.filters.search
         rows = ((t(lang, "btn_show_listings"), refine_callback(Filters(label))),)
@@ -1045,6 +1098,8 @@ def answer_intent(engine, intent, config, lang=DEFAULT_LANGUAGE):
         return compare_message(engine, " | ".join(intent.labels), lang), Choices((buttons,))
     if intent.kind in {"follow", "follow_do", "unfollow", "following"}:
         return _follow_answer(engine, intent, lang)
+    if intent.kind in {"save_car", "remove_car", "shortlist"}:
+        return _shortlist_answer(engine, intent, lang)
     if intent.kind in {"chitchat", "clarify", "unsupported"}:
         if intent.reply:
             text_value = intent.reply
@@ -1201,6 +1256,15 @@ def process_update(update: dict[str, Any], engine, config: TelegramConfig, *, ca
         elif callback_data == "following":
             intent = Intent("following")
             command = "following"
+        elif callback_data.startswith("c:") and _valid_listing_id(callback_data[2:]):
+            intent = Intent("save_car", note=callback_data[2:])
+            command = "save"
+        elif callback_data.startswith("x:") and _valid_listing_id(callback_data[2:]):
+            intent = Intent("remove_car", note=callback_data[2:])
+            command = "remove"
+        elif callback_data == "shortlist":
+            intent = Intent("shortlist")
+            command = "shortlist"
         elif refine:
             intent = Intent("find", refine[0], offset=refine[1])
             command = "find"
@@ -1225,6 +1289,8 @@ def process_update(update: dict[str, Any], engine, config: TelegramConfig, *, ca
                           else Intent("following"))
             elif command == "following":
                 intent = Intent("following")
+            elif command == "shortlist":
+                intent = Intent("shortlist")
             elif command == "ask":
                 free_text = argument
         elif is_addressed(message, config):
