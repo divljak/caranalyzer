@@ -228,36 +228,48 @@ def looks_like_followup(text_value):
     return not filters.is_empty() and not _search_tokens(rest)
 
 
+# Titles the bot puts on its first line, per language. Replies are parsed back from them, so a
+# follow-up works whichever language the answer was in.
+_TITLES = (
+    {"trends": "Observed asking-price changes · last ", "trends_unit": "days",
+     "budget": "Recently observed at or below ", "find": "Observed listings", "upto": "up to ", "from": "from "},
+    {"trends": "Zabilježene promjene tražene cijene · zadnjih ", "trends_unit": "dana",
+     "budget": "Nedavno viđeno do ", "find": "Viđeni oglasi", "upto": "do ", "from": "od "},
+)
+
+
 def context_from_reply(reply_text):
     """Recover the previous answer's scope from the bot message being replied to."""
     first = (reply_text or "").strip().split("\n", 1)[0]
-    if first.startswith(TITLE_TRENDS):
-        match = re.match(r"([0-9]{1,2}) days", first[len(TITLE_TRENDS):])
-        if match:
-            return Intent("trends", days=max(1, min(int(match.group(1)), 90)))
-        return None
-    if first.startswith(TITLE_BUDGET):
-        body = first[len(TITLE_BUDGET):]
-        amount_part, _, search = body.partition(" · ")
-        budget = _amount(re.sub(r"\s*KM$", "", amount_part), None, PRICE_RANGE)
-        if budget:
-            return Intent("find", Filters(clean_search(search), budget))
-        return None
-    if first.startswith(TITLE_FIND):
-        search, budget, year, mileage = "", None, None, None
-        for piece in first[len(TITLE_FIND):].split(" · "):
-            piece = piece.strip()
-            if not piece:
-                continue
-            if piece.startswith("up to ") and piece.endswith(" KM"):
-                budget = _amount(piece[6:-3], None, PRICE_RANGE)
-            elif piece.startswith("up to ") and piece.endswith(" km"):
-                mileage = _amount(piece[6:-3], None, MILEAGE_RANGE)
-            elif piece.startswith("from "):
-                year = _amount(piece[5:], None, YEAR_RANGE)
-            else:
-                search = clean_search(piece)
-        return Intent("find", Filters(search, budget, year, mileage))
+    for titles in _TITLES:
+        if first.startswith(titles["trends"]):
+            match = re.match(rf"([0-9]{{1,2}}) {titles['trends_unit']}", first[len(titles["trends"]):])
+            if match:
+                return Intent("trends", days=max(1, min(int(match.group(1)), 90)))
+            return None
+        if first.startswith(titles["budget"]):
+            body = first[len(titles["budget"]):]
+            amount_part, _, search = body.partition(" · ")
+            budget = _amount(re.sub(r"\s*KM$", "", amount_part), None, PRICE_RANGE)
+            if budget:
+                return Intent("find", Filters(clean_search(search), budget))
+            return None
+        if first.startswith(titles["find"]):
+            search, budget, year, mileage = "", None, None, None
+            upto, since = titles["upto"], titles["from"]
+            for piece in first[len(titles["find"]):].split(" · "):
+                piece = piece.strip()
+                if not piece:
+                    continue
+                if piece.startswith(upto) and piece.endswith(" KM"):
+                    budget = _amount(piece[len(upto):-3], None, PRICE_RANGE)
+                elif piece.startswith(upto) and piece.endswith(" km"):
+                    mileage = _amount(piece[len(upto):-3], None, MILEAGE_RANGE)
+                elif piece.startswith(since) and piece[len(since):].strip().isdigit():
+                    year = _amount(piece[len(since):], None, YEAR_RANGE)
+                else:
+                    search = clean_search(piece)
+            return Intent("find", Filters(search, budget, year, mileage))
     return None
 
 

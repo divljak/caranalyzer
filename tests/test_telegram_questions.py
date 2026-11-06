@@ -206,7 +206,7 @@ class HandlerTests(unittest.TestCase):
     def test_context_comes_only_from_a_bot_message_in_the_same_update(self):
         captured = []
 
-        def fake_answer(engine, intent, config):
+        def fake_answer(engine, intent, config, **kw):
             captured.append(intent)
             return "answer", None
 
@@ -264,7 +264,7 @@ class HandlerTests(unittest.TestCase):
             "message": {"chat": {"id": CONFIG.chat_id}}}}
         captured = []
         with patch("telegram_bot.answer_intent",
-                   side_effect=lambda e, i, c: captured.append(i) or ("answer", i.filters)):
+                   side_effect=lambda e, i, c, **kw: captured.append(i) or ("answer", i.filters)):
             result = process_update(update, Mock(), CONFIG, call=Mock())
         self.assertEqual(("find", Filters("golf", 13500, 2016)), (result["command"], captured[0].filters))
 
@@ -304,7 +304,7 @@ class HandlerTests(unittest.TestCase):
             "message": {"chat": {"id": CONFIG.chat_id}}}}
         captured = []
         with patch("telegram_bot.answer_intent",
-                   side_effect=lambda e, i, c: captured.append(i) or ("answer", None)):
+                   side_effect=lambda e, i, c, **kw: captured.append(i) or ("answer", None)):
             process_update(update, Mock(), CONFIG, call=Mock())
         self.assertEqual((Filters("golf", 15000), 5), (captured[0].filters, captured[0].offset))
 

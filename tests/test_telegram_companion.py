@@ -193,24 +193,40 @@ class CompanionFlowTests(unittest.TestCase):
         self.phraser.assert_not_called()
         self.llm.assert_not_called()
 
-    def test_small_talk_gets_a_friendly_reply_and_a_typing_indicator(self):
+    def test_small_talk_gets_a_friendly_reply_that_replaces_the_looking_message(self):
+        self.call.return_value = {"message_id": 77}
         plan = Intent("chitchat", reply="Zdravo! Šta tražiš danas?")
         result = self.run_update(dm("bok bok"), llm=Mock(return_value=plan), db=False)
-        self.assertEqual("Zdravo! Šta tražiš danas?", self.sent_text())
+        first, last = self.call.call_args_list[0], self.call.call_args_list[-1]
+        self.assertEqual(("sendMessage", "🔎 Tražim…"), (first.args[1], first.args[2]["text"]))
+        self.assertEqual(("editMessageText", 77, "Zdravo! Šta tražiš danas?"),
+                         (last.args[1], last.args[2]["message_id"], last.args[2]["text"]))
         self.assertEqual("chitchat", result["command"])
-        self.assertEqual("sendChatAction", self.call.call_args_list[0].args[1])
-        self.assertEqual("typing", self.call.call_args_list[0].args[2]["action"])
         self.phraser.assert_not_called()
 
-    def test_typing_indicator_failures_never_block_the_answer(self):
+    def test_a_failing_placeholder_or_edit_never_blocks_the_answer(self):
         def flaky(config, method, payload):
-            if method == "sendChatAction":
+            if method == "sendMessage" and payload["text"].startswith("🔎"):
                 raise TelegramAPIError("nope")
+            return {"message_id": 5}
         call = Mock(side_effect=flaky)
         with patch("telegram_bot.answer_intent", return_value=(FACTS, None)):
             result = process_update(dm("Golf do 15000 KM"), Mock(), CONFIG, call=call,
                                     llm=self.llm, phraser=self.phraser)
         self.assertTrue(result["handled"])
+        self.assertEqual("sendMessage", call.call_args_list[-1].args[1])
+
+        def edit_fails(config, method, payload):
+            if method == "editMessageText":
+                raise TelegramAPIError("message can't be edited")
+            return {"message_id": 9}
+        call = Mock(side_effect=edit_fails)
+        with patch("telegram_bot.answer_intent", return_value=(FACTS, None)):
+            process_update(dm("Golf do 15000 KM", uid=2), Mock(), CONFIG, call=call,
+                           llm=self.llm, phraser=self.phraser)
+        methods = [c.args[1] for c in call.call_args_list]
+        self.assertEqual(["sendMessage", "editMessageText", "deleteMessage", "sendMessage"], methods)
+        self.assertEqual(FACTS, call.call_args_list[-1].args[2]["text"])
 
     def test_thanks_gets_a_reply_with_gemini_and_silence_without(self):
         plan = Intent("chitchat", reply="Nema na čemu!")
@@ -223,11 +239,15 @@ class CompanionFlowTests(unittest.TestCase):
         self.assertEqual("acknowledgement", result["reason"])
         self.call.assert_not_called()
 
-    def test_empty_model_reply_falls_back_to_the_fixed_text(self):
-        self.run_update(dm("bok"), llm=Mock(return_value=Intent("chitchat", reply="")), db=False)
+    def test_empty_model_reply_falls_back_to_the_fixed_text_in_the_users_language(self):
+        self.run_update(dm("hello there"), llm=Mock(return_value=Intent("chitchat", reply="")), db=False)
         self.assertIn("used cars", self.sent_text())
-        self.run_update(dm("treba mi auto", uid=2), llm=Mock(return_value=Intent("clarify", reply="")), db=False)
+        self.run_update(dm("I need a car", uid=2), llm=Mock(return_value=Intent("clarify", reply="")), db=False)
         self.assertIn("can't pick a car", self.sent_text())
+        self.run_update(dm("bok", uid=3), llm=Mock(return_value=Intent("chitchat", reply="")), db=False)
+        self.assertIn("polovnim autima", self.sent_text())
+        self.run_update(dm("treba mi auto", uid=4), llm=Mock(return_value=Intent("clarify", reply="")), db=False)
+        self.assertIn("Ne mogu umjesto tebe birati auto", self.sent_text())
 
     def test_conversation_history_is_remembered_in_private_chats_only_and_per_user(self):
         self.phraser.return_value = ("Našao sam 242.", False)
@@ -242,7 +262,7 @@ class CompanionFlowTests(unittest.TestCase):
 
     def llm_history_for(self, text, **kwargs):
         seen = []
-        llm = Mock(side_effect=lambda message, previous, history: seen.append(history) or None)
+        llm = Mock(side_effect=lambda message, previous, history, **kw: seen.append(history) or None)
         self.run_update(dm(text, **kwargs), llm=llm, db=False)
         return seen[0]
 

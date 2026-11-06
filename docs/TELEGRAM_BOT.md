@@ -203,6 +203,32 @@ A budget plus a "what should I buy / what is best / what sells best" question re
   invent numbers, call a car "the best", or give general car advice, and the listings are always
   attached to a suggestion.
 
+## Language, buttons and the "looking…" message
+
+**One language per conversation.** Every message the bot writes (results, status, help, errors,
+button labels and the Gemini wording) is in Bosnian or English, all from one table
+(`telegram_i18n.py`; English is the reference text, Bosnian is written the way people chat). The
+language is detected from each message; if a message does not say (a button press, a bare
+command), the bot uses the language that person last wrote in (in-process memory, 6 hours,
+bounded), then their Telegram app language (`bs/hr/sr` → Bosnian), then
+`TELEGRAM_DEFAULT_LANGUAGE` (`bs` or `en`, default `en`). Replying to an answer to refine it works in
+either language. Gemini is told which language to reply in.
+
+**Buttons that fit the answer.** There is no longer the same Status/Latest row under every reply:
+
+- search results: **Show more**, budget −10% / +10% (or 10k / 20k / 30k when no budget), **From <year>**
+  (two years newer than what is shown) and **Up to <km>** (about 30% lower mileage); when a chat
+  reply summarises the results without listing them, the first button shows page one instead;
+- shortlist: one button per listed model; model prices: **Show listings**; comparison: one button
+  per model;
+- a vague/budget question: budget chips (10k / 20k / 30k / 50k KM) that run the shortlist;
+  an unanswerable one: three example questions; `/start`: a welcome with the examples;
+- small talk ("hvala"): no buttons. Commands (`/status`, `/help`, …) keep the general navigation row.
+
+**Feels alive.** When Gemini is configured, a free-text message gets an immediate "🔎 Looking…"
+message that is **replaced by the answer** (edited in place; if editing fails the answer is sent as a new
+message and the placeholder removed). Nothing is shown for commands, buttons, or a thank-you that gets no reply.
+
 ## Known MVP limits
 
 - Phrasing outside the parser's vocabulary gets the "can't answer" reply; widening it
