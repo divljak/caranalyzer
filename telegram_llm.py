@@ -44,11 +44,12 @@ MAX_REPLY_CHARS = 600
 MAX_FACTS_CHARS = 3500
 MAX_HISTORY_TURNS = 6
 MAX_TURN_CHARS = 300
+LANGUAGE_NAMES = {"bs": "Bosnian", "en": "English"}
 INTENTS = ("status", "latest", "trends", "find", "model_stats", "compare", "suggest", "clarify",
            "chitchat", "unsupported")
 
 PERSONA = """You are Garaža, a friendly, relaxed assistant in a private chat about used cars on \
-olx.ba (Bosnia). Reply in the language the user writes in (Bosnian or English), warmly and briefly, \
+olx.ba (Bosnia). Reply in the language named in the "language" field (Bosnian or English), warmly and briefly, \
 like a person texting. You know NOTHING about cars, prices or listings yourself: the only facts you \
 may use are the ones given to you from our database. Never state a price, count, year, mileage, \
 date or any car fact (reliability, common faults, value, forecasts) that was not given to you, and \
@@ -354,9 +355,16 @@ def _generate(config, system, user, schema, max_tokens, post=None):
     return None, last
 
 
-def call_plan(message, previous, config, *, post=None, history=None):
+def _language_field(user, language):
+    name = LANGUAGE_NAMES.get(language)
+    if name:
+        user["language"] = name
+    return user
+
+
+def call_plan(message, previous, config, *, post=None, history=None, language=""):
     """Return (plan dict | None, status string) for one chat message."""
-    user = {"message": message[:MAX_QUESTION]}
+    user = _language_field({"message": message[:MAX_QUESTION]}, language)
     turns = _clean_history(history)
     if turns:
         user["recent_turns"] = turns
@@ -366,12 +374,12 @@ def call_plan(message, previous, config, *, post=None, history=None):
     return _generate(config, SYSTEM_PROMPT, user, SCHEMA, 400, post)
 
 
-def interpret(message, previous, config, *, post=None, history=None):
+def interpret(message, previous, config, *, post=None, history=None, language=""):
     """Interpret one message. Returns an Intent or None; never raises."""
     if config is None or not isinstance(message, str) or not message.strip():
         return None
     try:
-        plan, status = call_plan(message, previous, config, post=post, history=history)
+        plan, status = call_plan(message, previous, config, post=post, history=history, language=language)
         if plan is None:
             LOG.warning("gemini interpretation unavailable: %s", status)
             return None
@@ -381,7 +389,7 @@ def interpret(message, previous, config, *, post=None, history=None):
         return None
 
 
-def phrase(message, facts, config, *, post=None, history=None, mode=""):
+def phrase(message, facts, config, *, post=None, history=None, mode="", language=""):
     """Rewrite a database answer as a short chat reply.
 
     Returns ``(reply, show_details)`` or ``None``; never raises. ``None`` means the caller
@@ -390,7 +398,7 @@ def phrase(message, facts, config, *, post=None, history=None, mode=""):
     if config is None or not isinstance(message, str) or not message.strip() or not facts:
         return None
     try:
-        user = {"message": message[:MAX_QUESTION], "facts": facts[:MAX_FACTS_CHARS]}
+        user = _language_field({"message": message[:MAX_QUESTION], "facts": facts[:MAX_FACTS_CHARS]}, language)
         turns = _clean_history(history)
         if turns:
             user["recent_turns"] = turns

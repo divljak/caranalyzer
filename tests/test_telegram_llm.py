@@ -209,7 +209,10 @@ class PrivateChatTests(unittest.TestCase):
         return result, answer
 
     def sent_to(self):
-        return [c.args[2]["chat_id"] for c in self.call.call_args_list if c.args[1] == "sendMessage"]
+        """Chat ids of final answers (not the 'looking…' placeholder)."""
+        placeholders = {"🔎 Looking…", "🔎 Tražim…"}
+        return [c.args[2]["chat_id"] for c in self.call.call_args_list
+                if c.args[1] in {"sendMessage", "editMessageText"} and c.args[2]["text"] not in placeholders]
 
     def test_allowlisted_user_can_chat_privately_without_commands_or_mentions(self):
         result, answer = self.run_update(msg("Golf under 15000 KM"))
@@ -252,7 +255,7 @@ class PrivateChatTests(unittest.TestCase):
     def test_gemini_failure_falls_back_to_the_normal_unsupported_reply(self):
         captured = []
         with patch("telegram_bot.answer_intent",
-                   side_effect=lambda e, i, c: captured.append(i) or ("answer", None)):
+                   side_effect=lambda e, i, c, **kw: captured.append(i) or ("answer", None)):
             process_update(msg("xyz qwerty asdf zxcv lorem ipsum dolor"), Mock(), CONFIG,
                            call=self.call, llm=Mock(return_value=None))
             process_update(msg("something sporty for my family please maybe", uid=2), Mock(), CONFIG,
@@ -274,7 +277,7 @@ class PrivateChatTests(unittest.TestCase):
         plan = Intent("find", Filters("golf", 15000, 2016))
         captured = []
         with patch("telegram_bot.answer_intent",
-                   side_effect=lambda e, i, c: captured.append(i) or ("answer", i.filters)):
+                   side_effect=lambda e, i, c, **kw: captured.append(i) or ("answer", i.filters)):
             result = process_update(msg("something sporty for my family please maybe"), Mock(), CONFIG,
                                     call=self.call, llm=Mock(return_value=plan))
         self.assertEqual(("find", plan), (result["command"], captured[0]))
@@ -288,7 +291,7 @@ class PrivateChatTests(unittest.TestCase):
     def test_private_follow_ups_use_the_last_answer_but_fresh_questions_do_not(self):
         captured = []
 
-        def fake(e, i, c):
+        def fake(e, i, c, **kw):
             captured.append(i)
             return "answer", None
 
@@ -303,7 +306,7 @@ class PrivateChatTests(unittest.TestCase):
     def test_memory_is_isolated_by_chat_and_user_and_expires(self):
         captured = []
 
-        def fake(e, i, c):
+        def fake(e, i, c, **kw):
             captured.append(i)
             return "answer", None
 
