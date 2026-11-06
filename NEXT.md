@@ -45,7 +45,7 @@ login `t.me` (id 3166033). Copy it from there. Do not invent a new bot.
 | Name | Notes |
 | --- | --- |
 | `TELEGRAM_BOT_TOKEN` | Vault only. Never log it. |
-| `TELEGRAM_CHAT_ID` | `-5332163835` |
+| `TELEGRAM_CHAT_ID` | `-5332163835`. Several groups can be listed, comma-separated (first = primary, receives the digest). A group's id changes if it is upgraded to a supergroup; the bot then tells an allowed person the new id. |
 | `BOT_TIMEZONE` | `Europe/Sarajevo` |
 | `DATABASE_URL` | Existing restricted app role, Supabase transaction pooler, port 6543, TLS. Not the collector role and not a service-role key. |
 | `CRON_SECRET` | 16+ random characters. Vercel sends it as `Authorization: Bearer`. `TELEGRAM_CRON_SECRET` is accepted if `CRON_SECRET` is unset. |

@@ -291,6 +291,24 @@ edits the message it is under instead of adding another one; **Show more** still
 one is not lost. If the edit fails the answer is sent as a new message and nothing is deleted. The
 "show listings" button only appears when there are listings to show.
 
+## Which groups the bot answers in (and when a group moves)
+
+The bot answers an allowlisted person in their own private chat and in the group(s) named by
+`TELEGRAM_CHAT_ID`. That setting can list **several** groups, separated by commas (`-5332163835,-1001234567890`);
+the first is the primary one (the digest is sent there). Everything else is ignored.
+
+**A group can silently get a new id.** Telegram changes a group's id when a basic group is upgraded to a
+supergroup (history visibility, admin settings, topics, making it public…). The bot's setting still names
+the old id, so Telegram keeps delivering messages and the webhook answers `200`, but the bot ignores them.
+
+To make that visible, when an **allowlisted person** addresses the bot in a group that is not configured
+(a command, an @mention, or a reply to the bot) the bot answers once with that group's chat id and what to do:
+add the id to `TELEGRAM_CHAT_ID` in Vercel (comma-separated) and redeploy. It also does this when it sees the
+"group upgraded" service message from one of its groups. It stays completely silent for strangers, private
+chats, buttons and ordinary group chatter, and the reply contains nothing but the chat id. A warning line
+(chat type and id, never the message) is written to the runtime logs. To diagnose without that hint, look at
+`vercel logs requests` for the webhook: `200`s with no reply mean the bot received the message and ignored it.
+
 ## Known MVP limits
 
 - Phrasing outside the parser's vocabulary gets the "can't answer" reply; widening it

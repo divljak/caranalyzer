@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import time
 import hmac
+import logging
 import os
 import re
 from typing import Any
@@ -31,6 +32,7 @@ from telegram_intent import (
 import telegram_llm
 
 
+LOG = logging.getLogger("telegram_bot")
 SARAJEVO = ZoneInfo("Europe/Sarajevo")
 TELEGRAM_API = "https://api.telegram.org"
 MAX_MESSAGE = 3900
@@ -52,6 +54,11 @@ class TelegramConfig:
     allowed_user_ids: frozenset[int]
     market_url: str | None = None
     bot_username: str | None = None
+    extra_chat_ids: frozenset[int] = frozenset()
+
+    @property
+    def allowed_chats(self):
+        return frozenset({self.chat_id}) | self.extra_chat_ids
 
     @classmethod
     def from_env(cls, environ=None):
@@ -70,7 +77,10 @@ class TelegramConfig:
             raise TelegramConfigurationError(
                 "Missing Telegram configuration: " + ", ".join(sorted(missing)))
         try:
-            chat_id = int(required["TELEGRAM_CHAT_ID"])
+            chat_ids = [int(value) for value in required["TELEGRAM_CHAT_ID"].split(",") if value.strip()]
+            if not chat_ids:
+                raise ValueError("no chat id")
+            chat_id = chat_ids[0]
             users = frozenset(
                 int(value.strip())
                 for value in required["TELEGRAM_ALLOWED_USER_IDS"].split(",")
@@ -100,6 +110,7 @@ class TelegramConfig:
             allowed_user_ids=users,
             market_url=market_url,
             bot_username=username,
+            extra_chat_ids=frozenset(chat_ids[1:]) - {chat_id},
         )
 
     def accepts_secret(self, candidate):
@@ -959,7 +970,7 @@ def is_authorized(chat, user_id, config):
     if not isinstance(chat, dict) or user_id not in config.allowed_user_ids:
         return False
     chat_id = chat.get("id")
-    if chat_id == config.chat_id:
+    if chat_id in config.allowed_chats:
         return True
     return chat.get("type") == "private" and chat_id == user_id
 
@@ -1225,6 +1236,32 @@ def resolve_language(scope_key, text_value, sender):
     return telegram_language((sender or {}).get("language_code")) or default_language()
 
 
+def _hint_unconfigured_chat(chat, user_id, message, callback, config, call):
+    """Tell an *allowed* person that this group is not configured, and which id to add.
+
+    Strangers, private chats, button presses and ordinary group chatter stay completely silent.
+    The reply carries only the chat id, which the person can already see in Telegram.
+    """
+    if callback or user_id not in config.allowed_user_ids or chat.get("type") not in {"group", "supergroup"}:
+        return
+    body = message.get("text")
+    migrated = message.get("migrate_from_chat_id") in config.allowed_chats  # the group was upgraded
+    addressed = isinstance(body, str) and body.strip() and (
+        body.lstrip().startswith("/") or is_addressed(message, config))
+    if not (migrated or addressed):
+        return
+    LOG.warning("telegram chat not configured: chat_type=%s chat_id=%s migrated=%s",
+                chat.get("type"), chat.get("id"), bool(migrated))
+    sender = message.get("from") or {}
+    lang = detect_language(body if isinstance(body, str) else "") or telegram_language(
+        sender.get("language_code")) or default_language()
+    try:
+        call(config, "sendMessage", {"chat_id": chat["id"], "text": t(lang, "chat_not_set_up", chat_id=chat["id"]),
+                                     "disable_web_page_preview": True})
+    except TelegramAPIError:
+        pass
+
+
 def _send_placeholder(call, config, chat_id, lang):
     """Send "looking…" right away and return its message id, so the answer can replace it."""
     try:
@@ -1263,6 +1300,7 @@ def process_update(update: dict[str, Any], engine, config: TelegramConfig, *, ca
         return {"handled": False, "reason": "invalid_update"}
     chat, user_id, message, callback = _identity(update)
     if not is_authorized(chat, user_id, config):
+        _hint_unconfigured_chat(chat, user_id, message, callback, config, call)
         return {"handled": False, "reason": "unauthorized"}
     chat_id = chat["id"]
     private = chat.get("type") == "private"

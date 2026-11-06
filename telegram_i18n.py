@@ -19,6 +19,7 @@ STRINGS = {
         "price_unavailable": "price unavailable",
         "unparsed_model": "Unparsed model",
         "looking": "🔎 Looking…",
+        "chat_not_set_up": "I'm not set up to answer in this chat yet (chat id: {chat_id}). The owner needs to add that id to the TELEGRAM_CHAT_ID setting in Vercel (separated by a comma from the current one) and redeploy.",
         "db_unavailable": "The database is temporarily unavailable, so I can't answer right now. Please try again shortly.",
         # status
         "status_none": "Car Analyzer has no finished collector run yet.",
@@ -163,6 +164,7 @@ STRINGS = {
         "price_unavailable": "cijena nije dostupna",
         "unparsed_model": "Neprepoznat model",
         "looking": "🔎 Tražim…",
+        "chat_not_set_up": "Još nisam podešen da odgovaram u ovom četu (id četa: {chat_id}). Vlasnik treba dodati taj id u postavku TELEGRAM_CHAT_ID u Vercelu (odvojen zarezom od trenutnog) i ponovo deployati.",
         "db_unavailable": "Baza je trenutno nedostupna, pa ne mogu odgovoriti. Pokušaj ponovo za koji trenutak.",
         "status_none": "Car Analyzer još nema nijedan završen prolaz kolektora.",
         "status_title": "Car Analyzer · {quality}",
@@ -294,7 +296,7 @@ STRINGS = {
 # Words that mark a message as Bosnian/Croatian/Serbian or English. Deliberately small and
 # high-precision: an unknown language returns None and the caller falls back.
 _BS_WORDS = set("""
-je se da li ima imam imas trebam treba mi ti za do od sta šta koliko košta kosta cijena cijene cijenu
+je se da li hej ima imam imas trebam treba mi ti za do od sta šta koliko košta kosta cijena cijene cijenu
 auto auta autom kupim kupiti kupovinu hvala molim bok zdravo pozdrav dobro dobar kako gdje gdje mogu hocu
 hoću zelim želim trazim tražim nesto nešto jeftino jeftinije novije stariji uporedi usporedi ispod preko
 budzet budžet godina godište kilometara kilometraža pokazi pokaži daj daj mi vise više manje najbolje
