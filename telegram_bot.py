@@ -498,6 +498,102 @@ def find_message(engine, filters, offset=0):
     return find_page(engine, filters, offset)[0]
 
 
+SUGGEST_FRESH_DAYS = 14
+SUGGEST_MIN_MODEL_LISTINGS = 3
+SUGGEST_MIN_COHORT = 4
+SUGGEST_DISCOUNT = 0.85
+_BASE_LABEL = "trim(concat_ws(' ',coalesce(l.make,c.make),coalesce(l.model,c.model)))"
+_RECENT_WHERE = """c.source='olx.ba'
+            AND c.collection_method IN ('olx_api','olx_website')
+            AND c.price_status='priced' AND c.price>0
+            AND c.last_verified_at >= (now() AT TIME ZONE 'UTC') - interval '90 days'"""
+_BOUNDS_WHERE = """(CAST(:budget AS integer) IS NULL OR {p}.price<=CAST(:budget AS integer))
+            AND (CAST(:year_min AS integer) IS NULL OR {p}.year>=CAST(:year_min AS integer))
+            AND (CAST(:mileage_max AS integer) IS NULL OR {p}.mileage<=CAST(:mileage_max AS integer))"""
+
+
+def _suggest_title(filters):
+    parts = ["Data-based shortlist", f"up to {_money(filters.budget)}"]
+    if filters.year_min:
+        parts.append(f"from {filters.year_min}")
+    if filters.mileage_max:
+        parts.append(f"up to {filters.mileage_max:,} km".replace(",", "."))
+    return " · ".join(parts)
+
+
+def suggest_message(engine, filters):
+    """What the database shows for a budget: most listed models and listings priced under similar ones."""
+    params = {"budget": filters.budget, "year_min": filters.year_min, "mileage_max": filters.mileage_max}
+    with engine.begin() as connection:
+        _statement_timeout(connection)
+        models = _all(connection, f"""
+          SELECT label, count(*) AS n,
+            percentile_cont(.5) WITHIN GROUP (ORDER BY price) AS median_price,
+            percentile_cont(.5) WITHIN GROUP (ORDER BY mileage) FILTER (WHERE mileage IS NOT NULL) AS median_km,
+            max(year) AS newest_year
+          FROM (
+            SELECT {_BASE_LABEL} AS label, c.price, c.mileage, c.year
+            FROM car_listings c LEFT JOIN dealer_vehicle_labels l USING(listing_id)
+            WHERE {_RECENT_WHERE}
+              AND {_BOUNDS_WHERE.format(p='c')}
+          ) q
+          WHERE label <> ''
+          GROUP BY label HAVING count(*) >= {SUGGEST_MIN_MODEL_LISTINGS}
+          ORDER BY n DESC, label LIMIT 5
+        """, params)
+        standouts = _all(connection, f"""
+          WITH recent AS (
+            SELECT c.listing_id, {_BASE_LABEL} AS label, c.year, c.price, c.mileage, c.last_verified_at
+            FROM car_listings c LEFT JOIN dealer_vehicle_labels l USING(listing_id)
+            WHERE {_RECENT_WHERE} AND c.year IS NOT NULL AND c.mileage IS NOT NULL
+          ), cohort AS (
+            SELECT label, year, count(*) AS n,
+              percentile_cont(.5) WITHIN GROUP (ORDER BY price) AS med_price,
+              percentile_cont(.5) WITHIN GROUP (ORDER BY mileage) AS med_km
+            FROM recent WHERE label <> '' GROUP BY label, year
+            HAVING count(*) >= {SUGGEST_MIN_COHORT}
+          )
+          SELECT r.listing_id, r.label, r.year, r.price, r.mileage, r.last_verified_at, k.n, k.med_price,
+            round((1 - CAST(r.price AS numeric) / CAST(k.med_price AS numeric)) * 100) AS discount_pct
+          FROM recent r JOIN cohort k ON k.label = r.label AND k.year = r.year
+          WHERE {_BOUNDS_WHERE.format(p='r')}
+            AND r.last_verified_at >= (now() AT TIME ZONE 'UTC') - interval '{SUGGEST_FRESH_DAYS} days'
+            AND r.price <= {SUGGEST_DISCOUNT} * k.med_price AND r.mileage <= k.med_km
+          ORDER BY discount_pct DESC, r.mileage ASC, r.listing_id LIMIT 5
+        """, params)
+        note = _freshness_note(connection)
+    lines = [_suggest_title(filters), "", "Most listed models in this budget (ads seen in the last 90 days):"]
+    if models:
+        for item in models:
+            km = (f" · median {int(round(item['median_km'])):,} km".replace(",", ".")
+                  if item["median_km"] is not None else "")
+            lines.append(f"• {item['label']} · {item['n']} listings · median {_money(item['median_price'])}"
+                         f"{km} · newest {item['newest_year'] or 'unknown'}")
+    else:
+        lines.append(f"Not enough listings to compare models here (at least {SUGGEST_MIN_MODEL_LISTINGS} per model needed).")
+    lines.extend(["", f"Priced well below similar listings (same model and year, at least 15% under the median, "
+                     f"mileage at or under the median, seen in the last {SUGGEST_FRESH_DAYS} days):"])
+    if standouts:
+        for item in standouts:
+            lines.append(
+                f"• {item['label']} · {item['year']} · {_money(item['price'])} "
+                f"({int(item['discount_pct'])}% under the {_money(item['med_price'])} median of {item['n']} similar)"
+                f" · {int(item['mileage']):,} km".replace(",", ".") + "\n"
+                f"  Seen {_age(item['last_verified_at'])} ({_time(item['last_verified_at'])}) · "
+                f"https://olx.ba/artikal/{item['listing_id']}")
+    else:
+        lines.append("No fresh listing stands out right now.")
+    if note:
+        lines.extend(["", note])
+    lines.extend([
+        "",
+        "Most listed means the most ads in our database, not best selling: we have no sales data.",
+        "A low price next to similar ads can also mean damage, a quick sale or a wrong entry. "
+        "Check each ad. These are observed asking prices, not recommendations.",
+    ])
+    return "\n".join(lines)
+
+
 def chitchat_message():
     return ("Hi! I answer questions about used cars from our olx.ba database, for example "
             "“Golf under 15000 KM”, “how much is an Octavia” or “Golf vs Octavia”. What are you looking for?")
@@ -802,6 +898,8 @@ def answer_intent(engine, intent, config):
         return text_value, Page(intent.filters, following if following < total and following <= MAX_OFFSET else None)
     if intent.kind == "model_stats":
         return model_stats_message(engine, intent.filters.search), None
+    if intent.kind == "suggest":
+        return suggest_message(engine, intent.filters), None
     if intent.kind == "compare":
         return compare_message(engine, " | ".join(intent.labels)), None
     if intent.kind in {"chitchat", "clarify", "unsupported"} and intent.reply:
@@ -814,7 +912,7 @@ def answer_intent(engine, intent, config):
 
 
 _DEFAULT_LLM = object()
-DB_KINDS = {"find", "model_stats", "compare", "trends", "status", "latest"}
+DB_KINDS = {"find", "model_stats", "compare", "trends", "status", "latest", "suggest"}
 
 # Best-effort memory of the last few chat turns in a private chat (see SCOPE_* above): the
 # same rules apply. Group chats keep no history.
@@ -853,8 +951,8 @@ def _resolve_llm(llm, phraser):
         llm = (lambda message, previous, history=None:
                telegram_llm.interpret(message, previous, llm_config, history=history)) if llm_config else None
     if phraser is _DEFAULT_LLM:
-        phraser = (lambda message, facts, history=None:
-                   telegram_llm.phrase(message, facts, llm_config, history=history)) if llm_config else None
+        phraser = (lambda message, facts, history=None, mode="":
+                   telegram_llm.phrase(message, facts, llm_config, history=history, mode=mode)) if llm_config else None
     return llm, phraser
 
 
@@ -923,9 +1021,10 @@ def process_update(update: dict[str, Any], engine, config: TelegramConfig, *, ca
             if private:
                 _remember_scope(scope_key, intent)
             if free_text is not None and phraser is not None and intent.kind in DB_KINDS:
-                phrased = phraser(free_text, response, _recall_history(history_key))
+                phrased = phraser(free_text, response, _recall_history(history_key), mode=intent.kind)
                 if phrased:
                     chat_text, show_details = phrased
+                    show_details = show_details or intent.kind == "suggest"  # the user wants to see them
                     response = chat_text + ("\n\n" + response if show_details else "")
             elif free_text is not None and intent.reply:
                 chat_text = intent.reply

@@ -89,6 +89,9 @@ ili ima-li da u na sa bez s the new newest latest recent recently or less more
 days day dana dan weeks week sedmica sedmicu mjesec month last past zadnjih posljednjih
 bosnia bih right now something anything one status fresh freshness stale collector interesting finds update updated today data how old trend trends
 recommend recommendation recommendations preporuci preporuka preporuke preporucite worth deal besides novo najnovije
+suggest suggestion imam najbolje najbolji najbolja najpametnije najpametniji pametno smart smartest sells selling sell
+prodaje prodaju prodavati prodaje-se najtrazenije najtrazeniji popular worthwhile savjet advice
+value nesto family porodica porodicu porodicni porodicno familiju sporty
 """.split())
 
 _MENTION = re.compile(r"@\w+")
@@ -265,6 +268,10 @@ _TRENDS = (r"\b(?:trend\w*|price changes?|prices? (?:drop|fall|rise|change)\w*|p
 _FORECAST = r"\b(?:will|predict\w*|forecast\w*|going to|next (?:year|month|week)|prognoz\w*|hoce li|budu[cć]\w*)\b"
 _CURRENCY = r"\b(?:eur|euro|euros|usd|dollars?)\b|[€$]"
 _ACK = r"^(?:thanks|thank you|thx|ty|ok|okay|hvala|super|great|nice|cool|sjajno)\W*$"
+_SUGGEST = (r"\b(?:suggest\w*|recommend\w*|preporuc\w*|should i buy|what to buy|what (?:car|cars) (?:should|to)|"
+            r"which car|best (?:buy|value|deal|car)s?|worth buying|smartest|najpametnij\w*|pametno\w*|"
+            r"sta (?:da )?kupi\w*|sta kupiti|koji auto|najbolje (?:se )?prodaj\w*|najtrazenij\w*|"
+            r"best sell\w*|what sells|sells? best|popular)\b")
 _ADVICE = r"\b(?:should i buy|what (?:car|to buy)|which car|recommend\w*|best (?:car|deal)s?|worth buying|preporuc\w*|koji auto|sta kupiti|sta da kupim)\b"
 _STATS = r"\b(?:how much|average|typical|median|cost\w*|price of|koliko|prosjecn\w*|cijena)\b"
 
@@ -298,6 +305,11 @@ def parse_question(text_value, context=None):
     tokens = _search_tokens(rest)
     named = tokens if any(not token.isdigit() for token in tokens) else []
     filters = replace(filters, search=clean_search(" ".join(named)))
+
+    model_words = [t for t in tokens if len(t) > 2 or any(c.isdigit() for c in t)]
+    if filters.budget and re.search(_SUGGEST, folded) and (not model_words or len(model_words) >= 3):
+        return Intent("suggest", Filters(budget=filters.budget, year_min=filters.year_min,
+                                          mileage_max=filters.mileage_max))
 
     if filters.is_empty():
         if re.search(_ADVICE, folded):

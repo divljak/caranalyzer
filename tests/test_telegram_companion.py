@@ -85,6 +85,19 @@ class ValidationTests(unittest.TestCase):
         self.assertNotIn(KEY, json.dumps(body))
         self.assertIn("ONLY the database", body["systemInstruction"]["parts"][0]["text"])
 
+    def test_suggestion_mode_widens_the_prompt_but_keeps_the_grounding_rules(self):
+        post = Mock(return_value=ok({"reply": "Evo.", "show_details": True}))
+        phrase("šta da kupim", FACTS, CFG, post=post, mode="suggest")
+        prompt = post.call_args.kwargs["json"]["systemInstruction"]["parts"][0]["text"]
+        self.assertIn("data-based shortlist", prompt)
+        self.assertIn("most listed is not best selling", prompt)
+        self.assertIn("never recommend a specific car from your own knowledge", prompt)
+        post = Mock(return_value=ok({"reply": "Evo.", "show_details": True}))
+        phrase("golf", FACTS, CFG, post=post)
+        self.assertNotIn("data-based shortlist", post.call_args.kwargs["json"]["systemInstruction"]["parts"][0]["text"])
+        invented = {"reply": "Najpametnije je 7 Golfa za 4000 KM.", "show_details": True}
+        self.assertIsNone(phrase("šta da kupim", FACTS, CFG, post=Mock(return_value=ok(invented)), mode="suggest"))
+
     def test_oversized_facts_are_truncated_and_failures_return_none(self):
         post = Mock(return_value=ok({"reply": "Evo.", "show_details": False}))
         phrase("x", "a" * 10000, CFG, post=post)
@@ -162,6 +175,13 @@ class CompanionFlowTests(unittest.TestCase):
     def test_without_a_valid_phrasing_the_plain_database_answer_is_sent(self):
         self.run_update(dm("Golf do 15000 KM"))
         self.assertEqual(FACTS, self.sent_text())
+
+    def test_suggestion_requests_always_attach_the_listings(self):
+        self.phraser.return_value = ("Evo šta podaci pokazuju.", False)
+        self.run_update(dm("imam 50k budzet, šta da kupim"), facts="Data-based shortlist · up to 50.000 KM\n• x")
+        self.assertEqual("Evo šta podaci pokazuju.\n\nData-based shortlist · up to 50.000 KM\n• x", self.sent_text())
+        self.assertEqual("suggest", self.phraser.call_args.kwargs["mode"])
+        self.llm.assert_not_called()  # the free parser already understood it
 
     def test_buttons_and_commands_stay_deterministic(self):
         self.phraser.return_value = ("chatty", False)
