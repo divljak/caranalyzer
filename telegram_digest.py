@@ -243,8 +243,9 @@ class DigestConfig:
             raise TelegramConfigurationError(
                 "Missing Telegram digest configuration: " + ", ".join(missing))
         try:
-            chat_id = int(chat)
-        except ValueError as exc:
+            chat_ids = [int(part) for part in chat.split(",") if part.strip()]
+            chat_id = chat_ids[0]  # the digest goes to the first (primary) group
+        except (ValueError, IndexError) as exc:
             raise TelegramConfigurationError(
                 "Telegram chat ID must be an integer") from exc
         zone_name = (values.get("BOT_TIMEZONE") or "Europe/Sarajevo").strip()
