@@ -8,6 +8,7 @@ from sqlalchemy.pool import NullPool
 
 import dealer_api
 from hosted_runtime import hosted_engine, same_origin
+from telegram_bot import TelegramConfig
 
 URL = ('postgresql+psycopg2://car_analyzer_app.ojmokmsjppkqwppmrzpv:unused'
        '@aws-0-eu-north-1.pooler.supabase.com:6543/postgres?sslmode=require')
@@ -53,6 +54,32 @@ class HostedRuntimeTests(unittest.TestCase):
                 with patch.dict(os.environ, {'VERCEL_ENV': 'production'}):
                     self.assertEqual(503, client.get('/market').status_code)
                     self.assertEqual(503, client.get('/api/overview').status_code)
+
+    def test_production_exposes_only_secret_authenticated_telegram_webhook(self):
+        config = TelegramConfig.from_env({
+            'TELEGRAM_BOT_TOKEN': 'test-token',
+            'TELEGRAM_WEBHOOK_SECRET': 'test_webhook_secret_123',
+            'TELEGRAM_CHAT_ID': '-100123',
+            'TELEGRAM_ALLOWED_USER_IDS': '42',
+        })
+        update = {'update_id': 1, 'message': {
+            'chat': {'id': config.chat_id}, 'from': {'id': 42}, 'text': '/help'}}
+        with patch.object(dealer_api, 'HOSTED', True), \
+             patch.dict(os.environ, {'VERCEL_ENV': 'production'}), \
+             patch.object(dealer_api.TelegramConfig, 'from_env', return_value=config), \
+             patch.object(dealer_api, 'process_update') as process:
+            with TestClient(dealer_api.app, base_url='https://testserver') as client:
+                self.assertEqual(503, client.get('/market').status_code)
+                self.assertEqual(401, client.post(
+                    dealer_api.TELEGRAM_WEBHOOK_PATH, json=update).status_code)
+                response = client.post(
+                    dealer_api.TELEGRAM_WEBHOOK_PATH,
+                    json=update,
+                    headers={'x-telegram-bot-api-secret-token': config.webhook_secret},
+                )
+                self.assertEqual(200, response.status_code, response.text)
+                process.assert_called_once_with(update, dealer_api.engine, config)
+                self.assertEqual(401, client.get(dealer_api.TELEGRAM_DIGEST_PATH).status_code)
 
 
 if __name__ == '__main__':
