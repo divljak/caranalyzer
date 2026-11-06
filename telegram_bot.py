@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import time
 import hmac
 import os
 import re
@@ -21,8 +22,10 @@ from telegram_intent import (
     clean_search,
     context_from_reply,
     fold,
+    looks_like_followup,
     parse_question,
 )
+import telegram_llm
 
 
 SARAJEVO = ZoneInfo("Europe/Sarajevo")
@@ -438,7 +441,14 @@ def find_message(engine, filters):
     return "\n".join(lines)
 
 
-def clarify_message(note=""):
+def chitchat_message():
+    return ("Hi! I answer questions about used cars from our olx.ba database, for example "
+            "“Golf under 15000 KM”, “how much is an Octavia” or “Golf vs Octavia”. What are you looking for?")
+
+
+def clarify_message(note="", question=""):
+    if question:
+        return question + "\n\n(I can only show what our database has observed; I can't pick a car for you.)"
     if note == "currency":
         return "Prices in our database are asking prices in KM. Please give the amount in KM, e.g. “Golf under 15000 KM”."
     return "\n".join([
@@ -638,7 +648,44 @@ def _identity(update):
     message = callback.get("message") or update.get("message") or {}
     sender = callback.get("from") or message.get("from") or {}
     chat = message.get("chat") or {}
-    return chat.get("id"), sender.get("id"), message, callback
+    return chat, sender.get("id"), message, callback
+
+
+def is_authorized(chat, user_id, config):
+    """Allowlisted user, in the configured group or in their own private chat with the bot."""
+    if not isinstance(chat, dict) or user_id not in config.allowed_user_ids:
+        return False
+    chat_id = chat.get("id")
+    if chat_id == config.chat_id:
+        return True
+    return chat.get("type") == "private" and chat_id == user_id
+
+
+# Best-effort memory of the last answer's scope in a private chat. It lives only in this
+# process (serverless instances may not share it), is keyed by chat AND user, expires, and
+# is never used for the group: group follow-ups must reply to a bot message instead.
+SCOPE_TTL_SECONDS = 1800
+SCOPE_MAX_ENTRIES = 64
+_SCOPES = {}
+
+
+def _remember_scope(key, intent):
+    if intent.kind not in {"find", "trends"}:
+        return
+    now = time.monotonic()
+    for stale in [k for k, (_, at) in _SCOPES.items() if now - at > SCOPE_TTL_SECONDS]:
+        _SCOPES.pop(stale, None)
+    if len(_SCOPES) >= SCOPE_MAX_ENTRIES:
+        _SCOPES.pop(min(_SCOPES, key=lambda k: _SCOPES[k][1]), None)
+    _SCOPES[key] = (intent, now)
+
+
+def _recall_scope(key):
+    entry = _SCOPES.get(key)
+    if not entry or time.monotonic() - entry[1] > SCOPE_TTL_SECONDS:
+        _SCOPES.pop(key, None)
+        return None
+    return entry[0]
 
 
 DB_UNAVAILABLE = "The database is temporarily unavailable, so I can't answer right now. Please try again shortly."
@@ -647,6 +694,8 @@ DB_UNAVAILABLE = "The database is temporarily unavailable, so I can't answer rig
 def is_addressed(message, config):
     """Free text counts only when it is a reply to the bot or mentions it."""
     text_value = message.get("text") or ""
+    if (message.get("chat") or {}).get("type") == "private":
+        return True
     reply_from = (message.get("reply_to_message") or {}).get("from") or {}
     if reply_from.get("is_bot") and (
             not config.bot_username
@@ -679,20 +728,38 @@ def answer_intent(engine, intent, config):
         return model_stats_message(engine, intent.filters.search), None
     if intent.kind == "compare":
         return compare_message(engine, " | ".join(intent.labels)), None
+    if intent.kind == "chitchat":
+        return chitchat_message(), None
     if intent.kind == "clarify":
-        return clarify_message(intent.note), None
+        return clarify_message(intent.note, intent.question), None
     return unsupported_message(intent.note), None
 
 
-def process_update(update: dict[str, Any], engine, config: TelegramConfig, *, call=telegram_call):
+_DEFAULT_LLM = object()
+
+
+def _default_llm():
+    config = telegram_llm.LLMConfig.from_env()
+    if config is None:
+        return None
+    return lambda message, previous: telegram_llm.interpret(message, previous, config)
+
+
+def process_update(update: dict[str, Any], engine, config: TelegramConfig, *, call=telegram_call,
+                   llm=_DEFAULT_LLM):
     if not isinstance(update, dict) or not isinstance(update.get("update_id"), int):
         return {"handled": False, "reason": "invalid_update"}
-    chat_id, user_id, message, callback = _identity(update)
-    if chat_id != config.chat_id or user_id not in config.allowed_user_ids:
+    chat, user_id, message, callback = _identity(update)
+    if not is_authorized(chat, user_id, config):
         return {"handled": False, "reason": "unauthorized"}
+    chat_id = chat["id"]
+    private = chat.get("type") == "private"
+    scope_key = (chat_id, user_id)
     callback_data = callback.get("data") if callback else None
     intent = None
     command, argument = "help", ""
+    if llm is _DEFAULT_LLM:
+        llm = _default_llm()
     if callback_data:
         refine = parse_refine_callback(callback_data)
         if refine:
@@ -709,11 +776,13 @@ def process_update(update: dict[str, Any], engine, config: TelegramConfig, *, ca
             return {"handled": False, "reason": "no_text"}
         if body.lstrip().startswith("/"):
             command, argument = command_for(body)
-            if command == "ask":
-                intent = parse_question(argument, reply_context(message))
+            if command == "llm":
+                intent = Intent("llm_check")
+            elif command == "ask":
+                intent = _understand(argument, message, private and scope_key, llm)
                 command = intent.kind
         elif is_addressed(message, config):
-            intent = parse_question(body, reply_context(message))
+            intent = _understand(body, message, private and scope_key, llm)
             command = intent.kind
         else:
             return {"handled": False, "reason": "not_addressed"}
@@ -721,16 +790,47 @@ def process_update(update: dict[str, Any], engine, config: TelegramConfig, *, ca
         return {"handled": False, "reason": "acknowledgement"}
     markup_filters = None
     try:
-        if intent is not None:
+        if intent is not None and intent.kind == "llm_check":
+            response = telegram_llm.check_message(telegram_llm.LLMConfig.from_env())
+            command = "llm"
+        elif intent is not None:
             response, markup_filters = answer_intent(engine, intent, config)
+            if private:
+                _remember_scope(scope_key, intent)
         else:
             response = render_command(engine, command, argument)
     except SQLAlchemyError:
         response = DB_UNAVAILABLE
     call(config, "sendMessage", {
-        "chat_id": config.chat_id,
+        "chat_id": chat_id,
         "text": response[:MAX_MESSAGE],
         "disable_web_page_preview": True,
         "reply_markup": keyboard(config, markup_filters),
     })
     return {"handled": True, "command": command}
+
+
+def _needs_interpreter(intent, text_value):
+    """True when the parse is unreadable or just a loose sentence turned into a search term."""
+    if intent.kind == "unsupported":
+        return not intent.note
+    if intent.kind != "find":
+        return False
+    f = intent.filters
+    if f.budget or f.year_min or f.mileage_max:
+        return False
+    return len(f.search.split()) >= 4 or len((text_value or "").split()) > 5
+
+
+def _understand(text_value, message, scope_key, llm):
+    """Deterministic parse first; Gemini only when that cannot read the message."""
+    context = reply_context(message)
+    remembered = _recall_scope(scope_key) if scope_key else None
+    if context is None and remembered is not None and looks_like_followup(text_value):
+        context = remembered
+    intent = parse_question(text_value, context)
+    if llm is not None and _needs_interpreter(intent, text_value):
+        interpreted = llm(text_value, context or remembered)
+        if interpreted is not None:
+            return interpreted
+    return intent

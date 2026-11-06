@@ -47,6 +47,17 @@ def bot_reply(text_value=BOT_ANSWER):
     return {"from": {"id": 999, "is_bot": True, "username": "mojagaraza_bot"}, "text": text_value}
 
 
+def setUpModule():
+    patcher = patch.dict(os.environ, {}, clear=False)
+    patcher.start()
+    os.environ.pop("GEMINI_API_KEY", None)
+    globals()["_env_patch"] = patcher
+
+
+def tearDownModule():
+    _env_patch.stop()
+
+
 class ParserTests(unittest.TestCase):
     def kinds(self, value, context=None):
         return parse_question(value, context).kind
