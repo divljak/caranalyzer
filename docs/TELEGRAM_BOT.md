@@ -118,7 +118,7 @@ users or chats, and replying to a human message gives no context. Find answers a
 `Budget −10%` / `Budget +10%` buttons that encode the whole query in the callback.
 
 **Honesty rules in answers.** Matching is over listings observed in the last 90 days and
-priced listings only. Results state "N of M matches". Year and mileage filters say that
+priced listings only, ranked newest model year first, then recently seen (last 14 days), then lowest mileage, five per page with a **Show more** button. Each listing shows how long ago it was last seen; sightings older than 14 days get a ⚠ because the ad may no longer be listed. Results state "N of M matches". Year and mileage filters say that
 listings without those fields are excluded. Empty results, a database with no
 observations, data older than 48 hours, and a latest collector run that was not
 `completed` are each stated. Samples under 5 priced listings carry a thin-sample
