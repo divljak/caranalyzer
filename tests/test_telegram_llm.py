@@ -64,7 +64,7 @@ class ConfigAndValidationTests(unittest.TestCase):
                 "year_min": 1500, "mileage_max": True}
         intent = intent_from_plan(plan)
         self.assertEqual("find", intent.kind)
-        self.assertEqual(Filters("golf DROP TABLE x --", 15000, None, None), intent.filters)
+        self.assertEqual(Filters("golf drop table x", 15000, None, None), intent.filters)  # cleaned like any search
         self.assertIsNone(intent_from_plan({"intent": "run_sql"}))
         self.assertIsNone(intent_from_plan("nope"))
         self.assertIsNone(intent_from_plan({"intent": ["find"]}))
@@ -261,7 +261,8 @@ class PrivateChatTests(unittest.TestCase):
             process_update(msg("something sporty for my family please maybe", uid=2), Mock(), CONFIG,
                            call=self.call, llm=Mock(return_value=None))
         self.assertEqual("unsupported", captured[0].kind)
-        self.assertEqual("find", captured[1].kind)  # no Gemini answer: previous behaviour is kept
+        # filler words no longer turn into a model search, so this is honestly "can't answer"
+        self.assertEqual("unsupported", captured[1].kind)
 
     def test_searches_with_a_filter_are_read_by_the_free_parser(self):
         for text in ("Golf from 2016", "golf 7 tdi under 12000 KM", "octavia max 150k km mileage"):

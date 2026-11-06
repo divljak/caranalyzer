@@ -449,45 +449,70 @@ class Choices:
     rows: tuple
 
 
+def _find_rows(connection, filters, offset):
+    return _all(connection, f"""
+      SELECT c.listing_id,coalesce(l.make,c.make) AS make,
+        coalesce(l.model,c.model) AS model,c.year,c.price,c.mileage,c.last_verified_at,
+        count(*) OVER () AS total
+      FROM car_listings c
+      LEFT JOIN dealer_vehicle_labels l USING(listing_id)
+      WHERE c.source='olx.ba'
+        AND c.collection_method IN ('olx_api','olx_website')
+        AND c.price_status='priced' AND c.price>0
+        AND c.last_verified_at >= (now() AT TIME ZONE 'UTC') - interval '90 days'
+        AND (CAST(:budget AS integer) IS NULL OR c.price<=CAST(:budget AS integer))
+        AND (CAST(:year_min AS integer) IS NULL OR c.year>=CAST(:year_min AS integer))
+        AND (CAST(:mileage_max AS integer) IS NULL OR c.mileage<=CAST(:mileage_max AS integer))
+        AND (:search='' OR {_LABEL_SQL} LIKE :pattern ESCAPE '\\')
+      ORDER BY c.year DESC NULLS LAST,
+        (c.last_verified_at < (now() AT TIME ZONE 'UTC') - interval '14 days') ASC,
+        c.mileage ASC NULLS LAST,c.last_verified_at DESC,c.listing_id
+      LIMIT {PAGE_SIZE} OFFSET CAST(:offset AS integer)
+    """, {
+        "budget": filters.budget,
+        "year_min": filters.year_min,
+        "mileage_max": filters.mileage_max,
+        "search": filters.search,
+        "pattern": _like_pattern(filters.search),
+        "offset": offset,
+    })
+
+
+def _is_known_model(connection, search):
+    """True when any recent listing's make/model contains ``search`` (so it is a real car name)."""
+    return connection.execute(text(f"""
+      SELECT 1 FROM car_listings c LEFT JOIN dealer_vehicle_labels l USING(listing_id)
+      WHERE c.source='olx.ba' AND c.collection_method IN ('olx_api','olx_website')
+        AND c.last_verified_at >= (now() AT TIME ZONE 'UTC') - interval '90 days'
+        AND {_LABEL_SQL} LIKE :pattern ESCAPE '\\' LIMIT 1
+    """), {"pattern": _like_pattern(search)}).scalar() is not None
+
+
 def find_page(engine, filters, offset=0, lang=DEFAULT_LANGUAGE):
     """Return (message text, total matches, stats) for one page of find results.
 
-    ``stats`` carries what the follow-up buttons need (oldest year and highest mileage shown).
+    ``stats`` carries what the follow-up buttons need (oldest year, highest mileage, the cars
+    shown) and the filters that were really used. If a search word matches no make or model at all
+    while a budget, year or mileage was given, the word is ignored and the answer says so, instead
+    of returning nothing because of a stray word.
     """
     offset = max(0, min(int(offset), MAX_OFFSET))
+    ignored = ""
     with engine.begin() as connection:
         _statement_timeout(connection)
-        matches = _all(connection, f"""
-          SELECT c.listing_id,coalesce(l.make,c.make) AS make,
-            coalesce(l.model,c.model) AS model,c.year,c.price,c.mileage,c.last_verified_at,
-            count(*) OVER () AS total
-          FROM car_listings c
-          LEFT JOIN dealer_vehicle_labels l USING(listing_id)
-          WHERE c.source='olx.ba'
-            AND c.collection_method IN ('olx_api','olx_website')
-            AND c.price_status='priced' AND c.price>0
-            AND c.last_verified_at >= (now() AT TIME ZONE 'UTC') - interval '90 days'
-            AND (CAST(:budget AS integer) IS NULL OR c.price<=CAST(:budget AS integer))
-            AND (CAST(:year_min AS integer) IS NULL OR c.year>=CAST(:year_min AS integer))
-            AND (CAST(:mileage_max AS integer) IS NULL OR c.mileage<=CAST(:mileage_max AS integer))
-            AND (:search='' OR {_LABEL_SQL} LIKE :pattern ESCAPE '\\')
-          ORDER BY c.year DESC NULLS LAST,
-            (c.last_verified_at < (now() AT TIME ZONE 'UTC') - interval '14 days') ASC,
-            c.mileage ASC NULLS LAST,c.last_verified_at DESC,c.listing_id
-          LIMIT {PAGE_SIZE} OFFSET CAST(:offset AS integer)
-        """, {
-            "budget": filters.budget,
-            "year_min": filters.year_min,
-            "mileage_max": filters.mileage_max,
-            "search": filters.search,
-            "pattern": _like_pattern(filters.search),
-            "offset": offset,
-        })
+        matches = _find_rows(connection, filters, offset)
+        if (not matches and offset == 0 and filters.search
+                and (filters.budget or filters.year_min or filters.mileage_max)
+                and not _is_known_model(connection, filters.search)):
+            ignored, filters = filters.search, Filters("", filters.budget, filters.year_min, filters.mileage_max)
+            matches = _find_rows(connection, filters, offset)
         note = _freshness_note(connection, lang)
     lines = [_filter_title(filters, lang)]
+    if ignored:
+        lines.append(t(lang, "search_ignored", term=ignored))
     total = 0
     older = 0
-    stats = {}
+    stats = {"filters": filters}
     if not matches:
         lines.append(t(lang, "no_more") if offset else t(lang, "no_match_90"))
         if offset == 0 and filters.search and not (filters.budget or filters.year_min or filters.mileage_max):
@@ -499,7 +524,7 @@ def find_page(engine, filters, offset=0, lang=DEFAULT_LANGUAGE):
         lines.append(t(lang, "find_showing", span=span, total=total))
         years = [item["year"] for item in matches if item["year"]]
         kms = [int(item["mileage"]) for item in matches if item["mileage"] is not None]
-        stats = {"min_year": min(years) if years else None, "max_km": max(kms) if kms else None,
+        stats = {"filters": filters, "min_year": min(years) if years else None, "max_km": max(kms) if kms else None,
                  "items": tuple((item["listing_id"], item["year"], item["price"]) for item in matches)}
         for item in matches:
             label = " ".join(value for value in (item["make"], item["model"]) if value) or t(lang, "unparsed_model")
@@ -1081,7 +1106,8 @@ def answer_intent(engine, intent, config, lang=DEFAULT_LANGUAGE):
         offset = max(0, min(intent.offset, MAX_OFFSET))
         text_value, total, stats = find_page(engine, intent.filters, offset, lang)
         following = offset + PAGE_SIZE
-        return text_value, Page(intent.filters, following if following < total and following <= MAX_OFFSET else None,
+        return text_value, Page(stats.get("filters", intent.filters),
+                                following if following < total and following <= MAX_OFFSET else None,
                                 stats.get("min_year"), stats.get("max_km"), stats.get("items", ()))
     if intent.kind == "model_stats":
         label = intent.filters.search
@@ -1209,20 +1235,25 @@ def _send_placeholder(call, config, chat_id, lang):
     return result.get("message_id") if isinstance(result, dict) else None
 
 
-def _deliver(call, config, chat_id, text_value, markup, placeholder_id):
-    """Replace the placeholder with the answer; if that fails, send a new message instead."""
+def _deliver(call, config, chat_id, text_value, markup, replace_id, delete_on_failure=True):
+    """Replace an existing message with the answer; if that fails, send a new message instead.
+
+    ``delete_on_failure`` removes the old message after a failed edit. It is right for the
+    "looking…" placeholder and wrong for a message the user is still looking at.
+    """
     payload = {"chat_id": chat_id, "text": text_value[:MAX_MESSAGE], "disable_web_page_preview": True}
     if markup:
         payload["reply_markup"] = markup
-    if placeholder_id is not None:
+    if replace_id is not None:
         try:
-            call(config, "editMessageText", {**payload, "message_id": placeholder_id})
+            call(config, "editMessageText", {**payload, "message_id": replace_id})
             return
         except TelegramAPIError:
-            try:
-                call(config, "deleteMessage", {"chat_id": chat_id, "message_id": placeholder_id})
-            except TelegramAPIError:
-                pass
+            if delete_on_failure:
+                try:
+                    call(config, "deleteMessage", {"chat_id": chat_id, "message_id": replace_id})
+                except TelegramAPIError:
+                    pass
     call(config, "sendMessage", payload)
 
 
@@ -1239,6 +1270,7 @@ def process_update(update: dict[str, Any], engine, config: TelegramConfig, *, ca
     history_key = scope_key if private else None
     sender = callback.get("from") or message.get("from") or {}
     callback_data = callback.get("data") if callback else None
+    edit_id = None  # a button tap that refines a search edits that message instead of adding a new one
     intent = None
     free_text = None
     command, argument = "help", ""
@@ -1268,6 +1300,8 @@ def process_update(update: dict[str, Any], engine, config: TelegramConfig, *, ca
         elif refine:
             intent = Intent("find", refine[0], offset=refine[1])
             command = "find"
+            if refine[1] == 0 and isinstance(message.get("message_id"), int):
+                edit_id = message["message_id"]
         elif suggest_budget:
             intent = Intent("suggest", Filters(budget=suggest_budget))
             command = "suggest"
@@ -1328,7 +1362,7 @@ def process_update(update: dict[str, Any], engine, config: TelegramConfig, *, ca
                     chat_text, show_details = phrased
                     show_details = show_details or intent.kind == "suggest"  # the user wants to see them
                     response = chat_text + ("\n\n" + response if show_details else "")
-                    if intent.kind == "find" and not show_details and isinstance(markup, Page):
+                    if intent.kind == "find" and not show_details and isinstance(markup, Page) and markup.items:
                         # the listings are not on screen, so the first button should show page one
                         markup = Page(markup.filters, 0, markup.min_year, markup.max_km)
             elif free_text is not None and intent.reply:
@@ -1339,7 +1373,9 @@ def process_update(update: dict[str, Any], engine, config: TelegramConfig, *, ca
                 markup = example_choices(lang)
     except SQLAlchemyError:
         response, markup = t(lang, "db_unavailable"), False
-    _deliver(call, config, chat_id, response, keyboard(config, markup, lang), placeholder_id)
+    _deliver(call, config, chat_id, response, keyboard(config, markup, lang),
+             placeholder_id if placeholder_id is not None else edit_id,
+             delete_on_failure=placeholder_id is not None)
     if free_text is not None:
         _remember_turn(history_key, free_text, chat_text or response.split("\n", 1)[0])
     return {"handled": True, "command": command}

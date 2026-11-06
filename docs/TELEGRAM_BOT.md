@@ -271,6 +271,26 @@ you saved it, and how long ago each was last seen (⚠ when old).
 - Listing ids in buttons are validated (letters, digits, `_`, `-`, ≤ 50) and checked against real listings.
   The list is shared with everyone allowed to use the bot, like Following.
 
+## Stray words never become a "model"
+
+The words left over after the price, year and mileage are taken out used to be searched as the car's
+make/model, so `imam budzet. je 50000 KM` searched for a model called "budzet. je" and found nothing.
+Three layers now prevent that:
+
+1. words are stripped of surrounding punctuation, and everyday Bosnian and English filler words
+   (`je`, `li`, `jel`, `možeš`, `dovoljno`, `ćao`, `please`, …) are never part of a model name;
+   Gemini's `search` text is cleaned the same way; a long sentence with no price/year/mileage is "can't
+   answer", not a search;
+2. if a search word still matches **no real make or model** and a budget, year or mileage was given, it is
+   ignored and the answer says so ("I didn't recognise “…” as a car make or model, so I searched all
+   models"); the follow-up buttons then carry the filters that were really used, not the stray word;
+3. a real model that simply has no match (`Golf` under 100 KM) is never ignored.
+
+**Buttons edit in place.** Tapping a refinement (budget −/+10%, newer, lower mileage, "show listings")
+edits the message it is under instead of adding another one; **Show more** still sends a new message so page
+one is not lost. If the edit fails the answer is sent as a new message and nothing is deleted. The
+"show listings" button only appears when there are listings to show.
+
 ## Known MVP limits
 
 - Phrasing outside the parser's vocabulary gets the "can't answer" reply; widening it
