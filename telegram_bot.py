@@ -804,6 +804,8 @@ def answer_intent(engine, intent, config):
         return model_stats_message(engine, intent.filters.search), None
     if intent.kind == "compare":
         return compare_message(engine, " | ".join(intent.labels)), None
+    if intent.kind in {"chitchat", "clarify", "unsupported"} and intent.reply:
+        return intent.reply, None
     if intent.kind == "chitchat":
         return chitchat_message(), None
     if intent.kind == "clarify":
@@ -812,17 +814,59 @@ def answer_intent(engine, intent, config):
 
 
 _DEFAULT_LLM = object()
+DB_KINDS = {"find", "model_stats", "compare", "trends", "status", "latest"}
+
+# Best-effort memory of the last few chat turns in a private chat (see SCOPE_* above): the
+# same rules apply. Group chats keep no history.
+HISTORY_MAX_TURNS = 6
+_HISTORY = {}
 
 
-def _default_llm():
-    config = telegram_llm.LLMConfig.from_env()
-    if config is None:
-        return None
-    return lambda message, previous: telegram_llm.interpret(message, previous, config)
+def _remember_turn(key, user_text, bot_text):
+    if not key:
+        return
+    now = time.monotonic()
+    for stale in [k for k, (_, at) in _HISTORY.items() if now - at > SCOPE_TTL_SECONDS]:
+        _HISTORY.pop(stale, None)
+    if len(_HISTORY) >= SCOPE_MAX_ENTRIES and key not in _HISTORY:
+        _HISTORY.pop(min(_HISTORY, key=lambda k: _HISTORY[k][1]), None)
+    turns = list(_HISTORY.get(key, ([], 0))[0])
+    turns += [{"role": "user", "text": (user_text or "")[:300]},
+              {"role": "bot", "text": (bot_text or "")[:300]}]
+    _HISTORY[key] = (turns[-HISTORY_MAX_TURNS:], now)
+
+
+def _recall_history(key):
+    entry = _HISTORY.get(key) if key else None
+    if not entry or time.monotonic() - entry[1] > SCOPE_TTL_SECONDS:
+        _HISTORY.pop(key, None)
+        return []
+    return list(entry[0])
+
+
+def _resolve_llm(llm, phraser):
+    """Default to Gemini from the environment; None means the built-in parser only."""
+    llm_config = None
+    if llm is _DEFAULT_LLM or phraser is _DEFAULT_LLM:
+        llm_config = telegram_llm.LLMConfig.from_env()
+    if llm is _DEFAULT_LLM:
+        llm = (lambda message, previous, history=None:
+               telegram_llm.interpret(message, previous, llm_config, history=history)) if llm_config else None
+    if phraser is _DEFAULT_LLM:
+        phraser = (lambda message, facts, history=None:
+                   telegram_llm.phrase(message, facts, llm_config, history=history)) if llm_config else None
+    return llm, phraser
+
+
+def _typing(call, config, chat_id):
+    try:
+        call(config, "sendChatAction", {"chat_id": chat_id, "action": "typing"})
+    except TelegramAPIError:
+        pass
 
 
 def process_update(update: dict[str, Any], engine, config: TelegramConfig, *, call=telegram_call,
-                   llm=_DEFAULT_LLM):
+                   llm=_DEFAULT_LLM, phraser=_DEFAULT_LLM):
     if not isinstance(update, dict) or not isinstance(update.get("update_id"), int):
         return {"handled": False, "reason": "invalid_update"}
     chat, user_id, message, callback = _identity(update)
@@ -831,11 +875,12 @@ def process_update(update: dict[str, Any], engine, config: TelegramConfig, *, ca
     chat_id = chat["id"]
     private = chat.get("type") == "private"
     scope_key = (chat_id, user_id)
+    history_key = scope_key if private else None
     callback_data = callback.get("data") if callback else None
     intent = None
+    free_text = None
     command, argument = "help", ""
-    if llm is _DEFAULT_LLM:
-        llm = _default_llm()
+    llm, phraser = _resolve_llm(llm, phraser)
     if callback_data:
         refine = parse_refine_page(callback_data)
         if refine:
@@ -855,16 +900,20 @@ def process_update(update: dict[str, Any], engine, config: TelegramConfig, *, ca
             if command == "llm":
                 intent = Intent("llm_check")
             elif command == "ask":
-                intent = _understand(argument, message, private and scope_key, llm)
-                command = intent.kind
+                free_text = argument
         elif is_addressed(message, config):
-            intent = _understand(body, message, private and scope_key, llm)
-            command = intent.kind
+            free_text = body
         else:
             return {"handled": False, "reason": "not_addressed"}
+        if free_text is not None:
+            if llm is not None or phraser is not None:
+                _typing(call, config, chat_id)
+            intent = _understand(free_text, message, private and scope_key, llm, _recall_history(history_key))
+            command = intent.kind
     if intent is not None and intent.kind == "ignore":
         return {"handled": False, "reason": "acknowledgement"}
     markup_filters = None
+    chat_text = None
     try:
         if intent is not None and intent.kind == "llm_check":
             response = telegram_llm.check_message(telegram_llm.LLMConfig.from_env())
@@ -873,6 +922,13 @@ def process_update(update: dict[str, Any], engine, config: TelegramConfig, *, ca
             response, markup_filters = answer_intent(engine, intent, config)
             if private:
                 _remember_scope(scope_key, intent)
+            if free_text is not None and phraser is not None and intent.kind in DB_KINDS:
+                phrased = phraser(free_text, response, _recall_history(history_key))
+                if phrased:
+                    chat_text, show_details = phrased
+                    response = chat_text + ("\n\n" + response if show_details else "")
+            elif free_text is not None and intent.reply:
+                chat_text = intent.reply
         else:
             response = render_command(engine, command, argument)
     except SQLAlchemyError:
@@ -883,30 +939,33 @@ def process_update(update: dict[str, Any], engine, config: TelegramConfig, *, ca
         "disable_web_page_preview": True,
         "reply_markup": keyboard(config, markup_filters),
     })
+    if free_text is not None:
+        _remember_turn(history_key, free_text, chat_text or response.split("\n", 1)[0])
     return {"handled": True, "command": command}
 
 
 def _needs_interpreter(intent, text_value):
-    """True when the parse is unreadable or just a loose sentence turned into a search term."""
-    if intent.kind == "unsupported":
+    """True when Gemini should decide: unreadable, conversational, or a bare search word.
+
+    A message with a price, year or mileage is a clear search the free parser reads itself.
+    A search-only message ("golf", "hvala ti", "bok") is ambiguous, so Gemini picks between
+    a search and small talk. Without Gemini the parser's reading is used as before.
+    """
+    if intent.kind in {"ignore", "clarify", "chitchat", "unsupported"}:
         return not intent.note
-    if intent.kind != "find":
-        return False
-    f = intent.filters
-    if f.budget or f.year_min or f.mileage_max:
-        return False
-    return len(f.search.split()) >= 4 or len((text_value or "").split()) > 5
+    return intent.kind == "find" and not (
+        intent.filters.budget or intent.filters.year_min or intent.filters.mileage_max)
 
 
-def _understand(text_value, message, scope_key, llm):
-    """Deterministic parse first; Gemini only when that cannot read the message."""
+def _understand(text_value, message, scope_key, llm, history=None):
+    """Deterministic parse first; Gemini for anything conversational or unreadable."""
     context = reply_context(message)
     remembered = _recall_scope(scope_key) if scope_key else None
     if context is None and remembered is not None and looks_like_followup(text_value):
         context = remembered
     intent = parse_question(text_value, context)
     if llm is not None and _needs_interpreter(intent, text_value):
-        interpreted = llm(text_value, context or remembered)
+        interpreted = llm(text_value, context or remembered, history or [])
         if interpreted is not None:
             return interpreted
     return intent

@@ -96,6 +96,13 @@ class ParserTests(unittest.TestCase):
         self.assertEqual("unsupported", self.kinds(
             "please could you maybe explain how olx works for foreigners in bosnia"))
 
+    def test_plural_model_words_search_as_the_singular(self):
+        for text, expected in (("show me the golfs under 15000 KM", "golf"), ("golfovi do 12000 KM", "golf"),
+                               ("octavias under 9000 KM", "octavia"), ("passati do 8000 KM", "passati"),
+                               ("mercedes under 9000 KM", "mercedes"), ("focus under 9000 KM", "focus"),
+                               ("audi a4 under 9000 KM", "audi a4")):
+            self.assertEqual(expected, parse_question(text).filters.search, text)
+
     def test_search_text_cannot_carry_like_wildcards(self):
         self.assertEqual("golf", parse_question("% _ golf under 9000").filters.search)
 

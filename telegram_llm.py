@@ -1,13 +1,20 @@
-"""Optional Gemini interpretation for questions the deterministic parser cannot read.
+"""Optional Gemini layer: understands loose messages and phrases replies like a chat.
 
-The model never answers questions and never sees database content. It only turns a
-chat message (plus, at most, the scope of the previous answer) into a small request
-that is validated here against fixed limits and then handled by the same read-only
-queries as every other question. Any failure returns ``None`` so the bot falls back to
-its normal "I can't answer that" reply.
+Gemini never decides what is true. It does two jobs:
 
-Only the user's message text leaves the server. The API key is sent in a header, never
-in a URL, and no error text, message text or key is ever logged.
+1. ``interpret``: turn a chat message (plus recent turns and the previous answer's scope)
+   into a small request that is validated here against fixed limits and then handled by the
+   same read-only database queries as every other question. For small talk or a vague
+   question it may also write a short reply, which is only accepted if it carries no facts
+   (no numbers that were not already in the conversation, no links).
+2. ``phrase``: rewrite the database's own answer as a few natural sentences. A reply is
+   accepted only if every number in it already appears in the database answer, the user's
+   message or the recent turns, and it contains no links; otherwise the caller sends the
+   plain database answer instead.
+
+Any failure returns ``None`` so the bot falls back to its normal replies. Only chat text and
+the database answer text leave the server. The API key is sent in a header, never in a URL,
+and no error text, message text or key is ever logged.
 """
 
 from dataclasses import dataclass
@@ -33,13 +40,23 @@ LOG = logging.getLogger("telegram_llm")
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 DEFAULT_MODEL = "gemini-3.5-flash-lite"
 TIMEOUT_SECONDS = 8
-MAX_REPLY_CHARS = 4000
+MAX_REPLY_CHARS = 600
+MAX_FACTS_CHARS = 3500
+MAX_HISTORY_TURNS = 6
+MAX_TURN_CHARS = 300
 INTENTS = ("status", "latest", "trends", "find", "model_stats", "compare", "clarify", "chitchat",
            "unsupported")
 
-SYSTEM_PROMPT = """You read chat messages sent to a private bot that answers questions about used-car \
-listings in Bosnia (olx.ba). Messages are English or Bosnian. You do NOT answer questions and you \
-know no prices or listings. You only translate the message into one JSON request.
+PERSONA = """You are Garaža, a friendly, relaxed assistant in a private chat about used cars on \
+olx.ba (Bosnia). Reply in the language the user writes in (Bosnian or English), warmly and briefly, \
+like a person texting. You know NOTHING about cars, prices or listings yourself: the only facts you \
+may use are the ones given to you from our database. Never state a price, count, year, mileage, \
+date or any car fact (reliability, common faults, value, forecasts) that was not given to you, and \
+never give advice about which car to buy."""
+
+SYSTEM_PROMPT = PERSONA + """
+
+Your job now: turn the user's latest message into ONE JSON request. You do not answer questions.
 
 Choose intent:
 - find: the user wants listings. Set search (make/model words only, e.g. "golf", "skoda octavia"), \
@@ -50,13 +67,29 @@ and any of budget_km (max price in KM), year_min, mileage_max (km).
 - status: asks whether data is fresh or the collector works.
 - latest: asks what is new.
 - clarify: wants a recommendation or is too vague to search. Put ONE short friendly question in \
-clarifying_question. Ask for the maximum budget in KM first. Only if the message or the previous \
-scope already gives a budget, ask for a model, year or mileage instead. No numbers, no facts.
-- chitchat: greeting or thanks or small talk.
-- unsupported: anything else, including forecasts and non-car topics.
-Prices are in KM. If a previous scope is provided and the message only refines it (for example \
-"cheaper", "newer", "what about passat"), set refines_previous to true and fill only what changed. \
-Leave unused fields empty or null. Output JSON only."""
+reply. Ask for the maximum budget in KM first. Only if the message or the previous scope already \
+gives a budget, ask for a model, year or mileage instead.
+- chitchat: greeting, thanks, small talk or a question about you. Put a short friendly reply in \
+reply and, where natural, ask what car they are looking for.
+- unsupported: anything else, including forecasts and non-car topics. Put a short, kind reply in \
+reply saying you only know what the database shows, and offer what you can look up.
+For clarify, chitchat and unsupported the reply must contain no numbers unless the user wrote them, \
+and no links. Prices are in KM. recent_turns (if any) is the conversation so far. If a previous \
+scope is given and the message only refines it (for example "cheaper", "newer", "what about \
+passat", "show me"), set refines_previous to true and fill only what changed. Leave unused fields \
+empty or null. Output JSON only."""
+
+PHRASE_PROMPT = PERSONA + """
+
+Your job now: answer the user's latest message in 1-4 short sentences using ONLY the database \
+answer in "facts". Quote numbers exactly as they appear in the facts; do not calculate new ones, \
+round them, or add any. Do not include links. If the facts say there are no matches, that the data \
+is stale, partial or a thin sample, say so plainly. You may say what the data shows, but do not \
+recommend a car as best, predict prices, or add general car knowledge. If the facts list cars, \
+mention only the most useful points (how many, the typical range, what stands out) and set \
+show_details to true when the user asked to see, find or list cars (or "show me"), so the listings \
+are attached; set it to false for a pure conversational question where the summary is enough, and \
+then end by offering to show the listings. recent_turns (if any) is the conversation so far. Output JSON only."""
 
 SCHEMA = {
     "type": "object",
@@ -70,9 +103,19 @@ SCHEMA = {
         "compare_a": {"type": "string"},
         "compare_b": {"type": "string"},
         "refines_previous": {"type": "boolean"},
+        "reply": {"type": "string"},
         "clarifying_question": {"type": "string"},
     },
     "required": ["intent"],
+}
+
+PHRASE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "reply": {"type": "string"},
+        "show_details": {"type": "boolean"},
+    },
+    "required": ["reply", "show_details"],
 }
 
 
@@ -100,6 +143,29 @@ def _bounded(value, bounds):
     return value if bounds[0] <= value <= bounds[1] else None
 
 
+def _numbers(text):
+    """Normalised digit groups in a text ('15.000' and '15,000' both become '15000')."""
+    found = set()
+    for raw in re.findall(r"\d[\d.,]*\d|\d", text or ""):
+        digits = re.sub(r"\D", "", raw).lstrip("0") or "0"
+        found.add(digits)
+    return found
+
+
+def _safe_text(value, allowed_numbers, limit=MAX_REPLY_CHARS):
+    """A model-written sentence is accepted only if it carries no new facts or links."""
+    if not isinstance(value, str):
+        return ""
+    value = re.sub(r"[ \t]+", " ", value).strip()
+    if not value or len(value) > limit:
+        return ""
+    if re.search(r"@|<|>|https?:|www\.|olx\.ba|\.com|\.ba\b|`", value, re.I):
+        return ""
+    if not _numbers(value) <= allowed_numbers:
+        return ""
+    return value
+
+
 def _safe_question(value):
     value = re.sub(r"\s+", " ", value or "").strip()
     if not value or len(value) > 200 or re.search(r"[0-9@/\\<>]|https?:", value):
@@ -107,24 +173,33 @@ def _safe_question(value):
     return value
 
 
-def intent_from_plan(plan, previous=None):
+def _history_numbers(history):
+    found = set()
+    for turn in history or []:
+        found |= _numbers(turn.get("text", ""))
+    return found
+
+
+def intent_from_plan(plan, previous=None, message="", history=None):
     """Validate a model-produced plan and convert it to an Intent, or None."""
     if not isinstance(plan, dict):
         return None
     kind = plan.get("intent")
     if kind not in INTENTS:
         return None
+    allowed = _numbers(message) | _history_numbers(history)
+    reply = _safe_text(plan.get("reply"), allowed)
     if kind in {"status", "latest"}:
         return Intent(kind)
     if kind == "chitchat":
-        return Intent("chitchat")
+        return Intent("chitchat", reply=reply)
     if kind == "unsupported":
-        return Intent("unsupported")
+        return Intent("unsupported", reply=reply)
     if kind == "trends":
         days = _bounded(plan.get("days"), (1, 90)) or 7
         return Intent("trends", days=days)
     if kind == "clarify":
-        return Intent("clarify", question=_safe_question(plan.get("clarifying_question")))
+        return Intent("clarify", reply=reply, question=_safe_question(plan.get("clarifying_question")))
     if kind == "compare":
         first = clean_search(str(plan.get("compare_a") or ""))
         second = clean_search(str(plan.get("compare_b") or ""))
@@ -165,19 +240,25 @@ def _previous_scope(previous):
     return None
 
 
-def _request_body(message, previous, level):
-    user = {"message": message[:MAX_QUESTION]}
-    scope = _previous_scope(previous)
-    if scope:
-        user["previous_scope"] = scope
-    config = {"responseMimeType": "application/json", "maxOutputTokens": 400}
+def _clean_history(history):
+    turns = []
+    for turn in (history or [])[-MAX_HISTORY_TURNS:]:
+        role = "assistant" if turn.get("role") in {"bot", "assistant"} else "user"
+        text = re.sub(r"\s+", " ", str(turn.get("text", ""))).strip()[:MAX_TURN_CHARS]
+        if text:
+            turns.append({"role": role, "text": text})
+    return turns
+
+
+def _body(system, user, schema, max_tokens, level):
+    config = {"responseMimeType": "application/json", "maxOutputTokens": max_tokens}
     if level == 0:
-        config["responseJsonSchema"] = SCHEMA
+        config["responseJsonSchema"] = schema
         config["thinkingConfig"] = {"thinkingLevel": "MINIMAL"}
     elif level == 1:
-        config["responseJsonSchema"] = SCHEMA
+        config["responseJsonSchema"] = schema
     return {
-        "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+        "systemInstruction": {"parts": [{"text": system}]},
         "contents": [{"role": "user", "parts": [{"text": json.dumps(user, ensure_ascii=False)}]}],
         "generationConfig": config,
     }
@@ -213,8 +294,8 @@ def _key_rejected(response):
     return "API_KEY_INVALID" in reasons or "api key not valid" in str(error.get("message", "")).lower()
 
 
-def call_plan(message, previous, config, *, post=None):
-    """Return (plan dict | None, status string). Never raises; status has no secrets."""
+def _generate(config, system, user, schema, max_tokens, post=None):
+    """Return (parsed JSON | None, status string). Never raises; status has no secrets."""
     post = post or requests.post
     last = "failed"
     for level in (0, 1, 2):
@@ -222,7 +303,7 @@ def call_plan(message, previous, config, *, post=None):
             response = post(
                 GEMINI_URL.format(model=config.model),
                 headers={"x-goog-api-key": config.api_key, "content-type": "application/json"},
-                json=_request_body(message, previous, level),
+                json=_body(system, user, schema, max_tokens, level),
                 timeout=TIMEOUT_SECONDS,
             )
         except requests.RequestException:
@@ -254,18 +335,58 @@ def call_plan(message, previous, config, *, post=None):
     return None, last
 
 
-def interpret(message, previous, config, *, post=None):
+def call_plan(message, previous, config, *, post=None, history=None):
+    """Return (plan dict | None, status string) for one chat message."""
+    user = {"message": message[:MAX_QUESTION]}
+    turns = _clean_history(history)
+    if turns:
+        user["recent_turns"] = turns
+    scope = _previous_scope(previous)
+    if scope:
+        user["previous_scope"] = scope
+    return _generate(config, SYSTEM_PROMPT, user, SCHEMA, 400, post)
+
+
+def interpret(message, previous, config, *, post=None, history=None):
     """Interpret one message. Returns an Intent or None; never raises."""
     if config is None or not isinstance(message, str) or not message.strip():
         return None
     try:
-        plan, status = call_plan(message, previous, config, post=post)
+        plan, status = call_plan(message, previous, config, post=post, history=history)
         if plan is None:
             LOG.warning("gemini interpretation unavailable: %s", status)
             return None
-        return intent_from_plan(plan, previous)
+        return intent_from_plan(plan, previous, message, history)
     except Exception:  # fail closed to the deterministic reply; log no content
         LOG.warning("gemini interpretation failed unexpectedly")
+        return None
+
+
+def phrase(message, facts, config, *, post=None, history=None):
+    """Rewrite a database answer as a short chat reply.
+
+    Returns ``(reply, show_details)`` or ``None``; never raises. ``None`` means the caller
+    must send the plain database answer.
+    """
+    if config is None or not isinstance(message, str) or not message.strip() or not facts:
+        return None
+    try:
+        user = {"message": message[:MAX_QUESTION], "facts": facts[:MAX_FACTS_CHARS]}
+        turns = _clean_history(history)
+        if turns:
+            user["recent_turns"] = turns
+        plan, status = _generate(config, PHRASE_PROMPT, user, PHRASE_SCHEMA, 500, post)
+        if not isinstance(plan, dict):
+            LOG.warning("gemini phrasing unavailable: %s", status)
+            return None
+        allowed = _numbers(facts[:MAX_FACTS_CHARS]) | _numbers(message) | _history_numbers(turns)
+        reply = _safe_text(plan.get("reply"), allowed)
+        if not reply:
+            LOG.warning("gemini phrasing rejected by validation")
+            return None
+        return reply, plan.get("show_details") is True
+    except Exception:
+        LOG.warning("gemini phrasing failed unexpectedly")
         return None
 
 
@@ -274,7 +395,7 @@ def check_message(config, *, post=None):
     if config is None:
         return "Gemini is not configured (no valid GEMINI_API_KEY / model). Plain questions use the built-in parser only."
     plan, status = call_plan("golf under 15000 KM", None, config, post=post)
-    intent = intent_from_plan(plan, None) if plan else None
+    intent = intent_from_plan(plan, None, "golf under 15000 KM") if plan else None
     if intent is None:
         return f"Gemini check failed: {status}.\nModel: {config.model}"
     return f"Gemini check: {status}.\nModel: {config.model}\nTest question understood as: {intent.kind}"

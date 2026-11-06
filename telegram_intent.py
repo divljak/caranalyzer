@@ -45,6 +45,7 @@ class Intent:
     note: str = ""
     question: str = ""
     offset: int = 0
+    reply: str = ""
 
 
 def fold(value):
@@ -147,12 +148,22 @@ def _extract_filters(folded, original):
     return Filters(budget=budget, year_min=year, mileage_max=mileage), rest
 
 
+def _singular(token):
+    """Drop a plural ending so 'golfs' / 'golfovi' search as 'golf' (LIKE is substring-based)."""
+    lowered = token.lower()
+    if len(lowered) > 5 and lowered.endswith(("ovi", "evi")):
+        return token[:-3]
+    if len(lowered) > 4 and lowered.endswith("s") and not lowered.endswith(("ss", "es", "us", "is")):
+        return token[:-1]
+    return token
+
+
 def _search_tokens(rest):
     tokens = []
     for raw in re.split(r"\s+", rest.lower().replace("'", "").replace("\u2019", "")):
         token = clean_search(raw)
         if token and fold(token) not in _STOPWORDS and fold(token.rstrip("s")) not in _STOPWORDS:
-            tokens.append(token)
+            tokens.append(_singular(token))
     return tokens
 
 

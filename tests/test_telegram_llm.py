@@ -191,6 +191,7 @@ def msg(text, *, user=123, chat_id=123, chat_type="private", uid=1, reply_to=Non
 class PrivateChatTests(unittest.TestCase):
     def setUp(self):
         telegram_bot._SCOPES.clear()
+        telegram_bot._HISTORY.clear()
         self.call = Mock()
         self.llm = Mock(return_value=None)
 
@@ -230,7 +231,7 @@ class PrivateChatTests(unittest.TestCase):
 
     def test_gemini_is_only_used_when_the_parser_cannot_read_the_message(self):
         for text in ("Golf under 15000 KM", "status", "Golf vs Octavia", "what will prices be next year",
-                     "thanks", "golf under 10000 eur"):
+                     "golf under 10000 eur"):
             self.run_update(msg(text))
         self.llm.assert_not_called()
         with patch("telegram_bot.render_command", return_value="command answer"):
@@ -252,11 +253,15 @@ class PrivateChatTests(unittest.TestCase):
         self.assertEqual("unsupported", captured[0].kind)
         self.assertEqual("find", captured[1].kind)  # no Gemini answer: previous behaviour is kept
 
-    def test_clean_model_queries_never_reach_gemini(self):
-        for text in ("golf", "skoda octavia", "show me a golf 7", "golf 7 tdi", "Golf from 2016",
-                     "what about passat"):
+    def test_searches_with_a_filter_are_read_by_the_free_parser(self):
+        for text in ("Golf from 2016", "golf 7 tdi under 12000 KM", "octavia max 150k km mileage"):
             self.run_update(msg(text))
         self.llm.assert_not_called()
+
+    def test_bare_search_words_are_ambiguous_so_gemini_decides(self):
+        for text in ("golf", "hvala ti", "bok"):
+            self.run_update(msg(text))
+        self.assertEqual(3, self.llm.call_count)
 
     def test_gemini_plans_are_answered_through_the_database_helpers(self):
         plan = Intent("find", Filters("golf", 15000, 2016))
@@ -332,9 +337,14 @@ class PrivateChatTests(unittest.TestCase):
         self.assertIn("not configured", self.call.call_args.args[2]["text"])
 
     def test_default_llm_is_off_without_a_key_and_on_with_one(self):
-        self.assertIsNone(telegram_bot._default_llm())
+        default = telegram_bot._DEFAULT_LLM
+        self.assertEqual((None, None), telegram_bot._resolve_llm(default, default))
         with patch.dict(os.environ, {"GEMINI_API_KEY": KEY}):
-            self.assertIsNotNone(telegram_bot._default_llm())
+            interpreter, phraser = telegram_bot._resolve_llm(default, default)
+            self.assertIsNotNone(interpreter)
+            self.assertIsNotNone(phraser)
+        explicit = Mock()
+        self.assertEqual((explicit, None), telegram_bot._resolve_llm(explicit, None))
 
 
 if __name__ == "__main__":
