@@ -176,3 +176,22 @@ boundary, and the backup owner can extend the canonical pipeline, preserving the
 new browser module when building the next complete immutable release. Use the
 installed manifest to retain the exact combined runtime; this task holds no ongoing
 shared file/service mutation.
+
+## Removed-ad 404 pages — 7 November 2026
+
+Every run from 1 to 7 November ended `partial` with "Two consecutive detail
+failures". The saved checks show the same pattern each time: `WebsiteDOMTimeout`
+with `parser_reason: unrecognized_template`, no title, no ID and no price after
+about 22 seconds. One manual request for a failing ID (`77630014`) returned an
+HTTP **404** document whose only heading is "Oprostite, ne možemo pronaći ovu
+stranicu. Pretražite popularne kategorije". An active ID returned 200 with the
+normal listing template. Removed ads were waiting out the full DOM timeout and
+counting toward the two-failure stop, so no run could finish clean.
+
+`parse_detail` now returns `unavailable` (evidence `http_status: 404`) only when
+**all** of these hold: the main document for the exact listing URL returned 404,
+there is no listing title or labeled ID, and a non-title heading starts with
+the not-found text. The existing two-consistent-reads rule for negative outcomes
+still applies. A not-found heading without a 404, or a 404 that still renders
+listing content, remains a failure or a listed ad. `unavailable` is not a sale.
+Repeated unavailable checks lead to `removed_unconfirmed`, as before.

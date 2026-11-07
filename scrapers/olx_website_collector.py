@@ -201,6 +201,9 @@ def parse_search(page, requested_page, query):
 UNAVAILABLE_MESSAGES = {'oglas nije dostupan', 'ovaj oglas nije dostupan', 'oglas ne postoji', 'ovaj oglas ne postoji'}
 ENDED_MESSAGES = {'oglas je završen', 'ovaj oglas je završen'}
 SOLD_MESSAGES = {'oglas je prodan', 'ovaj oglas je prodan'}
+# OLX serves a removed ad as an HTTP 404 document whose only heading is the generic
+# "page not found" text. Both signals are required; the heading alone stays unknown.
+NOT_FOUND_PREFIX = 'oprostite, ne možemo pronaći ovu stranicu'
 
 
 def parse_detail(page, expected_id):
@@ -222,6 +225,11 @@ def parse_detail(page, expected_id):
     if sum(bool(headings & messages) for messages in
            (UNAVAILABLE_MESSAGES, ENDED_MESSAGES, SOLD_MESSAGES)) > 1 and not page.get('main_title'):
         return {**base, 'outcome': 'check_failed', 'evidence': {**base['evidence'], 'reason': 'conflicting_status'}}
+    if (page.get('document_status') == 404 and not page.get('main_title')
+            and not page.get('attributes', {}).get('ID')
+            and any(h.startswith(NOT_FOUND_PREFIX) for h in headings)):
+        return {**base, 'outcome': 'unavailable',
+                'evidence': {**base['evidence'], 'message': NOT_FOUND_PREFIX, 'http_status': 404}}
     for messages, outcome in [(UNAVAILABLE_MESSAGES, 'unavailable'), (ENDED_MESSAGES, 'source_reported_ended'),
                               (SOLD_MESSAGES, 'source_reported_sold')]:
         matching = headings & messages
@@ -327,6 +335,7 @@ class WebsiteBrowser:
         previous_status = None
         last_dom, parser_reason = {}, None
         self.driver.get_log('performance')  # Discard stale navigation diagnostics.
+        self.document_status = None
         def ready(driver):
             nonlocal script_retries, previous_status, last_dom, parser_reason
             self.check_responses()
@@ -360,6 +369,7 @@ class WebsiteBrowser:
                     parser_reason = 'search_cards_or_pagination_not_verified'
                     return False
                 return page
+            page['document_status'] = getattr(self, 'document_status', None)
             result = parse_detail(page, expected_id)
             parser_reason = result.get('evidence', {}).get('reason')
             # ID can render before title, labels and current price. Wait for the
@@ -420,8 +430,10 @@ class WebsiteBrowser:
                 continue
             if response['status'] in {403, 429}:
                 raise WebsiteBlocked('Website access was refused')
-            if message['params'].get('type') == 'Document' and response['status'] >= 500:
-                server_error = True
+            if message['params'].get('type') == 'Document':
+                self.document_status = response['status']
+                if response['status'] >= 500:
+                    server_error = True
         # Inspect the entire batch before reporting an error, so a later refusal
         # still triggers the persistent source pause rather than an ordinary failure.
         if server_error:
