@@ -13,6 +13,11 @@ def response(status, url='https://olx.ba/artikal/79589391', kind='Document'):
         'params': {'type': kind, 'response': {'url': url, 'status': status}}}})}
 
 
+def not_found_page(lid='79589391'):
+    return dict(url=f'https://olx.ba/artikal/{lid}', blocked=False, main_title='', attributes={}, prices=[],
+                headings=['Oprostite, ne možemo pronaći ovu stranicu. Pretražite popularne kategorije'])
+
+
 class NavigationTests(unittest.TestCase):
     def browser(self, pages):
         browser = WebsiteBrowser()
@@ -97,6 +102,32 @@ class NavigationTests(unittest.TestCase):
         result = browser.read(absent_page()['url'], 'detail')
         self.assertEqual('unavailable', parse_detail(result, '79589391')['outcome'])
         self.assertEqual(2, browser.driver.execute_async_script.call_count)
+
+    def test_removed_ad_404_page_is_unavailable_after_two_reads(self):
+        browser = self.browser([not_found_page(), not_found_page()])
+        browser.driver.get_log.side_effect = [[], [response(404)], [], [], []]
+        result = browser.read(not_found_page()['url'], 'detail')
+        parsed = parse_detail(result, '79589391')
+        self.assertEqual('unavailable', parsed['outcome'])
+        self.assertEqual(404, parsed['evidence']['http_status'])
+        self.assertEqual(2, browser.driver.execute_async_script.call_count)
+        browser.driver.get.assert_called_once()
+
+    def test_not_found_heading_needs_404_document(self):
+        for status in (None, 200):
+            page = not_found_page(); page['document_status'] = status
+            self.assertEqual('check_failed', parse_detail(page, '79589391')['outcome'])
+        browser = self.browser([not_found_page()] * 2)
+        browser.DOM_TIMEOUT = 0
+        with self.assertRaises(WebsiteDOMTimeout):
+            browser.read(not_found_page()['url'], 'detail')
+
+    def test_404_with_listing_content_is_not_unavailable(self):
+        page = detail_page(); page['document_status'] = 404
+        page['headings'] = page.get('headings', []) + ['Oprostite, ne možemo pronaći ovu stranicu.']
+        self.assertEqual('listed', parse_detail(page, '79589391')['outcome'])
+        page = not_found_page(); page['document_status'] = 404; page['headings'] = ['Nešto drugo']
+        self.assertEqual('check_failed', parse_detail(page, '79589391')['outcome'])
 
     def test_hydrating_negative_heading_does_not_beat_active_ad(self):
         browser = self.browser([absent_page(), detail_page()])
