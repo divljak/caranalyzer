@@ -17,6 +17,7 @@ the database answer text leave the server. The API key is sent in a header, neve
 and no error text, message text or key is ever logged.
 """
 
+from contextvars import ContextVar
 from dataclasses import dataclass
 import json
 import logging
@@ -38,6 +39,9 @@ from telegram_intent import (
 
 
 LOG = logging.getLogger("telegram_llm")
+# The outcome of the latest phrase() call in this context ("used", or why it fell back). Read by the
+# interaction log; holds a short status only, never text.
+PHRASE_STATUS = ContextVar("telegram_llm_phrase_status", default="")
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 DEFAULT_MODEL = "gemini-3.5-flash-lite"
 TIMEOUT_SECONDS = 8
@@ -445,6 +449,7 @@ def phrase(message, facts, config, *, post=None, history=None, mode="", language
     Returns ``(reply, show_details)`` or ``None``; never raises. ``None`` means the caller
     must send the plain database answer.
     """
+    PHRASE_STATUS.set("not attempted")
     if config is None or not isinstance(message, str) or not message.strip() or not facts:
         return None
     try:
@@ -457,15 +462,19 @@ def phrase(message, facts, config, *, post=None, history=None, mode="", language
         plan, status = _generate(config, system, user, PHRASE_SCHEMA, 800, post)
         if not isinstance(plan, dict):
             LOG.warning("gemini phrasing unavailable: %s", status)
+            PHRASE_STATUS.set(status)
             return None
         allowed = _numbers(facts[:MAX_FACTS_CHARS]) | _numbers(message) | _history_numbers(turns)
         reply, reason = _check_text(plan.get("reply"), allowed)
         if not reply:
             LOG.warning("gemini phrasing rejected by validation: %s", reason)
+            PHRASE_STATUS.set("rejected: " + reason)
             return None
+        PHRASE_STATUS.set("used")
         return reply, plan.get("show_details") is True
     except Exception:
         LOG.warning("gemini phrasing failed unexpectedly")
+        PHRASE_STATUS.set("failed unexpectedly")
         return None
 
 

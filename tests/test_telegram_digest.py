@@ -168,6 +168,15 @@ class DigestRendererTests(unittest.TestCase):
         self.assertNotIn("⚠️", text)  # a warning sign appears only when something is wrong
         self.assertNotIn("Zadnji potpuno čist prolaz:", text.split("<blockquote")[0])
 
+    def test_a_run_limited_only_by_the_page_budget_reads_as_healthy(self):
+        run = dict(evidence()["run"], status="partial", errors=0,
+                   report=json.dumps({"stopped_reason": "discovery_budget_incomplete", "rejected": 0}))
+        text = render_digest(evidence(run=run, clean_at=utc("2026-11-04T17:31:22")), SARAJEVO)
+        self.assertEqual("✅ Sve radi · 47 novih oglasa · 0 grešaka · dnevni budžet stranica iskorišten",
+                         text.split("\n")[1])
+        self.assertIn("(dnevni budžet stranica iskorišten)", text)
+        self.assertNotIn("⚠️", text)
+
     def test_no_interesting_section_without_grounded_standouts(self):
         text = render_digest(evidence(first_seen=[]), SARAJEVO)
         self.assertNotIn("Najzanimljivije", text)

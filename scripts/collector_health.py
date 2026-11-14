@@ -11,7 +11,17 @@ import subprocess
 import sys
 import uuid
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # repo root, for database.run_outcome (stdlib only)
+from database.run_outcome import classify  # noqa: E402
+
 UTC = timezone.utc
+# Since 14 Nov 2026 the daily collection runs on GitHub Actions (.github/workflows/daily-collect.yml):
+# started by the VPS trigger, with a 09:40 UTC schedule as fallback. The old systemd timer is disabled.
+# "actions" judges the schedule only from run rows in Supabase; "vps-timer" is the old behaviour.
+SCHEDULES = ('actions', 'vps-timer')
+ACTIONS_DUE = (9, 40)  # the fallback cron; a run must have started that UTC day
+ACTIONS_GRACE = timedelta(minutes=75)  # GitHub may start scheduled runs late
+ACTIONS_UNFINISHED = timedelta(minutes=60)
 RANK = {'ok': 0, 'warning': 1, 'critical': 2}
 CANONICAL_CODES = {'collection_partial', 'collection_failed', 'run_unfinished', 'clean_stale',
                    'observations_stale', 'website_paused', 'details_paused', 'detail_failures',
@@ -71,7 +81,9 @@ def canonical_probe(credentials, delivery):
                     last_clean=stamp(c.execute(text("SELECT max(end_time) FROM scraping_logs WHERE status='completed' AND errors_count=0")).scalar()),
                     last_detail_success=stamp(c.execute(text("SELECT max(checked_at) FROM website_listing_checks WHERE outcome NOT IN ('check_failed','blocked')")).scalar()))
                 result['runs'] = [dict(r) for r in c.execute(text("""SELECT id,started_at,finished_at,status,
-                  observations,new_listings,errors,search_attempted,detail_attempted,details_completed
+                  observations,new_listings,errors,search_attempted,detail_attempted,details_completed,
+                  CASE WHEN report LIKE '{%' THEN CAST(report AS jsonb)->>'stopped_reason' END AS stopped_reason,
+                  CASE WHEN report LIKE '{%' THEN CAST(report AS jsonb)->>'rejected' END AS rejected
                   FROM website_collection_runs ORDER BY started_at DESC,id DESC LIMIT 30""")).mappings()]
                 result['checks'] = [dict(r) for r in c.execute(text("SELECT checked_at,outcome FROM website_listing_checks ORDER BY checked_at DESC,id DESC LIMIT 10")).mappings()]
                 result['website_pause_until'] = stamp(c.execute(text('SELECT max(pause_until) FROM website_collection_budget')).scalar())
@@ -101,22 +113,32 @@ def evaluate(sample, now):
         issues[code] = {'code': code, 'severity': severity, 'explanation': explanation, 'next_step': action}
     db = sample['canonical']
     service = sample['service']
-    today_due = now.replace(hour=7, minute=17, second=0, microsecond=0)
+    actions = sample.get('schedule', 'vps-timer') == 'actions'
+    if actions:
+        today_due = now.replace(hour=ACTIONS_DUE[0], minute=ACTIONS_DUE[1], second=0, microsecond=0)
+    else:
+        today_due = now.replace(hour=7, minute=17, second=0, microsecond=0)
     due = today_due if now >= today_due else today_due - timedelta(days=1)
     runs = db.get('runs', [])
     latest = runs[0] if runs else None
     terminal = next((r for r in runs if r.get('status') != 'running'), None)
     attempt = sample.get('attempt') or {}
     starts = [timestamp(r['started_at']) for r in runs]
-    if service.get('last_start'):
+    if service.get('last_start') and not actions:
         starts.append(timestamp(service['last_start']))
-    if not attempt.get('verify_only') and attempt.get('started_at'):
+    if not attempt.get('verify_only') and attempt.get('started_at') and not actions:
         starts.append(timestamp(attempt['started_at']))
     last_start = max(starts, default=None)
-    active = service.get('ActiveState') in {'active', 'activating'}
-    if service.get('timer_active') != 'active' or service.get('timer_enabled') != 'enabled':
+    active = service.get('ActiveState') in {'active', 'activating'} and not actions
+    if actions:
+        day_start = due.replace(hour=0, minute=0)
+        if db.get('reachable') and now >= due + ACTIONS_GRACE and (last_start is None or last_start < day_start):
+            add('schedule_missed', 'critical', 'No collection run was recorded in Supabase for this UTC day, '
+                'including the 09:40 UTC GitHub Actions fallback and its grace period.',
+                'Open the "Daily collection" workflow runs on GitHub (and the VPS trigger log); do not reset source budgets.')
+    elif service.get('timer_active') != 'active' or service.get('timer_enabled') != 'enabled':
         add('schedule_disabled', 'critical', 'The daily collection timer is inactive or disabled.', 'Inspect car-analyzer-collector.timer; restore the existing 07:17 UTC schedule.')
-    if (db.get('reachable') or last_start) and now >= due + timedelta(minutes=15) and (last_start is None or last_start < due):
+    if not actions and (db.get('reachable') or last_start) and now >= due + timedelta(minutes=15) and (last_start is None or last_start < due):
         add('schedule_missed', 'critical', 'No daily collector start was recorded after the scheduled time and 15-minute grace period.', 'Inspect the collector timer and service journal; do not reset source budgets.')
     if active and (last_start is None or now - last_start > timedelta(minutes=40)):
         add('collector_overdue', 'critical', 'The collector has not finished within the 40-minute grace period.', 'Inspect service state and journal; preserve locks and source pause rules.')
@@ -131,7 +153,7 @@ def evaluate(sample, now):
                               >= timestamp(service['last_start']) - timedelta(seconds=10)))
         if not expected_exit:
             add('pipeline_failed', 'critical', 'The installed collector service last exited unsuccessfully.', 'Inspect the safe attempt artifact and collector journal for transport, backup or runtime failure.')
-    if attempt.get('failure_class') and not active:
+    if attempt.get('failure_class') and not active and not actions:
         add('pipeline_failed', 'critical', 'The last pipeline stopped before completing all stages.', 'Inspect latest-direct-attempt.json and journal locally; do not replay ambiguous writes or bypass budgets.')
     if not db.get('probe_ok', True):
         add('health_probe_failed', 'critical', 'The health probe could not execute; canonical reachability and backup verification are unknown.', 'Inspect the health service and probe release dependencies; do not retry OLX or change database roles.')
@@ -140,7 +162,10 @@ def evaluate(sample, now):
     else:
         if terminal:
             useful = int(terminal.get('observations') or 0) > 0
-            if terminal['status'] == 'partial':
+            outcome = classify(terminal)
+            if outcome == 'budget_limited':
+                pass  # stopped only because the daily search-page budget was used; no errors: healthy
+            elif terminal['status'] == 'partial':
                 add('collection_partial', 'warning', 'The latest finished collection is partial' + (' and recorded useful real observations.' if useful else ' without new recorded observations.'), 'Review source coverage and failure counts; await the next bounded scheduled run.')
             elif terminal['status'] == 'failed':
                 add('collection_failed', 'critical', 'The latest collection failed' + (' after recording some real observations.' if useful else ' without recorded observations.'), 'Inspect the collector journal; retain evidence and source safeguards.')
@@ -148,7 +173,8 @@ def evaluate(sample, now):
                 add('collection_paused', 'warning', 'The latest collection stopped because source requests were paused.', 'Respect the source pause and inspect refusal evidence; await the next permitted scheduled run.')
             elif terminal['status'] == 'budget_exhausted':
                 add('collection_skipped', 'warning', 'The latest collection skipped source visits because the cumulative daily budget was exhausted.', 'Await the next regular UTC-day run; do not reset budgets for a retry.')
-        if latest and latest['status'] == 'running' and now - timestamp(latest['started_at']) > timedelta(minutes=40):
+        limit = ACTIONS_UNFINISHED if actions else timedelta(minutes=40)
+        if latest and latest['status'] == 'running' and now - timestamp(latest['started_at']) > limit:
             add('run_unfinished', 'critical', 'The latest canonical run remains unfinished beyond 40 minutes.', 'Inspect whether the collector process was interrupted; use its normal recovery contract.')
         for key, code, explanation in [('last_clean', 'clean_stale', 'No clean collection has completed in 48 hours; partial data does not refresh the clean anchor.'), ('latest_observation', 'observations_stale', 'No real listing observation has been recorded in 48 hours. This does not prove there are no new listings.')]:
             if not db.get(key) or now - timestamp(db[key]) > timedelta(hours=48):
@@ -163,7 +189,10 @@ def evaluate(sample, now):
         if consecutive or ratio:
             add('detail_failures', 'warning', 'Recent direct checks show repeated failures; listing availability and sale outcomes remain unconfirmed.', 'Inspect browser/transport failures and pause evidence without increasing request rates or daily budgets.')
     backup = db.get('backup', {})
-    if not db.get('probe_ok', True):
+    if actions:
+        # Backups are now made by the Actions run and kept as encrypted workflow artifacts, not on this VPS.
+        backup = {'source': 'github-actions-artifact'}
+    elif not db.get('probe_ok', True):
         pass  # An unexecuted probe cannot establish an invalid backup.
     elif not backup.get('valid'):
         add('backup_invalid', 'critical', 'The newest canonical backup is missing, unreadable or fails checksum verification.', 'Inspect canonical backup storage and the last pipeline; preserve older verified snapshots.')
@@ -176,7 +205,8 @@ def evaluate(sample, now):
         warning = fraction < .1 or (resource == 'disk' and metric['available'] < 2 * 1024**3)
         if warning:
             add(resource + '_pressure', 'critical' if critical else 'warning', label + ' is below the operational reserve.', 'Inspect resource usage; retain canonical backups, local rollback data and active services.')
-    return issues, {'expected_start': stamp(due), 'last_start': stamp(last_start),
+    return issues, {'schedule': 'actions' if actions else 'vps-timer',
+                    'expected_start': stamp(due), 'last_start': stamp(last_start),
                     'last_clean': db.get('last_clean'), 'latest_observation': db.get('latest_observation'),
                     'last_detail_success': db.get('last_detail_success'), 'last_run': latest,
                     'canonical_reachable': db.get('reachable', False), 'probe_ok': db.get('probe_ok', True), 'backup': backup,
@@ -231,7 +261,7 @@ def system_state():
     return state
 
 
-def collect(root):
+def collect(root, schedule='actions'):
     delivery = root / '.daily-delivery'
     release = (delivery / 'direct-current').resolve(strict=True)
     if not release.is_relative_to(delivery / 'releases'):
@@ -265,7 +295,8 @@ def collect(root):
     collection = attempt.get('collection') or {}
     attempt = {key: attempt.get(key) for key in ('started_at', 'finished_at', 'exit_code', 'failure_class', 'verify_only')}
     attempt['collection'] = {key: collection.get(key) for key in ('status', 'observations')}
-    return {'canonical': canonical, 'service': system_state(), 'attempt': attempt,
+    return {'schedule': schedule, 'canonical': canonical,
+            'service': system_state() if schedule == 'vps-timer' else {}, 'attempt': attempt,
             'disk': {'available': disk.free, 'total': disk.total},
             'memory': {'available': memory['MemAvailable'], 'total': memory['MemTotal']}}
 
@@ -275,6 +306,8 @@ def main():
     parser.add_argument('--root', type=Path, default=Path('/opt/car-analyzer'))
     parser.add_argument('--probe', action='store_true')
     parser.add_argument('--read', action='store_true')
+    parser.add_argument('--schedule', choices=SCHEDULES, default='actions',
+                        help='actions (default): judge the schedule from Supabase run rows; vps-timer: old systemd timer')
     args = parser.parse_args()
     if args.probe:
         sys.path.insert(0, str(args.root))
@@ -298,7 +331,7 @@ def main():
         now = datetime.now(UTC)
         previous = read_json(status_path)
         try:
-            sample = collect(args.root)
+            sample = collect(args.root, args.schedule)
             issues, evidence = evaluate(sample, now)
         except Exception:
             issues = {'checker_failed': {'code': 'checker_failed', 'severity': 'critical',

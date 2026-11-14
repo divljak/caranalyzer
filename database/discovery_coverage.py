@@ -57,9 +57,13 @@ def discovery_window(pages, baseline, *, complete, terminal, rejected, started_a
 def request_efficiency(report, pages):
     """Committed discovery evidence and reserved visits have separate denominators."""
     discovery = len({lid for p in pages for lid in p['ids']})
+    cards = sum(len(p['ids']) for p in pages)
     searches, details = report['search_attempted'], report['detail_attempted']
     return {'search_visits': searches, 'detail_visits': details,
             'saved_discovery_observations': discovery,
+            # The same ad on two pages is stored once; this counts the card slots such repeats used up
+            # (date-sorted pages shift while they are read, and promoted ads can recur).
+            'cross_page_repeats': cards - discovery,
             'saved_direct_observations': report['observations'] - discovery,
             'new_database_ids': report['new_listings'],
             'discovery_observations_per_search_visit': round(discovery / searches, 2) if searches else None,

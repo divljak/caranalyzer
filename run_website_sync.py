@@ -13,6 +13,7 @@ import uuid
 from database.db_manager import db_manager
 from database.models import create_tables
 from database.discovery_coverage import discovery_window, request_efficiency
+from database.run_outcome import exit_code
 from database.website_tracking import BudgetExhausted, SourcePaused, WebsiteStore, create_website_tables
 from scrapers.olx_website_collector import WebsiteBlocked, WebsiteBrowser, WebsiteDOMTimeout, WebsiteReadError, parse_detail, parse_search, search_url
 
@@ -29,6 +30,7 @@ def sync(db, store, browser, *, search_pages=3, detail_checks=20, delay=15, bran
                   details_completed=0, observations=0, new_listings=0, errors=0,
                   scope=query, coverage='bounded_newest_sample', source_total=None, page_stats=[],
                   known_overlap=0, rejected=0, stopped_reason=None, sale_inference=False,
+                  repeated_across_pages=0, seller_types={},
                   search_retries=0, failures=[])
     session_id, started = session_prefix + str(uuid.uuid4()), now()
     run_id = store.start_run(session_id, started, query, search_pages, detail_checks)
@@ -89,7 +91,11 @@ def sync(db, store, browser, *, search_pages=3, detail_checks=20, delay=15, bran
             fingerprints.add(fingerprint)
             report['source_total'] = page['source_total']
             report['rejected'] += page['rejected']
-            report['page_stats'].append({k: v for k, v in page.items() if k != 'listings'})
+            stats = {k: v for k, v in page.items() if k != 'listings'}
+            # Ads already read on an earlier page of this run (stored once, never re-observed).
+            stats['repeated_from_earlier_pages'] = len(ids & seen)
+            report['repeated_across_pages'] += stats['repeated_from_earlier_pages']
+            report['page_stats'].append(stats)
             report['known_overlap'] += len(store.known_ids(ids - seen))
             observed_at = now()
             saved_page = {'page': page_number, 'ids': []}
@@ -98,6 +104,8 @@ def sync(db, store, browser, *, search_pages=3, detail_checks=20, delay=15, bran
                 if item['listing_id'] in seen:
                     saved_page['ids'].append(item['listing_id'])
                     continue
+                kind = item.get('seller_type') or 'unknown'
+                report['seller_types'][kind] = report['seller_types'].get(kind, 0) + 1
                 added = db.upsert_verified_listing(item, observed_at=observed_at)
                 # The upsert has committed its immutable observation already.
                 # A later state-write failure must not erase it from run totals.
@@ -230,7 +238,7 @@ def main():
             report = sync(db_manager, store, browser, search_pages=args.search_pages,
                           detail_checks=args.detail_checks, delay=args.delay, brand=args.brand, model=args.model)
         print(json.dumps(report, ensure_ascii=False, indent=2))
-        return 0 if report['status'] == 'completed' else 1
+        return exit_code(report)  # 0 also for a run limited only by the page budget
 
 
 if __name__ == '__main__':

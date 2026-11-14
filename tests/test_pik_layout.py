@@ -58,6 +58,13 @@ class PikParserTests(unittest.TestCase):
         # PIK cards do not mark shops: unknown, never guessed as a private seller.
         self.assertIsNone(priced['seller_type'])
 
+    def test_shop_flag_from_the_page_payload_sets_the_seller_type(self):
+        page = pik_search_page(ids=('76348132', '81138257', '81000001'))
+        for card, dealer in zip(page['cards'], (True, False, None)):
+            card['dealer'] = dealer
+        kinds = [item['seller_type'] for item in parse_search(page, 1, search_url())['listings']]
+        self.assertEqual(['dealer', 'individual', None], kinds)
+
     def test_unrecognised_result_count_is_not_a_verified_search(self):
         page = pik_search_page()
         page['result_heading'] = 'Automobili'

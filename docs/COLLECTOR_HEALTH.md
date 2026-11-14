@@ -1,5 +1,37 @@
 # Collector health and Main notification handoff
 
+> **Since 14 Nov 2026 the schedule is GitHub Actions, and the checker follows it by default.**
+> The old `car-analyzer-collector.timer` is disabled; daily collection runs from
+> `.github/workflows/daily-collect.yml` (started by the VPS trigger, with a 09:40 UTC fallback).
+> `scripts/collector_health.py` now defaults to `--schedule actions`:
+>
+> - the schedule is judged only from `website_collection_runs` in Supabase: `schedule_missed` (critical)
+>   when no run started on the current UTC day by 09:40 UTC + 75 minutes; `run_unfinished` after 60 minutes;
+> - the systemd timer/service, the local `latest-direct-attempt.json` and the local backup files are no
+>   longer judged (backups are now encrypted Actions artifacts), so the always-firing `schedule_disabled`,
+>   `pipeline_failed` and `backup_*` issues are gone;
+> - a run that stopped only because the day's search-page budget was used (`partial`,
+>   `stopped_reason=discovery_budget_incomplete`, 0 errors, 0 rejected pages) is healthy, not
+>   `collection_partial` (see `database/run_outcome.py`; the collector now exits 0 for it, so the
+>   Actions job stays green). Real partial runs still warn.
+>
+> `--schedule vps-timer` keeps the old behaviour. Nothing on the VPS was changed by this repo change.
+>
+> **To switch the VPS checker over (Ogi, on the VPS):**
+>
+> ```bash
+> # from a checkout of this repo on your machine (the VPS copy is uploaded files, not a git checkout):
+> scp scripts/collector_health.py  root@<vps>:/opt/car-analyzer/scripts/collector_health.py
+> scp database/run_outcome.py      root@<vps>:/opt/car-analyzer/database/run_outcome.py
+> # then on the VPS:
+> sudo systemctl start car-analyzer-health.service   # one check now
+> python3 scripts/collector_health.py --read | python3 -m json.tool | head -40   # expect "schedule": "actions"
+> sudo systemctl enable --now car-analyzer-health.timer   # if it had been disabled
+> ```
+>
+> The first check after the switch emits `recovered` events for the stale timer/backup issues; that is expected.
+> Rollback: add `--schedule vps-timer` to `ExecStart` in `car-analyzer-health.service`, or `git checkout` the previous file.
+
 The checker is separate from the collection pipeline: `car-analyzer-health.timer`
 inspects the VPS every ten minutes and two minutes after boot. It never starts
 collection, requests OLX, spends budgets, resets source pauses, writes canonical

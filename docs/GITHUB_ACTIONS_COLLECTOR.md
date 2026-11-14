@@ -115,3 +115,24 @@ permanently disable the VPS timer, rotate database passwords, upload plaintext
 database snapshots, or cancel DigitalOcean yet. Those steps require an approved
 backup replacement, an observed shadow run, and a deliberate single-scheduler
 cutover.
+
+## Budget-limited runs, seller type and repeated ads (Nov 2026)
+
+- **Budget-limited is not broken.** A run that stops only because the day's search-page budget was used
+  (`status=partial`, `stopped_reason=discovery_budget_incomplete`, 0 errors, 0 rejected pages) is classified as
+  `budget_limited` by `database/run_outcome.py`. The collector exits 0 for it, so the job stays green and the 09:40
+  fallback does not spend the rest of the budget. The digest, `/status` and the health check show it as OK. The
+  stored status is unchanged. Real partial runs (errors, rejected pages, exceptions) still exit 1. The job summary
+  has a new `outcome` row.
+- **Seller type is back.** PIK cards no longer print "PIK SHOP", but each search page's own Nuxt payload
+  (`#__NUXT_DATA__`) carries `shop: true|false` per ad. The extraction script reads it for the matching ad id and maps
+  it to `seller_type` `dealer` / `individual`. Without the payload the value stays unknown (null), and an unknown
+  value never overwrites a stored one. `seller_types` in the run report counts each kind.
+- **Repeated ads across pages.** The same ad on two pages was already stored once. Now the run report also counts the
+  card slots spent on repeats (`repeated_across_pages`, per-page `repeated_from_earlier_pages`,
+  `request_efficiency.cross_page_repeats`). A manual check on 14 Nov 2026 found 14 of 50 ads on page 2 repeating
+  page 1, read a few seconds apart. Their `featured` level did not distinguish them, and their timestamps were the
+  oldest on page 1. So the main cause is the date-sorted list moving while it is read (new and renewed ads push
+  older ones down), not promoted cards. The site ignores a larger `per_page`. Reading pages in reverse order, or a
+  more stable sort, would raise unique listings per budgeted visit. Both change what discovery coverage means, so
+  they are left for a decision rather than done here.

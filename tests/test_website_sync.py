@@ -292,5 +292,33 @@ class StoreAndRunTests(unittest.TestCase):
         self.assertEqual('discovery_budget_incomplete', report['stopped_reason'])
 
 
+    def test_ads_repeated_on_later_pages_are_stored_once_and_counted(self):
+        pages = {1: ('79589391', '79806723', '79800001'), 2: ('79806723', '79800001', '79800002')}
+        def read(url, kind):
+            if kind == 'search':
+                page = int(url.rsplit('page=', 1)[-1])
+                result = search_page(page, ids=pages[page])
+                result['cards'][0]['dealer'] = True
+                return result
+            return detail_page(url.rsplit('/', 1)[-1])
+        report, _ = self.run_browser(read, search_pages=2, detail_checks=0)
+        self.assertEqual(4, report['observations'])
+        self.assertEqual(2, report['repeated_across_pages'])
+        self.assertEqual([0, 2], [p['repeated_from_earlier_pages'] for p in report['page_stats']])
+        self.assertEqual(2, report['request_efficiency']['cross_page_repeats'])
+        self.assertEqual({'dealer': 1, 'individual': 3}, report['seller_types'])  # repeats counted once
+        with self.sessions() as s:
+            self.assertEqual('dealer', s.query(CarListing).filter_by(listing_id='79589391').one().seller_type)
+
+    def test_a_run_limited_only_by_the_page_budget_exits_successfully(self):
+        from database.run_outcome import classify, exit_code
+        self.store.reserve('search', self.clock, 1, 2, 15)
+        report, _ = self.run_browser(lambda url, kind: detail_page(url.rsplit('/', 1)[-1]), detail_checks=2)
+        self.assertEqual(('partial', 'discovery_budget_incomplete', 0), (report['status'], report['stopped_reason'],
+                                                                          report['errors']))
+        self.assertEqual('budget_limited', classify(report))
+        self.assertEqual(0, exit_code(report))
+
+
 if __name__=='__main__':
     unittest.main()
