@@ -34,7 +34,7 @@ is still running. Still tied to the VPS:
 | --- | --- | --- |
 | `car-analyzer-collector.service` (disabled timer) | Original ExecStart did (`docker compose run collector`). The direct override does not. | Keep disabled; delete units at decommission |
 | `scripts/backup-postgres.sh`, `deploy/install-direct-collector.sh` | Yes (local dumps / one-time reconciliation) | Retire with the database |
-| `car-analyzer-health.timer` (`scripts/collector_health.py`) | No, but it reads the old timer state and `.daily-delivery/latest-direct-attempt.json` | Will report the timer disabled and the backup stale. Repoint at Supabase run rows or disable |
+| `car-analyzer-health.timer` (`scripts/collector_health.py`) | No, but it reads the old timer state and `.daily-delivery/latest-direct-attempt.json` | Repointed in code: defaults to `--schedule actions` (Supabase run rows). Copy the two files per docs/COLLECTOR_HEALTH.md, or disable |
 | Canonical backup (`.daily-delivery/backup-tools/run-canonical-backup.sh`) | No (it reads Supabase), but it ran as the old timer's ExecStartPre | Stopped with the timer. Replaced by the encrypted per-run artifact. Re-home it if a longer history is needed |
 | `vault-sync.timer`, `/root/.hermes`, other bot images | Not part of Car Analyzer | Check before cancelling the droplet |
 

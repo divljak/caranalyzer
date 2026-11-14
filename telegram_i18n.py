@@ -25,6 +25,7 @@ STRINGS = {
         # status
         "status_none": "Car Analyzer has no finished collector run yet.",
         "status_title": "Car Analyzer · {quality}",
+        "status_budget_limited": "COMPLETED (daily page budget used, no errors)",
         "status_latest_attempt": "Latest attempt: {when}",
         "status_counts": "{obs} observations · {new} first observed by us · {errors} errors",
         "status_visits": "Source visits: {search} search · {detail} detail ({done} completed)",
@@ -191,6 +192,7 @@ STRINGS = {
         "db_unavailable": "Baza je trenutno nedostupna, pa ne mogu odgovoriti. Pokušaj ponovo za koji trenutak.",
         "status_none": "Car Analyzer još nema nijedan završen prolaz kolektora.",
         "status_title": "Car Analyzer · {quality}",
+        "status_budget_limited": "ZAVRŠENO (dnevni budžet stranica iskorišten, bez grešaka)",
         "status_latest_attempt": "Zadnji pokušaj: {when}",
         "status_counts": "{obs} zapažanja · {new} prvi put viđeno kod nas · {errors} grešaka",
         "status_visits": "Posjete izvoru: {search} pretraga · {detail} detalja ({done} završeno)",

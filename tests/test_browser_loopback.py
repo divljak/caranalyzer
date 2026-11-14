@@ -104,7 +104,10 @@ PIK_SEARCH = '''<!doctype html><html><head><meta charset="utf-8"><title>Automobi
 <li class="is-desktop-only"><a href="?page=7" class="ui-pagination__page"><span>7</span></a></li>
 <li><span class="ui-pagination__gap">…</span></li>
 <li><a href="?page=50" class="ui-pagination__page"><span>50</span></a></li></ol>
-<a aria-current="page" href="?page=2" class="ui-pagination__arrow" rel="next">›</a></nav></section></body></html>'''
+<a aria-current="page" href="?page=2" class="ui-pagination__arrow" rel="next">›</a></nav></section>
+<script type="application/json" id="__NUXT_DATA__" data-ssr="true">[{"data":1},[2,9],
+{"id":3,"title":4,"shop":5,"featured":6,"type":7},76348132,"Peugeot 308 2013",true,2,"single",0,
+{"id":10,"title":11,"shop":12,"featured":6,"type":7},81000001,"Audi A4 2016",false]</script></body></html>'''
 
 PIK_DETAIL = '''<!doctype html><html><head><meta charset="utf-8"><title>Audi A3 · PIK</title></head><body>
 <h1 id="article-title">Audi A3 1.6 TDI</h1><div class="article-page__metadata"><span>ID 80634552</span></div>
@@ -156,7 +159,8 @@ class PikMarkupLoopbackTests(unittest.TestCase):
                          [c['url'] for c in page['cards']])
         self.assertEqual(['9.400 KM', '26.300 KM'], [c['price'] for c in page['cards']])
         self.assertEqual(['dizel', '210.000 km', '2013'], page['cards'][0]['tags'])
-        self.assertIsNone(page['cards'][0]['dealer'])
+        # seller type comes from the page's own Nuxt payload (shop: true / false per ad id)
+        self.assertEqual([True, False], [c['dealer'] for c in page['cards']])
         self.assertIsNotNone(page['browser']['navigation_ms'])
 
     def test_detail_attributes_id_and_price_are_extracted(self):

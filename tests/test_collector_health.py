@@ -190,3 +190,48 @@ class CollectorHealthTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def actions_sample(started=None, **run):
+    value = sample()
+    value['schedule'] = 'actions'
+    value['service'] = {}  # the old systemd timer is disabled and no longer inspected
+    value['canonical']['backup'] = {'valid': False}  # no local backups any more
+    value['canonical']['runs'][0].update(started_at=stamp(started or NOW.replace(hour=9, minute=41)), **run)
+    return value
+
+
+class ActionsScheduleTests(unittest.TestCase):
+    AFTER = NOW.replace(hour=12)
+
+    def test_a_clean_actions_run_is_healthy_without_timer_or_local_backup(self):
+        result = status(actions_sample(), now=self.AFTER)
+        assert result['issues'] == {}, result['issues']
+        assert result['evidence']['schedule'] == 'actions'
+        assert result['evidence']['backup'] == {'source': 'github-actions-artifact'}
+
+    def test_a_budget_limited_run_without_errors_is_healthy(self):
+        value = actions_sample(status='partial', observations=90, errors=0,
+                               stopped_reason='discovery_budget_incomplete', rejected='0')
+        assert status(value, now=self.AFTER)['issues'] == {}
+
+    def test_a_real_partial_still_warns(self):
+        for run in ({'errors': 2, 'stopped_reason': 'discovery_budget_incomplete'},
+                    {'errors': 0, 'stopped_reason': 'WebsiteReadError'},
+                    {'errors': 0, 'stopped_reason': 'discovery_budget_incomplete', 'rejected': '1'}):
+            value = actions_sample(status='partial', observations=18, **run)
+            assert set(status(value, now=self.AFTER)['issues']) == {'collection_partial'}, run
+
+    def test_a_missing_day_is_reported_after_the_fallback_grace(self):
+        yesterday = actions_sample(started=NOW.replace(hour=9, minute=41) - timedelta(days=1))
+        assert status(yesterday, now=NOW.replace(hour=10, minute=50))['issues'] == {}  # still within grace
+        late = status(yesterday, now=NOW.replace(hour=10, minute=56))
+        assert set(late['issues']) == {'schedule_missed'}
+        assert 'GitHub' in late['issues']['schedule_missed']['next_step']
+        early = actions_sample(started=NOW.replace(hour=5, minute=2))  # VPS trigger ran early that day
+        assert status(early, now=NOW.replace(hour=11))['issues'] == {}
+
+    def test_actions_runs_get_an_hour_before_counting_as_unfinished(self):
+        value = actions_sample(status='running', finished_at=None, started=NOW.replace(hour=9, minute=41))
+        assert 'run_unfinished' not in status(value, now=NOW.replace(hour=10, minute=30))['issues']
+        assert 'run_unfinished' in status(value, now=NOW.replace(hour=10, minute=45))['issues']

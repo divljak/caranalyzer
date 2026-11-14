@@ -408,6 +408,49 @@ at or under theirs, one short italic honesty line, and the collector details in 
 Buttons: **📉 Svi padovi** (the 10 largest drops of the last 7 days), **🆕 Novi oglasi**, **🔍 Pretraga**, plus the web
 links when `TELEGRAM_MARKET_URL` is set.
 
+## Interaction log (optional, proposed table)
+
+`telegram_log.py` records one row per message or button tap in `bot_interactions`
+(`docs/proposed-migrations/bot_interactions.sql`, **not applied**). Each row holds:
+
+- time and chat type (private/group);
+- a salted hash of the user id: HMAC-SHA256 keyed by `TELEGRAM_LOG_SALT`, or by the webhook secret when that is unset. No names, usernames or chat ids are stored;
+- the message, at most 400 chars, with e-mail addresses, phone numbers and @handles redacted;
+- the parsed intent and the path that read it (parser, Gemini, button, command, or a pending question used after a vague tag);
+- the filters, how many results there were and how many were shown;
+- whether Gemini phrased the reply, or why it fell back (e.g. `rejected: number not in the facts`);
+- the button tapped, latency and an error class name.
+
+The bot role may only `INSERT`. Logging never blocks or breaks an answer:
+
+- it runs after the reply is sent, in a daemon thread that is waited on for at most 1 s, with a 1.5 s statement timeout;
+- every error is swallowed; only the class name is logged;
+- if the table does not exist (or inserts are not granted), logging silently switches itself off for an hour;
+- `TELEGRAM_INTERACTION_LOG=off` turns it off completely.
+
+Retention is 90 days. The migration holds the `pg_cron` delete and the manual `DELETE` for that.
+`scripts/bot_interactions_weekly.sql` is a read-only weekly summary that shows:
+
+- top intents;
+- searches with no results;
+- the Gemini fallback rate and reasons;
+- the most common unanswered phrases;
+- errors.
+
+The migration also creates the `bot_interactions_weekly` view.
+
+## Digest idempotency (optional, proposed table)
+
+With `docs/proposed-migrations/telegram_digest_sends.sql` applied, the first claim for a Sarajevo date wins across
+Vercel instances and deploys:
+
+- the row is marked sent with the Telegram message id;
+- a failed send releases the claim, so the next cron call can retry;
+- a sent row can never be released.
+
+Until the table exists, the digest uses the in-process or `TELEGRAM_DIGEST_LEDGER` file ledger exactly as before. The
+response's `ledger` field says which one was used. Other database errors fail closed (no send) rather than risk a duplicate.
+
 ## Known MVP limits
 
 - Phrasing outside the parser's vocabulary gets the "can't answer" reply; widening it

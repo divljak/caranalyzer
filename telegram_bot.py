@@ -31,7 +31,9 @@ from telegram_intent import (
     looks_like_followup,
     parse_question,
 )
+from database.run_outcome import classify as run_outcome
 import telegram_llm
+import telegram_log
 
 
 LOG = logging.getLogger("telegram_bot")
@@ -199,7 +201,7 @@ def status_message(engine, lang=DEFAULT_LANGUAGE):
         _statement_timeout(connection)
         run = _one(connection, """
           SELECT status,started_at,finished_at,search_attempted,detail_attempted,
-            details_completed,observations,new_listings,errors
+            details_completed,observations,new_listings,errors,report
           FROM website_collection_runs
           WHERE finished_at IS NOT NULL
           ORDER BY started_at DESC,id DESC LIMIT 1
@@ -218,8 +220,10 @@ def status_message(engine, lang=DEFAULT_LANGUAGE):
             "SELECT max(observed_at) FROM listing_snapshots")).scalar()
     if not run:
         return t(lang, "status_none")
+    quality = (t(lang, "status_budget_limited") if run_outcome(run) == "budget_limited"
+               else status_label(lang, run["status"]))
     lines = [
-        t(lang, "status_title", quality=status_label(lang, run["status"])),
+        t(lang, "status_title", quality=quality),
         t(lang, "status_latest_attempt", when=_time(run["finished_at"] or run["started_at"], lang)),
         t(lang, "status_counts", obs=run["observations"], new=run["new_listings"], errors=run["errors"]),
         t(lang, "status_visits", search=run["search_attempted"], detail=run["detail_attempted"],
@@ -415,7 +419,7 @@ def _freshness_note(connection, lang=DEFAULT_LANGUAGE):
     """Return a warning when evidence is missing, stale or from a partial run."""
     latest = connection.execute(text("SELECT max(observed_at) FROM listing_snapshots")).scalar()
     run = _one(connection, """
-      SELECT status FROM website_collection_runs
+      SELECT status,errors,report FROM website_collection_runs
       WHERE finished_at IS NOT NULL ORDER BY started_at DESC,id DESC LIMIT 1
     """)
     if latest is None:
@@ -424,7 +428,7 @@ def _freshness_note(connection, lang=DEFAULT_LANGUAGE):
     age = datetime.now(timezone.utc) - _utc(latest)
     if age.total_seconds() > STALE_AFTER_HOURS * 3600:
         notes.append(t(lang, "fresh_stale", days=age.days, when=_time(latest, lang)))
-    if run and run["status"] != "completed":
+    if run and run_outcome(run) not in {"ok", "budget_limited"}:
         notes.append(t(lang, "fresh_run", status=status_label(lang, run["status"])))
     return " ".join(notes)
 
@@ -564,6 +568,7 @@ class Page:
     max_km: int | None = None
     items: tuple = ()  # (listing_id, year, price) of the cars shown, for the save buttons
     older_hidden: int = 0  # matches last seen 14-90 days ago that were left out
+    total: int = 0  # all matches (for the interaction log)
 
 
 @dataclass(frozen=True)
@@ -1377,7 +1382,7 @@ def answer_intent(engine, intent, config, lang=DEFAULT_LANGUAGE):
         return text_value, Page(stats.get("filters", intent.filters),
                                 following if following < total and following <= MAX_OFFSET else None,
                                 stats.get("min_year"), stats.get("max_km"), stats.get("items", ()),
-                                stats.get("older_hidden", 0))
+                                stats.get("older_hidden", 0), total)
     if intent.kind == "model_stats":
         label = intent.filters.search
         rows = ((t(lang, "btn_show_listings"), refine_callback(Filters(label))),)
@@ -1760,6 +1765,7 @@ def _deliver(call, config, chat_id, text_value, markup, replace_id, delete_on_fa
 
 def process_update(update: dict[str, Any], engine, config: TelegramConfig, *, call=telegram_call,
                    llm=_DEFAULT_LLM, phraser=_DEFAULT_LLM):
+    started = time.monotonic()
     if not isinstance(update, dict) or not isinstance(update.get("update_id"), int):
         return {"handled": False, "reason": "invalid_update"}
     chat, user_id, message, callback = _identity(update)
@@ -1774,6 +1780,7 @@ def process_update(update: dict[str, Any], engine, config: TelegramConfig, *, ca
     sender = callback.get("from") or message.get("from") or {}
     callback_data = callback.get("data") if callback else None
     edit_id = None  # a button tap that refines a search edits that message instead of adding a new one
+    trace = {"path": "button" if callback else "command"}
     intent = None
     free_text = None
     command, argument = "help", ""
@@ -1843,6 +1850,8 @@ def process_update(update: dict[str, Any], engine, config: TelegramConfig, *, ca
                 note_language(scope_key, strip_mentions(body))
             if addressed and not private:
                 free_text = with_pending_question(scope_key, body)
+                if free_text != body:
+                    trace["pending"] = True
             elif addressed or (not private and _in_conversation(scope_key)):
                 free_text = body
             elif looks_like_car_question(body) and is_open_group(chat, config, call):
@@ -1857,7 +1866,7 @@ def process_update(update: dict[str, Any], engine, config: TelegramConfig, *, ca
         if llm is not None or phraser is not None:
             placeholder_id = _send_placeholder(call, config, chat_id, lang)
         intent = _understand(free_text, message, private and scope_key, llm, _recall_history(history_key), lang,
-                             chat_kind)
+                             chat_kind, trace)
         command = intent.kind
     if intent is not None and intent.kind == "ignore":
         if placeholder_id is not None:
@@ -1868,6 +1877,7 @@ def process_update(update: dict[str, Any], engine, config: TelegramConfig, *, ca
         return {"handled": False, "reason": "acknowledgement"}
     markup = None
     chat_text = None
+    trace["phrasing"] = "off"
     try:
         if intent is not None and intent.kind == "llm_check":
             response = telegram_llm.check_message(telegram_llm.LLMConfig.from_env())
@@ -1878,8 +1888,11 @@ def process_update(update: dict[str, Any], engine, config: TelegramConfig, *, ca
                 _remember_scope(scope_key, intent)
             if free_text is not None and phraser is not None and intent.kind in DB_KINDS:
                 facts = html_to_text(response) if isinstance(response, Html) else response
+                telegram_llm.PHRASE_STATUS.set("")
                 phrased = phraser(free_text, facts, _recall_history(history_key), mode=intent.kind,
                                   language=lang, chat_kind=chat_kind)
+                trace["phrasing"] = "used" if phrased else "fallback"
+                trace["phrasing_reason"] = "" if phrased else telegram_llm.PHRASE_STATUS.get()
                 if phrased:
                     chat_text, show_details = phrased
                     show_details = show_details or intent.kind == "suggest"  # the user wants to see them
@@ -1890,23 +1903,54 @@ def process_update(update: dict[str, Any], engine, config: TelegramConfig, *, ca
                     if intent.kind == "find" and not show_details and isinstance(markup, Page) and markup.items:
                         # the listings are not on screen, so the first button should show page one
                         markup = Page(markup.filters, 0, markup.min_year, markup.max_km,
-                                      older_hidden=markup.older_hidden)
+                                      older_hidden=markup.older_hidden, total=markup.total)
             elif free_text is not None and intent.reply:
                 chat_text = intent.reply
         else:
             response = render_command(engine, command, argument, lang)
             if command == "start":
                 markup = example_choices(lang)
-    except SQLAlchemyError:
+    except SQLAlchemyError as error:
         response, markup = t(lang, "db_unavailable"), False
-    _deliver(call, config, chat_id, response, keyboard(config, markup, lang),
-             placeholder_id if placeholder_id is not None else edit_id,
-             delete_on_failure=placeholder_id is not None)
+        trace["error"] = type(error).__name__
+    try:
+        _deliver(call, config, chat_id, response, keyboard(config, markup, lang),
+                 placeholder_id if placeholder_id is not None else edit_id,
+                 delete_on_failure=placeholder_id is not None)
+    except TelegramAPIError:
+        trace["error"] = "TelegramAPIError"
+        _log_interaction(engine, config, trace, started, chat_kind, user_id, free_text, callback_data, intent,
+                         command, markup)
+        raise
+    _log_interaction(engine, config, trace, started, chat_kind, user_id, free_text, callback_data, intent,
+                     command, markup)
     if free_text is not None:
         _remember_turn(history_key, free_text, chat_text or html_to_text(response).split("\n", 1)[0])
     if not private:
         _mark_conversation(scope_key)  # keep listening to this person for a few minutes
     return {"handled": True, "command": command}
+
+
+def _log_interaction(engine, config, trace, started, chat_kind, user_id, free_text, button, intent, command,
+                     markup):
+    """Hand one interaction to the best-effort log (after the reply is out). Never raises."""
+    try:
+        path = trace.get("path", "command")
+        if trace.get("pending"):
+            path = "pending_" + path
+        result = shown = None
+        if isinstance(markup, Page):
+            result, shown = markup.total, len(markup.items)
+        if intent is None:
+            intent = Intent(command or "command")
+        telegram_log.record(engine, telegram_log.build_record(
+            chat_kind=chat_kind, user_id=user_id, secret=telegram_log.salt(config), message_text=free_text,
+            button=button, intent=intent, path=path, result_count=result, shown_count=shown,
+            phrasing=trace.get("phrasing"), phrasing_reason=trace.get("phrasing_reason"),
+            latency_ms=(time.monotonic() - started) * 1000, error=trace.get("error"),
+            bot_username=getattr(config, "bot_username", None)))
+    except Exception as error:
+        LOG.warning("bot interaction not logged: %s", type(error).__name__)
 
 
 def _needs_interpreter(intent, text_value):
@@ -1922,8 +1966,10 @@ def _needs_interpreter(intent, text_value):
         intent.filters.budget or intent.filters.year_min or intent.filters.mileage_max)
 
 
-def _understand(text_value, message, scope_key, llm, history=None, lang=DEFAULT_LANGUAGE, chat_kind=""):
+def _understand(text_value, message, scope_key, llm, history=None, lang=DEFAULT_LANGUAGE, chat_kind="", trace=None):
     """Deterministic parse first; Gemini for anything conversational or unreadable."""
+    trace = {} if trace is None else trace
+    trace["path"] = "parser"
     context = reply_context(message)
     remembered = _recall_scope(scope_key) if scope_key else None
     if context is None and remembered is not None and looks_like_followup(text_value):
@@ -1932,5 +1978,7 @@ def _understand(text_value, message, scope_key, llm, history=None, lang=DEFAULT_
     if llm is not None and _needs_interpreter(intent, text_value):
         interpreted = llm(text_value, context or remembered, history or [], language=lang, chat_kind=chat_kind)
         if interpreted is not None:
+            trace["path"] = "gemini"
             return interpreted
+        trace["path"] = "parser_after_gemini_failed"
     return intent

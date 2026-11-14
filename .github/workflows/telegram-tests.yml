@@ -9,11 +9,17 @@ on:
     paths:
       - .github/workflows/telegram-tests.yml
       - telegram_*.py
+      - database/run_outcome.py
+      - scripts/collector_health.py
+      - scripts/bot_interactions_weekly.sql
+      - docs/proposed-migrations/**
       - dealer_api.py
       - market_labels.py
       - database/**
       - supabase/migrations/**
       - tests/test_telegram_*.py
+      - tests/test_run_outcome.py
+      - tests/test_collector_health.py
       - requirements*.txt
 
 permissions:
@@ -57,7 +63,7 @@ jobs:
 
       - name: Build the schema from the Supabase migrations
         run: |
-          for role in anon authenticated service_role car_analyzer_sync car_analyzer_collector car_analyzer_backup; do
+          for role in anon authenticated service_role car_analyzer_sync car_analyzer_collector car_analyzer_backup car_analyzer_app; do
             psql -q -v ON_ERROR_STOP=1 -c "CREATE ROLE $role"
           done
           for file in supabase/migrations/*.sql; do
@@ -70,4 +76,7 @@ jobs:
           tests.test_telegram_bot tests.test_telegram_llm tests.test_telegram_digest
           tests.test_telegram_experience tests.test_telegram_questions tests.test_telegram_companion
           tests.test_telegram_junk_search tests.test_telegram_shortlist tests.test_telegram_follow
-          tests.test_telegram_group_window tests.test_telegram_chat_setup
+          tests.test_telegram_group_window tests.test_telegram_chat_setup tests.test_telegram_log
+
+      - name: Run the run-outcome and health-check tests
+        run: PYTHONPATH=tests .venv/bin/python -m unittest -v tests.test_run_outcome tests.test_collector_health

@@ -128,6 +128,9 @@ jobs:
           for k in ("status", "search_attempted", "search_retries", "detail_attempted", "details_completed",
                     "observations", "new_listings", "errors", "stopped_reason"):
               print(f"| {k} | {c.get(k)} |")
+          budget_limited = (c.get("status") == "partial" and not c.get("errors") and not c.get("rejected")
+                            and c.get("stopped_reason") == "discovery_budget_incomplete")
+          print(f"| outcome | {'budget_limited (healthy: daily page budget used, no errors)' if budget_limited else c.get('status')} |")
           print(f"| exit_code | {d.get('exit_code')} |\n| failure_class | {d.get('failure_class')} |")
           for f in c.get("failures") or []:
               keep = {k: f.get(k) for k in ("phase", "page", "attempt", "exception", "navigation_ms", "dom_ms",

@@ -12,6 +12,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from database.collector_connection import LockedSession, private_engine, verify_connection
+from database.run_outcome import exit_code
 from scripts.backup_supabase import backup
 from scripts.sync_supabase import private_json, stamp
 
@@ -119,7 +120,7 @@ def main(argv=None):
                         report = sync(db_manager, store, browser, search_pages=3, detail_checks=20,
                                       delay=15, session_prefix='direct-')
                 result['collection'] = report
-                status = 0 if report['status'] == 'completed' else 1
+                status = exit_code(report)  # 0 also for a run limited only by the page budget
                 with c.begin():
                     refresh_labels(c)
             result['after'] = backup(backup_engine, args.state_dir, 'after')

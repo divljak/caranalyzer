@@ -55,14 +55,31 @@ if (arguments[0] === 'search') {
       price:clean(a.querySelector('.price-wrap .smaller:not(.discount)')),
       tags:Array.from(a.querySelectorAll('.standard-tag')).map(clean),
       dealer:/PIK SHOP/.test(a.innerText)}));
-  // PIK cards no longer mark shops, so seller type stays unknown (null) rather than guessed.
+  // PIK cards do not show "PIK SHOP" any more, but the page's own Nuxt payload (#__NUXT_DATA__, a
+  // devalue array whose object fields are indexes into the array) carries shop:true|false per ad.
+  // Only a real boolean for a matching ad id counts; anything else leaves seller type unknown (null).
+  const shopById = {};
+  try {
+    const node = document.getElementById('__NUXT_DATA__');
+    const data = node ? JSON.parse(node.textContent) : null;
+    if (Array.isArray(data)) {
+      const at = i => (Number.isInteger(i) && i >= 0 && i < data.length) ? data[i] : undefined;
+      for (const item of data) {
+        if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+        if (!('shop' in item && 'title' in item && 'id' in item)) continue;
+        const id = at(item.id), shop = at(item.shop);
+        if ((typeof id === 'number' || typeof id === 'string') && typeof shop === 'boolean') shopById[String(id)] = shop;
+      }
+    }
+  } catch (e) { /* no payload: seller type stays unknown */ }
+  const adId = href => { const m = /\/artikal\/(?:[^/]*-)?(\d{6,20})\/?$/.exec(href || ''); return m ? m[1] : null; };
   cards = cards.concat(Array.from(document.querySelectorAll('article.listing-card')).filter(visible)
     .map(card => [card, card.querySelector('a.listing-card__title-link[href*="/artikal/"]')])
     .filter(([card, link]) => link)
     .map(([card, link]) => ({url:link.getAttribute('href'), title:clean(link),
       price:priceText(card.querySelector('.listing-card__price strong')),
       tags:Array.from(card.querySelectorAll('.listing-card__attributes > span')).map(clean),
-      dealer:null})));
+      dealer:(adId(link.getAttribute('href')) in shopById) ? shopById[adId(link.getAttribute('href'))] : null})));
 }
 let currentPage = null, lastPage = null;
 const pager = document.querySelector('nav.ui-pagination');

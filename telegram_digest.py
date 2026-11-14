@@ -10,8 +10,12 @@ import threading
 from urllib.parse import quote, urlparse
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import text
+import logging
 
+from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
+
+from database.run_outcome import classify
 from telegram_i18n import plural_bs, t
 from telegram_bot import (
     Html,
@@ -44,7 +48,7 @@ _MONTHS = (
 
 RUN_SQL = """
   SELECT status,started_at,finished_at,search_attempted,detail_attempted,
-    details_completed,observations,new_listings,errors
+    details_completed,observations,new_listings,errors,report
   FROM website_collection_runs
   WHERE finished_at IS NOT NULL
   ORDER BY started_at DESC,id DESC LIMIT 1
@@ -201,6 +205,70 @@ class FileLedger:
             self._write(data)
 
 
+LOG = logging.getLogger("telegram_digest")
+_MISSING_TABLE = "42P01"
+_NO_PERMISSION = "42501"
+
+
+def _unavailable(error):
+    """True when the ledger table is missing or the role may not use it (not yet applied)."""
+    code = getattr(getattr(error, "orig", None), "pgcode", None) or getattr(getattr(error, "orig", None), "sqlstate", None)
+    return code in {_MISSING_TABLE, _NO_PERMISSION}
+
+
+class DatabaseLedger:
+    """One digest per Sarajevo date, recorded in Supabase (docs/proposed-migrations/telegram_digest_sends.sql).
+
+    Until that table exists (or if the bot role cannot use it) every call falls back to ``fallback``,
+    the ledger the bot used before, so nothing changes. Other database errors are raised: if the
+    ledger cannot be read, no digest is sent rather than risking a duplicate.
+    """
+
+    def __init__(self, engine, fallback, chat_id=0):
+        self.engine = engine
+        self.fallback = fallback
+        self.chat_id = chat_id
+        self.durable = None  # None until known; False after the table proved unavailable
+
+    def _run(self, sql, params):
+        if self.durable is False:
+            return None
+        try:
+            with self.engine.begin() as connection:
+                connection.execute(text("SET LOCAL statement_timeout = '5s'"))
+                result = connection.execute(text(sql), params).scalar()
+        except DBAPIError as error:
+            if not _unavailable(error):
+                raise
+            if self.durable is not False:
+                LOG.warning("digest ledger table unavailable; using the in-process ledger")
+            self.durable = False
+            return None
+        self.durable = True
+        return result
+
+    def claim(self, day):
+        claimed = self._run("""
+          INSERT INTO telegram_digest_sends(day,chat_id) VALUES (CAST(:day AS date),:chat)
+          ON CONFLICT(day) DO NOTHING RETURNING 1
+        """, {"day": day, "chat": self.chat_id})
+        if self.durable is False:
+            return self.fallback.claim(day)
+        return claimed == 1
+
+    def release(self, day):
+        self._run("DELETE FROM telegram_digest_sends WHERE day=CAST(:day AS date) AND sent_at IS NULL RETURNING 1",
+                  {"day": day})
+        if self.durable is False:
+            self.fallback.release(day)
+
+    def mark_sent(self, day, message_id):
+        self._run("""
+          UPDATE telegram_digest_sends SET sent_at=(now() AT TIME ZONE 'UTC'),message_id=:message
+          WHERE day=CAST(:day AS date) AND sent_at IS NULL RETURNING 1
+        """, {"day": day, "message": message_id if isinstance(message_id, int) else None})
+
+
 _MEMORY_LEDGER = MemoryLedger()
 
 
@@ -338,12 +406,9 @@ def assess(evidence):
     clean = _aware(evidence.get("clean_at"))
     stale = clean is None or (now - clean) > timedelta(days=STALE_CLEAN_DAYS)
     run = evidence.get("run")
-    partial = (
-        not run
-        or str(run.get("status") or "").lower() != "completed"
-        or int(run.get("errors") or 0) > 0
-    )
-    return {"trends_stale": stale, "partial": partial, "empty": not run}
+    outcome = classify(run)
+    partial = outcome not in {"ok", "budget_limited"}
+    return {"trends_stale": stale, "partial": partial, "empty": not run, "outcome": outcome}
 
 
 def _status_line(run, flags):
@@ -354,6 +419,8 @@ def _status_line(run, flags):
     errors = int(run.get("errors") or 0)
     counts = (f"{new} {plural_bs(new, 'novi oglas', 'nova oglasa', 'novih oglasa')} · "
               f"{errors} {plural_bs(errors, 'greška', 'greške', 'grešaka')}")
+    if flags.get("outcome") == "budget_limited":
+        return f"✅ Sve radi · {counts} · dnevni budžet stranica iskorišten"
     if not flags["partial"]:
         return f"✅ Sve radi · {counts}"
     if str(run.get("status") or "").lower() == "failed":
@@ -429,8 +496,9 @@ def render_digest(evidence, tz=SARAJEVO):
     ])
     details = []
     if run:
-        details.append(f"Pokušaj: {_stamp(run.get('finished_at') or run.get('started_at'), tz)} "
-                       f"({str(run.get('status') or 'nepoznato').lower()})")
+        shown_status = ("dnevni budžet stranica iskorišten" if flags.get("outcome") == "budget_limited"
+                        else str(run.get("status") or "nepoznato").lower())
+        details.append(f"Pokušaj: {_stamp(run.get('finished_at') or run.get('started_at'), tz)} ({shown_status})")
         details.append(f"{int(run.get('observations') or 0)} zapažanja · "
                        f"{int(run.get('new_listings') or 0)} prvi put viđeno kod nas · "
                        f"{int(run.get('errors') or 0)} {plural_bs(int(run.get('errors') or 0), 'greška', 'greške', 'grešaka')}")
@@ -552,7 +620,8 @@ def handle_digest(engine, *, headers, mode, environ=None, now=None, ledger=None,
     evidence = load_digest_evidence(engine, now)
     flags = assess(evidence)
     text = render_digest(evidence, config.timezone)
-    ledger = default_ledger(environ) if ledger is None else ledger
+    if ledger is None:
+        ledger = DatabaseLedger(engine, default_ledger(environ), config.chat_id)
     confirmed = _header(headers, "x-digest-confirm").strip() == TEST_SEND_CONFIRM
     plan = plan_delivery(
         mode=mode or "dry",
@@ -587,4 +656,11 @@ def handle_digest(engine, *, headers, mode, environ=None, now=None, ledger=None,
         raise
     if isinstance(result, dict):
         body["message_id"] = result.get("message_id")
+    mark = getattr(ledger, "mark_sent", None)
+    if mark:
+        try:
+            mark(plan["day"], body.get("message_id"))
+        except Exception:  # the message is out; a failed bookkeeping update must not report a failure
+            LOG.warning("digest ledger could not record the sent message")
+    body["ledger"] = "database" if getattr(ledger, "durable", None) else "process"
     return 200, body
