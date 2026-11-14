@@ -56,7 +56,7 @@ class ValidationTests(unittest.TestCase):
         good = {"reply": "Ima 242 Golfa do 15.000 KM, najnoviji je iz 2015.", "show_details": False}
         self.assertEqual((good["reply"], False), phrase("golf do 15000", FACTS, CFG, post=Mock(return_value=ok(good))))
         for bad_reply in ("Ima oko 300 Golfa.", "Golf 2015 je pouzdan, 14.500 KM.", "242 Golfa, pogledaj olx.ba/artikal",
-                          "Vidi https://olx.ba/artikal/1", "Pitaj @neko", "x" * 700, "", "242 `code`"):
+                          "Vidi https://olx.ba/artikal/1", "Pitaj @neko", "x" * (telegram_llm.MAX_REPLY_CHARS + 1), "", "242 `code`"):
             plan = {"reply": bad_reply, "show_details": True}
             self.assertIsNone(phrase("golf do 15000", FACTS, CFG, post=Mock(return_value=ok(plan))), bad_reply)
 

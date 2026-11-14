@@ -14,13 +14,19 @@ import telegram_bot
 import telegram_i18n
 import telegram_llm
 from telegram_bot import (
-    Choices, Page, TelegramConfig, answer_intent, budget_choices, example_choices, find_message,
+    Choices, Page, TelegramConfig, answer_intent, budget_choices, example_choices,
     keyboard, parse_suggest_callback, process_update, status_message, suggest_callback, suggest_message,
     trends_message,
 )
 from telegram_i18n import STRINGS, detect_language, plural_bs, t, telegram_language
 from telegram_intent import Filters, Intent, context_from_reply
 from test_telegram_questions import QuestionQueryTests
+import telegram_bot
+
+def find_message(*args, **kwargs):
+    """The search answer as the reader sees it: HTML tags removed, link targets kept."""
+    return telegram_bot.html_to_text(telegram_bot.find_message(*args, **kwargs), keep_links=True)
+
 
 ENV = {
     "TELEGRAM_BOT_TOKEN": "test-only-token",
@@ -418,7 +424,7 @@ class BosnianAnswerDbTests(unittest.TestCase):
         self.seed_many()
         reply = find_message(self.engine, Filters("golf", 15000), lang="bs")
         self.assertTrue(reply.startswith("Viđeni oglasi · golf · do 15.000 KM"))
-        self.assertIn("Prikazujem 1–5 od 7 rezultata iz baze", reply)
+        self.assertIn("Prikazujem 1–5 od 7 oglasa viđenih u zadnjih 14 dana", reply)
         self.assertIn("Viđeno juče", reply)
         self.assertIn("Ovo su viđene tražene cijene", reply)
         self.assertNotIn("Showing", reply)
@@ -427,7 +433,10 @@ class BosnianAnswerDbTests(unittest.TestCase):
 
     def test_old_sightings_are_flagged_in_bosnian(self):
         self.seed_suggest()
-        reply = find_message(self.engine, Filters("golf", 8500), lang="bs")
+        hidden = find_message(self.engine, Filters("golf", 8500), lang="bs")
+        self.assertIn("Ništa odgovarajuće nije viđeno u zadnjih 14 dana.", hidden)
+        self.assertIn("(viđeni prije 14–90 dana, možda više nisu aktivni): 1.", hidden)
+        reply = find_message(self.engine, Filters("golf", 8500, include_old=True), lang="bs")
         self.assertIn("⚠ Viđeno prije 4 sedmice", reply)
         self.assertIn("oglas možda više nije aktivan", reply)
 
@@ -468,8 +477,8 @@ class BosnianAnswerDbTests(unittest.TestCase):
 
     def test_english_output_is_unchanged(self):
         self.seed_suggest()
-        reply = find_message(self.engine, Filters("golf", 8500))
-        self.assertIn("Showing 1 of 1 database matches", reply)
+        reply = find_message(self.engine, Filters("golf", 8500, include_old=True))
+        self.assertIn("Showing 1 of 1 listings seen in the last 90 days", reply)
         self.assertIn("⚠ Seen 4 weeks ago", reply)
         self.assertEqual(find_message(self.engine, Filters("golf", 8500)),
                          find_message(self.engine, Filters("golf", 8500), lang="en"))

@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 from fastapi.testclient import TestClient
 
 import dealer_api
-from telegram_bot import TelegramAPIError, TelegramConfigurationError
+from telegram_bot import Html, TelegramAPIError, TelegramConfigurationError, html_to_text
 from telegram_digest import (
     CUTS_SQL,
     CLEAN_SQL,
@@ -90,6 +90,10 @@ def evidence(**overrides):
                 "model": "A4",
                 "year": 2015,
                 "price": 22000,
+                "mileage": 160000,
+                "n": 6,
+                "med_price": 26800,
+                "discount_pct": 18,
                 "first_seen_at": utc("2026-11-05T07:18:00"),
             },
             {
@@ -98,6 +102,10 @@ def evidence(**overrides):
                 "model": "Megane",
                 "year": 2017,
                 "price": 16400,
+                "mileage": 120000,
+                "n": 5,
+                "med_price": 19500,
+                "discount_pct": 16,
                 "first_seen_at": utc("2026-11-05T07:19:00"),
             },
         ],
@@ -106,28 +114,43 @@ def evidence(**overrides):
     return base
 
 
+def visible(html_text):
+    """What a reader sees (tags removed, entities decoded)."""
+    return html_to_text(html_text)
+
+
 class DigestRendererTests(unittest.TestCase):
-    def test_partial_stale_digest_is_compact_and_honest(self):
+    def test_partial_stale_digest_is_friendly_html_and_honest(self):
         text = render_digest(evidence(), SARAJEVO)
-        self.assertGreaterEqual(len(text), 900)
-        self.assertLessEqual(len(text), 1200)
-        self.assertIn("djelimično (partial)", text)
-        self.assertIn("110 zapažanja", text)
-        self.assertIn("47 prvi put viđeno kod nas (first seen)", text)
-        self.assertIn("stale clean anchor", text)
-        self.assertIn("price cuts", text)
-        self.assertIn("214", text)
-        self.assertIn("https://olx.ba/artikal/1001", text)
-        self.assertIn("https://olx.ba/artikal/2001", text)
-        self.assertIn("nije prodaja", text)
-        self.assertIn("nije provjeren datum objave", text)
-        lowered = text.lower()
-        for banned in ("sold", "prodat", "newly posted", "novo objav", "deal", "preporuk"):
+        self.assertIsInstance(text, Html)
+        self.assertLessEqual(len(text), 4096)
+        lines = text.split("\n")
+        self.assertEqual("🚗 <b>Garaža · četvrtak 5. nov</b>", lines[0])
+        self.assertEqual("⚠️ Djelimičan prolaz kolektora · 47 novih oglasa · 5 grešaka", lines[1])
+        self.assertIn("⚠️ Zadnji potpuno čist prolaz: 1. okt, 19:31", text)
+        self.assertIn("📉 <b>Padovi cijena (7 dana): 3</b>", text)
+        self.assertIn('• <a href="https://olx.ba/artikal/1001">Volkswagen Golf 2016</a>: '
+                      "<b>18.500 KM</b> <s>19.200</s> (−4%)", text)
+        self.assertIn("• …još 1", text)
+        self.assertNotIn("https://olx.ba/artikal/1001\n", visible(text))  # no raw URLs on screen
+        self.assertNotIn("olx.ba", visible(text))
+        self.assertIn("🆕 <b>Najzanimljivije novo</b>", text)
+        self.assertIn('<a href="https://olx.ba/artikal/2001">Audi A4 2015</a>: <b>22.000 KM</b>', text)
+        self.assertIn("18% ispod medijana 26.800 KM za 6 sličnih", text)
+        self.assertIn("<blockquote expandable>🔧 Detalji kolektora", text)
+        self.assertTrue(text.endswith("</blockquote>"))
+        details = text[text.index("<blockquote"):]
+        for fact in ("110 zapažanja", "47 prvi put viđeno kod nas", "Posjete: 4 pretrage", "214 oglasa"):
+            self.assertIn(fact, details)
+        self.assertIn("<i>Tražene cijene, ne prodajne.", text)
+        self.assertIn("Nestanak iz pretrage nije prodaja", text)
+        self.assertIn("ne datum objave", text)
+        lowered = visible(text).lower()
+        for banned in ("sold", "prodat", "newly posted", "novo objav", "deal", "preporuku", "najbolj"):
             self.assertNotIn(banned, lowered)
 
-    def test_fresh_clean_run_keeps_the_trend_line(self):
+    def test_clean_run_is_one_green_line_and_hides_the_stale_warning(self):
         text = render_digest(evidence(
-            generated_at=utc("2026-11-05T08:45:00"),
             clean_at=utc("2026-11-04T17:31:22"),
             run={
                 "status": "completed",
@@ -137,14 +160,27 @@ class DigestRendererTests(unittest.TestCase):
                 "detail_attempted": 4,
                 "details_completed": 4,
                 "observations": 80,
-                "new_listings": 2,
+                "new_listings": 76,
                 "errors": 0,
             },
         ), SARAJEVO)
-        self.assertIn("čisto (clean)", text)
-        self.assertIn("Uzorak: 214 oglasa", text)
-        self.assertNotIn("stale clean anchor", text)
-        self.assertLessEqual(len(text), 1200)
+        self.assertEqual("✅ Sve radi · 76 novih oglasa · 0 grešaka", text.split("\n")[1])
+        self.assertNotIn("⚠️", text)  # a warning sign appears only when something is wrong
+        self.assertNotIn("Zadnji potpuno čist prolaz:", text.split("<blockquote")[0])
+
+    def test_no_interesting_section_without_grounded_standouts(self):
+        text = render_digest(evidence(first_seen=[]), SARAJEVO)
+        self.assertNotIn("Najzanimljivije", text)
+
+    def test_names_are_escaped_and_long_digests_stay_under_the_limit(self):
+        cut = {"listing_id": "9<9", "make": "A&B <script>", "model": "M\"x", "year": 2020,
+               "asking_price": 1000, "previous_price": 2000, "observed_at": utc("2026-11-04T09:00:00")}
+        text = render_digest(evidence(notable_cuts=[cut] * 400, price_drops=400), SARAJEVO)
+        self.assertLessEqual(len(text), 4000)
+        self.assertNotIn("<script>", text)
+        self.assertIn("A&amp;B &lt;script&gt; M&quot;x 2020", text)
+        self.assertIn('href="https://olx.ba/artikal/9%3C9"', text)
+        self.assertTrue(text.endswith("</blockquote>"))  # optional rows were dropped, not the tail
 
     def test_empty_digest_states_that_nothing_was_observed(self):
         text = render_digest({
@@ -158,11 +194,9 @@ class DigestRendererTests(unittest.TestCase):
             "notable_cuts": [],
             "first_seen": [],
         }, SARAJEVO)
-        self.assertIn("(empty)", text)
-        self.assertIn("Nema završenog prolaza", text)
-        self.assertIn("stale clean anchor", text)
-        self.assertIn("0", text)
-        self.assertLessEqual(len(text), 1200)
+        self.assertIn("⚠️ Nema završenog prolaza kolektora", text)
+        self.assertIn("Nema zabilježenih padova", text)
+        self.assertIn("nema zapisa", text)
         self.assertNotIn("sold", text.lower())
 
     def test_queries_do_not_infer_sales_or_publish_dates(self):
@@ -252,7 +286,7 @@ class DigestDeliveryTests(unittest.TestCase):
                 now=utc("2026-11-05T12:00:00"), ledger=ledger, call=call)
         self.assertEqual(200, dry_status)
         self.assertEqual("dry_render", dry["reason"])
-        self.assertIn("djelimično (partial)", dry["text"])
+        self.assertIn("Djelimičan prolaz", dry["text"])
         self.assertTrue(dry["stale"])
         self.assertTrue(dry["partial"])
         self.assertEqual(200, test_status)
@@ -263,8 +297,15 @@ class DigestDeliveryTests(unittest.TestCase):
         self.assertEqual("sendMessage", calls[0][0])
         self.assertEqual(-5332163835, calls[0][1]["chat_id"])
         self.assertNotIn(TOKEN, json.dumps(calls[0][1]))
-        labels = [button["text"] for button in calls[0][1]["reply_markup"]["inline_keyboard"][0]]
-        self.assertEqual(["Market", "Compare", "Following"], labels)
+        payload = calls[0][1]
+        self.assertEqual("HTML", payload["parse_mode"])
+        self.assertTrue(payload["disable_web_page_preview"])
+        self.assertEqual({"is_disabled": True}, payload["link_preview_options"])
+        rows = [[button["text"] for button in row] for row in payload["reply_markup"]["inline_keyboard"]]
+        self.assertEqual([["📉 Svi padovi", "🆕 Novi oglasi"], ["🔍 Pretraga"], ["Market", "Compare", "Following"]],
+                         rows)
+        data = [button.get("callback_data") for row in payload["reply_markup"]["inline_keyboard"][:2] for button in row]
+        self.assertEqual(["drops", "latest", "search"], data)
 
     def test_failed_send_can_be_retried(self):
         ledger = MemoryLedger()

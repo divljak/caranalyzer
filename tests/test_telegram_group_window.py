@@ -38,6 +38,101 @@ def say(text_value, *, user=123, chat_id=GROUP, chat_type="supergroup", uid=1, e
     return {"update_id": uid, "message": message}
 
 
+QUESTION = "Auto do 20000km, staro do 10 godina koje najlakse mogu prodati"
+
+
+def telegram(member_count=3, members=("member", "administrator")):
+    """A fake Telegram API: the group has ``member_count`` members; allowlisted users have these statuses."""
+    statuses = dict(zip((123, 456), members))
+
+    def call(_config, method, payload):
+        if method == "getChatMemberCount":
+            return member_count
+        if method == "getChatMember":
+            return {"status": statuses.get(payload["user_id"], "left"), "user": {"id": payload["user_id"]}}
+        return {"message_id": 1}
+    return Mock(side_effect=call)
+
+
+class GroupConversationTests(unittest.TestCase):
+    """The real case: a question without a tag, a nudge, then '@bot hey' answered in English."""
+
+    def setUp(self):
+        for store in (telegram_bot._SCOPES, telegram_bot._HISTORY, telegram_bot._LANGS, telegram_bot._ACTIVE,
+                      telegram_bot._PENDING, telegram_bot._OPEN):
+            store.clear()
+
+    def run_update(self, update, call):
+        with patch("telegram_bot.answer_intent", return_value=("answer", False)) as answer:
+            result = process_update(update, Mock(), CONFIG, call=call, llm=None, phraser=None)
+        return result, answer
+
+    def test_a_small_all_allowlisted_group_gets_answers_without_a_tag(self):
+        call = telegram()
+        result, answer = self.run_update(say(QUESTION), call)
+        self.assertTrue(result["handled"])
+        intent = answer.call_args.args[1]
+        self.assertEqual("liquidity", intent.kind)
+        self.assertEqual(20000, intent.filters.mileage_max)
+        self.assertEqual("bs", answer.call_args.kwargs["lang"])
+        methods = [c.args[1] for c in call.call_args_list]
+        self.assertEqual(["getChatMemberCount", "getChatMember", "getChatMember", "sendMessage"], methods)
+        for chatter in ("ajmo na kafu", "haha dobro", "jesi li vidio utakmicu", "ok"):
+            result, answer = self.run_update(say(chatter, user=456, uid=9), call)
+            self.assertFalse(result["handled"], chatter)
+            answer.assert_not_called()
+        self.assertEqual(3, sum(c.args[1].startswith("getChat") for c in call.call_args_list))  # cached
+
+    def test_a_group_with_anyone_not_allowlisted_still_needs_a_tag(self):
+        for call in (telegram(member_count=4), telegram(members=("member", "left")),
+                     telegram(member_count=40, members=("member", "member"))):
+            telegram_bot._OPEN.clear()
+            result, answer = self.run_update(say(QUESTION), call)
+            self.assertEqual("not_addressed", result["reason"])
+            answer.assert_not_called()
+            self.assertNotIn("sendMessage", [c.args[1] for c in call.call_args_list])
+
+    def test_a_vague_mention_answers_the_question_asked_just_before(self):
+        call = telegram(member_count=9)  # not an open group: tags are needed
+        self.assertEqual("not_addressed", self.run_update(say(QUESTION, uid=1), call)[0]["reason"])
+        self.assertEqual("not_addressed", self.run_update(say("Mozes li mi probaci ovo", uid=2), call)[0]["reason"])
+        result, answer = self.run_update(say("@mojagaraza_bot hey", uid=3), call)
+        self.assertTrue(result["handled"])
+        intent = answer.call_args.args[1]
+        self.assertEqual(("liquidity", 20000), (intent.kind, intent.filters.mileage_max))
+        self.assertEqual("bs", answer.call_args.kwargs["lang"])
+        # used once: the next vague mention is just a greeting again
+        result, answer = self.run_update(say("@mojagaraza_bot hey", uid=4), call)
+        self.assertEqual("chitchat", answer.call_args.args[1].kind)
+
+    def test_pending_questions_expire_with_the_group_window_and_stay_per_person(self):
+        call = telegram(member_count=9)
+        self.run_update(say(QUESTION, user=456, uid=1), call)
+        _, answer = self.run_update(say("@mojagaraza_bot probaj ovo", user=123, uid=2), call)
+        self.assertNotEqual("liquidity", answer.call_args.args[1].kind)  # someone else's question
+        self.run_update(say(QUESTION, uid=3), call)
+        with patch("telegram_bot.time.monotonic", return_value=telegram_bot.time.monotonic() + 400):
+            _, answer = self.run_update(say("@mojagaraza_bot probaj ovo", uid=4), call)
+        self.assertNotEqual("liquidity", answer.call_args.args[1].kind)
+
+    def test_hey_is_answered_in_the_language_the_person_writes_in(self):
+        call = telegram(member_count=9)
+        self.run_update(say("Mozes li mi probaci ovo", uid=1), call)
+        telegram_bot._PENDING.clear()
+        update = say("@mojagaraza_bot hey", uid=2, extra={"from": {"id": 123, "language_code": "en"}})
+        with patch("telegram_bot.answer_intent", wraps=telegram_bot.answer_intent) as answer:
+            process_update(update, Mock(), CONFIG, call=call, llm=None, phraser=None)
+        self.assertEqual("bs", answer.call_args.kwargs["lang"])
+        sent = [c.args[2]["text"] for c in call.call_args_list if c.args[1] == "sendMessage"][-1]
+        self.assertTrue(sent.startswith("Zdravo!"), sent)
+
+    def test_the_group_language_is_the_fallback_for_a_new_person(self):
+        call = telegram(member_count=9)
+        self.run_update(say("Mozes li mi probaci ovo", user=456, uid=1), call)
+        _, answer = self.run_update(say("@mojagaraza_bot hey", user=123, uid=2), call)
+        self.assertEqual("bs", answer.call_args.kwargs["lang"])
+
+
 class WindowTests(unittest.TestCase):
     def setUp(self):
         for store in (telegram_bot._SCOPES, telegram_bot._HISTORY, telegram_bot._LANGS, telegram_bot._ACTIVE):
