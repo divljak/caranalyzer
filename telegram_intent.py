@@ -34,9 +34,50 @@ class Filters:
     mileage_max: int | None = None
     family: bool = False  # "za porodicu": limit to roomier models (see telegram_bot.FAMILY_MODELS)
     include_old: bool = False  # also show listings last seen 14-90 days ago (hidden by default)
+    price_min: int | None = None  # lower price bound in KM ("od 50 - 60k"); ``budget`` is the upper one
+    year_max: int | None = None  # upper model-year bound ("2022 - 2024")
+
+    @property
+    def price_max(self):
+        """The upper price bound. Stored as ``budget`` because every older button and answer uses that name."""
+        return self.budget
+
+    def numeric(self):
+        """True when any price, year or mileage bound is set."""
+        return bool(self.budget or self.price_min or self.year_min or self.year_max or self.mileage_max)
 
     def is_empty(self):
-        return not (self.search or self.budget or self.year_min or self.mileage_max or self.family)
+        return not (self.search or self.numeric() or self.family)
+
+
+def merge_filters(base, new):
+    """Apply a follow-up's filters on top of the previous ones.
+
+    A bound the follow-up states replaces the old one; the opposite bound is kept only while it is
+    still consistent ("od 2020" after "2022-2024" keeps 2024; "do 40k" after "50-60k" drops 50k).
+    Anything the follow-up does not mention (search, mileage, family, ...) is kept.
+    """
+    def bounds(old_low, old_high, low, high):
+        if low is None and high is None:
+            return old_low, old_high
+        if low is None and old_low is not None and (high is None or old_low <= high):
+            low = old_low
+        if high is None and old_high is not None and (low is None or old_high >= low):
+            high = old_high
+        return low, high
+
+    price_min, budget = bounds(base.price_min, base.budget, new.price_min, new.budget)
+    year_min, year_max = bounds(base.year_min, base.year_max, new.year_min, new.year_max)
+    return Filters(
+        search=new.search or base.search,
+        budget=budget,
+        year_min=year_min,
+        mileage_max=new.mileage_max or base.mileage_max,
+        family=new.family or base.family,
+        include_old=new.include_old or base.include_old,
+        price_min=price_min,
+        year_max=year_max,
+    )
 
 
 @dataclass(frozen=True)
@@ -104,6 +145,9 @@ hi hey hello thx yes no yeah ok okay maybe also just really very quite enough so
 moj moja moje my nesto family porodica porodicu porodicni porodicno familiju sporty
 ne nije se ovo ono ovu gore probaj probati probaci probajte pogledaj this above try mileage kilometraza kilometraze
 kilometers kilometres najlakse najbrze prodati prodam lako brzo staro stari staru godina godine godinu
+godiste godista godistem izmedu izmedju between hiljada hiljade hiljadu tisuca tisuce thousand
+mislim mislio mislila stavio stavila stavili napisao napisala rekao rekla trazio trazila nisam nego
+pogresno krivo meant mean said asked wrote wanted wrong
 """.split())
 
 _MENTION = re.compile(r"@\w+")
@@ -128,20 +172,89 @@ def wants_older(folded):
     return re.search(_INCLUDE_OLD, folded) is not None
 
 
-def _extract_filters(folded, original):
-    """Return Filters plus the original text with recognised spans removed."""
+_RANGE_FROM = r"(?:(?P<lead>od|from|izmedj?u|between)\s*)?"
+_RANGE_SEP = r"\s*(?P<sep>-|–|—|do|to|until|i|and)\s*"
+_YEAR_SPAN = re.compile(
+    _RANGE_FROM + r"\b(?P<a>(?:19|20)[0-9]{2})" + _RANGE_SEP + r"(?P<b>(?:19|20)[0-9]{2})\b"
+    r"(?!\s*(?:k(?![a-z])|km|bam|kam|marak\w*|hiljad\w*|tisuc\w*|thousand|eur\w*|[.,]?000))")
+_THOUSANDS = r"k(?![a-z0-9])|hiljad\w*|tisuc\w*|thousand"
+_PRICE_UNIT = r"km|bam|kam|maraka|marke|marks?"
+_PRICE_SPAN = re.compile(
+    r"(?<![0-9.,])" + _RANGE_FROM
+    + r"(?P<a>[0-9]{1,3}(?:[., ][0-9]{3})+(?![0-9])|[0-9]+)\s*(?P<ma>" + _THOUSANDS + r")?\s*(?P<ua>" + _PRICE_UNIT
+    + r")?(?![a-z0-9])" + _RANGE_SEP
+    + r"(?P<b>[0-9]{1,3}(?:[., ][0-9]{3})+(?![0-9])|[0-9]+)\s*(?P<mb>" + _THOUSANDS + r")?\s*(?P<ub>" + _PRICE_UNIT
+    + r")?(?![a-z0-9])")
+
+
+def _year_range(folded):
+    """('2022 - 2024' | 'od 2022 do 2024' | 'izmedu 2018 i 2020') -> (match, low, high) or None."""
+    for match in _YEAR_SPAN.finditer(folded):
+        if match.group("sep") in {"i", "and"} and not match.group("lead"):
+            continue
+        low, high = sorted((int(match.group("a")), int(match.group("b"))))
+        if YEAR_RANGE[0] <= low <= high <= YEAR_RANGE[1] and low < high:
+            return match, low, high
+    return None
+
+
+def _price_range(folded, original, km_is_price):
+    """A two-sided amount: ('od 50 - 60k' | '50.000 do 60.000 KM' | 'izmedu 50 i 60 hiljada').
+
+    Returns (match, kind, low, high) where kind is "price" or "mileage", or None. A shared "k" /
+    "hiljada" applies to both ends ("50-60k" is 50.000-60.000). Lower-case "km" means mileage
+    unless ``km_is_price`` (a correction to a price question); "Km" is left to the one-tap question.
+    """
+    for match in _PRICE_SPAN.finditer(folded):
+        if match.group("sep") in {"i", "and"} and not match.group("lead"):
+            continue
+        units = [original[match.start(g):match.end(g)] for g in ("ua", "ub") if match.group(g)]
+        if len(units) == 2 and units[0] != units[1]:
+            continue  # "12000 KM do 200000 km": a price and a mileage, not one range
+        many_a, many_b = bool(match.group("ma")), bool(match.group("mb"))
+        low_digits = re.sub(r"[^0-9]", "", match.group("a"))
+        high_digits = re.sub(r"[^0-9]", "", match.group("b"))
+        if not low_digits or not high_digits:
+            continue
+        low, high = int(low_digits), int(high_digits)
+        if many_a or (many_b and low < 1000):
+            low *= 1000
+        if many_b or (many_a and high < 1000):
+            high *= 1000
+        if "km" in units and not km_is_price:
+            kind, bounds = "mileage", MILEAGE_RANGE
+        elif any(unit in {"Km", "kM"} for unit in units) and not km_is_price:
+            continue
+        else:
+            kind, bounds = "price", PRICE_RANGE
+        low, high = sorted((low, high))
+        if bounds[0] <= low < high <= bounds[1]:
+            return match, kind, low, high
+    return None
+
+
+def _extract_filters(folded, original, km_is_price=False):
+    """Return Filters plus the original text with recognised spans removed.
+
+    ``km_is_price``: read a lower-case "km" after an amount as a price (KM). Only set when the
+    message corrects a price question and says nothing about mileage.
+    """
     mask = [True] * len(original)
 
     def consume(match):
         for index in range(match.start(), match.end()):
             mask[index] = False
 
-    year = None
-    for pattern in (
+    year = year_max = None
+    span = _year_range(folded)
+    if span:
+        consume(span[0])
+        year, year_max = span[1], span[2]
+    for pattern in (() if span else (
         r"(?:from|since|after|newer than|od|iza|nakon|novije od)\s*((?:19|20)[0-9]{2})\b",
         r"\b((?:19|20)[0-9]{2})\s*(?:\+|or newer|or later|and newer|ili novije|i novije)",
         r"\b((?:19|20)[0-9]{2})\b",
-    ):
+    )):
         match = re.search(pattern, folded)
         if match:
             candidate = int(match.group(1))
@@ -164,10 +277,21 @@ def _extract_filters(folded, original):
                 break
 
     mileage = None
+    budget = price_min = None
     unit_unclear = None
+    price_span = _price_range(folded, original, km_is_price)
+    if price_span and all(mask[i] for i in range(price_span[0].start(), price_span[0].end())):
+        consume(price_span[0])
+        if price_span[1] == "price":
+            price_min, budget = price_span[2], price_span[3]
+        else:
+            mileage = price_span[3]
     # A number followed by "km" written in lowercase is mileage ("do 20000km"); "KM", "maraka" or
     # "BAM" is a price. A mixed-case "Km" could be either, so the bot asks instead of guessing.
+    # When correcting a price question (``km_is_price``) a lower-case "km" is read as KM too.
     for match in re.finditer(rf"(?<![0-9.,]){_AMOUNT}\s*(km|Km|kM)\b", original):
+        if mileage is not None or km_is_price:
+            break
         if not all(mask[i] for i in range(match.start(), match.end())):
             continue
         if match.group(3) == "km":
@@ -187,17 +311,18 @@ def _extract_filters(folded, original):
         if mileage is not None:
             break
         match = re.search(pattern, folded)
-        if match:
+        if match and all(mask[i] for i in range(match.start(1), match.end(1))):
             candidate = _amount(match.group(1), match.group(2), MILEAGE_RANGE)
             if candidate:
                 mileage = candidate
                 consume(match)
                 break
 
-    budget = None
     spans = [m for m in re.finditer(rf"(?<![0-9]){_AMOUNT}\s*(?:km|bam|kam|maraka|marks|eur|euro)?", folded)
              if all(mask[i] for i in range(m.start(), m.end()))]
     for match in spans:
+        if budget is not None:
+            break
         candidate = _amount(match.group(1), match.group(2), PRICE_RANGE)
         if candidate:
             budget = candidate
@@ -209,7 +334,7 @@ def _extract_filters(folded, original):
         consume(match)
     rest = "".join(char if keep else " " for char, keep in zip(original, mask))
     filters = Filters(budget=budget, year_min=year, mileage_max=mileage, family=wants_family(folded),
-                      include_old=wants_older(folded))
+                      include_old=wants_older(folded), price_min=price_min, year_max=year_max)
     _UNCLEAR[0] = unit_unclear
     return filters, rest
 
@@ -291,58 +416,115 @@ def looks_like_followup(text_value):
     if _FOLLOWUP_CUE.match(original):
         return True
     filters, rest = _extract_filters(fold(original), original)
-    numeric = filters.budget or filters.year_min or filters.mileage_max
-    return bool(numeric or filters.include_old) and not _search_tokens(rest)
+    return bool(filters.numeric() or filters.include_old) and not _search_tokens(rest)
+
+
+# "I meant / I said / no, rather ..." — the message corrects the previous answer's search.
+_CORRECTION = re.compile(
+    r"\b(?:mislim da sam|mislio sam|mislila sam|htio sam|htjela sam|rekao sam|rekla sam|napisao sam|"
+    r"napisala sam|stavio sam|stavila sam|trazio sam|trazila sam|"
+    r"nisam (?:trazio|trazila|rekao|rekla|stavio|stavila|napisao|napisala|mislio|mislila|htio|htjela)|"
+    r"ne\s*,?\s*(?:nego|vec)|pogresno|krivo si|nije to (?:sto|sta|ono)|"
+    r"i said|i meant|i asked for|i wrote|i wanted|no\s*,?\s*i (?:meant|said|want\w*)|not what i)\b")
+# "... a ti mi pokazuješ škodu od 33k": what the bot showed, not what the user wants. Cut it off so
+# its numbers are not read as new filters.
+_COMPLAINT = re.compile(
+    r"(?:^|[\s,;.!]+)(?:(?:a|ali|but|and|pa)\s+)?(?:ti\s+)?(?:mi\s+)?(?:si\s+)?(?:mi\s+)?"
+    r"(?:pokazujes|pokazes|pokazao|pokazala|pokazuje|dajes|nudis|izbacujes|izbacio|izbacila|vracas)\b.*$"
+    r"|(?:^|[\s,;.!]+)(?:(?:but|and)\s+)?you(?:'?re| are)?\s+(?:show|gave|give|giving|showing|showed|returned|sent|listed)\w*\b.*$",
+    re.S)
+
+
+def is_correction(text_value):
+    """True when a message corrects the previous question ("mislim da sam stavio ...", "ne, nego ...")."""
+    return _CORRECTION.search(fold(strip_mentions((text_value or "")[:MAX_QUESTION]))) is not None
 
 
 # Titles the bot puts on its first line, per language. Replies are parsed back from them, so a
-# follow-up works whichever language the answer was in.
+# follow-up works whichever language the answer was in. Kept equal to telegram_i18n (tested).
 _TITLES = (
     {"trends": "Observed asking-price changes · last ", "trends_unit": "days",
      "budget": "Recently observed at or below ", "find": "Observed listings", "upto": "up to ", "from": "from ",
-     "family": "for a family", "old": "incl. older"},
+     "family": "for a family", "old": "incl. older", "suggest": "Data-based shortlist",
+     "liquidity": "⏱ Fastest to disappear from our search"},
     {"trends": "Zabilježene promjene tražene cijene · zadnjih ", "trends_unit": "dana",
      "budget": "Nedavno viđeno do ", "find": "Viđeni oglasi", "upto": "do ", "from": "od ",
-     "family": "za porodicu", "old": "i stariji"},
+     "family": "za porodicu", "old": "i stariji", "suggest": "Uža lista na osnovu podataka",
+     "liquidity": "⏱ Najbrže nestaju iz naše pretrage"},
 )
+_DASH = r"\s*[–—-]\s*"
 
 
-def context_from_reply(reply_text):
-    """Recover the previous answer's scope from the bot message being replied to."""
-    first = (reply_text or "").strip().split("\n", 1)[0]
+def _title_filters(body, titles):
+    """Filters from the ' · '-separated pieces after an answer's title."""
+    values = {"search": "", "budget": None, "year_min": None, "mileage_max": None, "family": False,
+              "include_old": False, "price_min": None, "year_max": None}
+    upto, since = titles["upto"], titles["from"]
+    for piece in body.split(" · "):
+        piece = piece.strip()
+        if not piece:
+            continue
+        price_span = re.fullmatch(rf"([0-9.]+){_DASH}([0-9.]+) KM", piece)
+        year_span = re.fullmatch(rf"((?:19|20)[0-9]{{2}}){_DASH}((?:19|20)[0-9]{{2}})", piece)
+        if piece == titles["family"]:
+            values["family"] = True
+        elif piece == titles["old"]:
+            values["include_old"] = True
+        elif price_span:
+            values["price_min"] = _amount(price_span.group(1), None, PRICE_RANGE)
+            values["budget"] = _amount(price_span.group(2), None, PRICE_RANGE)
+        elif year_span:
+            values["year_min"] = _amount(year_span.group(1), None, YEAR_RANGE)
+            values["year_max"] = _amount(year_span.group(2), None, YEAR_RANGE)
+        elif piece.startswith(upto) and piece.endswith(" KM"):
+            values["budget"] = _amount(piece[len(upto):-3], None, PRICE_RANGE)
+        elif piece.startswith(since) and piece.endswith(" KM"):
+            values["price_min"] = _amount(piece[len(since):-3], None, PRICE_RANGE)
+        elif piece.startswith(upto) and piece.endswith(" km"):
+            values["mileage_max"] = _amount(piece[len(upto):-3], None, MILEAGE_RANGE)
+        elif piece.startswith(since) and piece[len(since):].strip().isdigit():
+            values["year_min"] = _amount(piece[len(since):], None, YEAR_RANGE)
+        elif piece.startswith(upto) and piece[len(upto):].strip().isdigit():
+            values["year_max"] = _amount(piece[len(upto):], None, YEAR_RANGE)
+        else:
+            values["search"] = clean_search(piece)
+    return Filters(**values)
+
+
+def _context_from_line(line):
     for titles in _TITLES:
-        if first.startswith(titles["trends"]):
-            match = re.match(rf"([0-9]{{1,2}}) {titles['trends_unit']}", first[len(titles["trends"]):])
+        if line.startswith(titles["trends"]):
+            match = re.match(rf"([0-9]{{1,2}}) {titles['trends_unit']}", line[len(titles["trends"]):])
             if match:
                 return Intent("trends", days=max(1, min(int(match.group(1)), 90)))
             return None
-        if first.startswith(titles["budget"]):
-            body = first[len(titles["budget"]):]
+        if line.startswith(titles["budget"]):
+            body = line[len(titles["budget"]):]
             amount_part, _, search = body.partition(" · ")
             budget = _amount(re.sub(r"\s*KM$", "", amount_part), None, PRICE_RANGE)
             if budget:
                 return Intent("find", Filters(clean_search(search), budget))
             return None
-        if first.startswith(titles["find"]):
-            search, budget, year, mileage, family, old = "", None, None, None, False, False
-            upto, since = titles["upto"], titles["from"]
-            for piece in first[len(titles["find"]):].split(" · "):
-                piece = piece.strip()
-                if not piece:
-                    continue
-                if piece == titles["family"]:
-                    family = True
-                elif piece == titles["old"]:
-                    old = True
-                elif piece.startswith(upto) and piece.endswith(" KM"):
-                    budget = _amount(piece[len(upto):-3], None, PRICE_RANGE)
-                elif piece.startswith(upto) and piece.endswith(" km"):
-                    mileage = _amount(piece[len(upto):-3], None, MILEAGE_RANGE)
-                elif piece.startswith(since) and piece[len(since):].strip().isdigit():
-                    year = _amount(piece[len(since):], None, YEAR_RANGE)
-                else:
-                    search = clean_search(piece)
-            return Intent("find", Filters(search, budget, year, mileage, family, old))
+        if line.startswith(titles["find"]):
+            return Intent("find", _title_filters(line[len(titles["find"]):], titles))
+        if line.startswith(titles["suggest"]):
+            filters = replace(_title_filters(line[len(titles["suggest"]):], titles), search="")
+            return Intent("suggest" if filters.budget else "find", filters)
+        if line.startswith(titles["liquidity"]):
+            return Intent("liquidity", _title_filters(line[len(titles["liquidity"]):], titles))
+    return None
+
+
+def context_from_reply(reply_text):
+    """Recover the previous answer's scope from the bot message being replied to.
+
+    The title is normally the first line; when Gemini phrased the answer, its sentences come first
+    and the database answer (with its title) follows, so the first line that reads as a title wins.
+    """
+    for line in (reply_text or "").strip().split("\n")[:40]:
+        found = _context_from_line(line.strip())
+        if found is not None:
+            return found
     return None
 
 
@@ -368,8 +550,50 @@ _ADVICE = r"\b(?:should i buy|what (?:car|to buy)|which car|recommend\w*|best (?
 _STATS = r"\b(?:how much|average|typical|median|cost\w*|price of|koliko|prosjecn\w*|cijena)\b"
 
 
-def parse_question(text_value, context=None):
-    """Turn one question into an Intent. ``context`` is an Intent from a replied-to answer."""
+CORRECTABLE = frozenset({"find", "suggest", "liquidity"})
+
+
+def km_reads_as_price(previous_filters, folded):
+    """Rule for a correction: "50.000km do 60.000km" means KM when the previous question was about
+    price (and not mileage) and the message itself says nothing about mileage."""
+    return (bool(previous_filters.budget or previous_filters.price_min) and not previous_filters.mileage_max
+            and re.search(_MILEAGE_CUES, folded) is None)
+
+
+def stated_filters(text_value, context=None):
+    """The price / year / mileage bounds a message states, read the same way ``parse_question``
+    reads them (including the km-as-KM rule for a correction). Used to ground Gemini's reading."""
+    original = strip_mentions((text_value or "")[:MAX_QUESTION]).strip()
+    folded = fold(original)
+    km_is_price = False
+    if context is not None and context.kind in CORRECTABLE and _CORRECTION.search(folded):
+        cut = _COMPLAINT.search(folded)
+        if cut:
+            original, folded = original[:cut.start()], folded[:cut.start()]
+        km_is_price = km_reads_as_price(context.filters, folded)
+    return _extract_filters(folded, original, km_is_price)[0]
+
+
+def _correct(original, folded, context):
+    """Merge a correction into the previous question's filters and keep its intent, or None."""
+    cut = _COMPLAINT.search(folded)
+    if cut:
+        original, folded = original[:cut.start()], folded[:cut.start()]
+    filters, rest = _extract_filters(folded, original, km_reads_as_price(context.filters, folded))
+    named = [token for token in _search_tokens(rest) if not token.isdigit()]
+    new = replace(filters, search=clean_search(" ".join(named)) if len(named) <= 3 else "")
+    if not (new.numeric() or new.search or new.family or new.include_old):
+        return None
+    merged = merge_filters(context.filters, new)
+    kind = context.kind
+    if kind == "suggest" and not merged.budget:
+        kind = "find"
+    return Intent(kind, merged, note="correction")
+
+
+def parse_question(text_value, context=None, _restating=False):
+    """Turn one question into an Intent. ``context`` is an Intent from a replied-to answer
+    (or, for a correction, the same person's previous question)."""
     original = strip_mentions((text_value or "")[:MAX_QUESTION]).strip()
     original = re.sub(r"^/ask(?:@\w+)?\s*", "", original, flags=re.I).strip()
     if not original:
@@ -380,6 +604,23 @@ def parse_question(text_value, context=None):
         return Intent("ignore")
     if re.search(_GREETING, folded):
         return Intent("chitchat")
+
+    if not _restating and _CORRECTION.search(folded):
+        if context is not None and context.kind in CORRECTABLE:
+            corrected = _correct(original, folded, context)
+            if corrected is not None:
+                return corrected
+        else:
+            # No earlier question to correct: read only what the user restates, never the part that
+            # describes what the bot showed. Without a price or a model there is nothing to re-run.
+            cut = _COMPLAINT.search(folded)
+            if cut:
+                original, folded = original[:cut.start()], folded[:cut.start()]
+            restated = parse_question(original, _restating=True) if original.strip() else Intent("unsupported")
+            if restated.kind in {"find", "suggest", "liquidity"} and (
+                    restated.filters.search or restated.filters.budget or restated.filters.price_min):
+                return restated
+            return Intent("clarify", note="correction")
     if re.search(_FORECAST, folded):
         return Intent("unsupported", note="forecast")
     if re.search(_CURRENCY, folded):
@@ -415,14 +656,15 @@ def parse_question(text_value, context=None):
     if re.search(_FOLLOW, folded):
         generic = {"model", "modeli", "modela", "models", "cars", "auta", "automobili"}
         named = " ".join(word for word in filters.search.split() if fold(word) not in generic)
-        if named and filters.budget is None and filters.year_min is None and filters.mileage_max is None:
+        if named and not filters.numeric():
             return Intent("follow", Filters(search=named))
         return Intent("following")
 
     model_words = [t for t in tokens if len(t) > 2 or any(c.isdigit() for c in t)]
     if filters.budget and re.search(_SUGGEST, folded) and (not model_words or len(model_words) >= 3):
         return Intent("suggest", Filters(budget=filters.budget, year_min=filters.year_min,
-                                          mileage_max=filters.mileage_max, family=filters.family))
+                                          mileage_max=filters.mileage_max, family=filters.family,
+                                          price_min=filters.price_min, year_max=filters.year_max))
 
     if filters.is_empty():
         if re.search(_ADVICE, folded):
@@ -435,23 +677,19 @@ def parse_question(text_value, context=None):
     if context and context.kind == "trends" and tokens and all(t.isdigit() for t in tokens):
         return Intent("trends", days=max(1, min(int(tokens[0]), 90)))
 
-    if len(tokens) > 4 or (not (filters.budget or filters.year_min or filters.mileage_max)
-                           and len(original.split()) >= 9):
+    if len(tokens) > 4 or (not filters.numeric() and len(original.split()) >= 9):
         return Intent("unsupported")  # a sentence, not a car name
 
     if context and context.kind == "find" and (not filters.is_empty() or filters.include_old):
-        return Intent("find", Filters(
-            search=filters.search or context.filters.search,
-            budget=filters.budget or context.filters.budget,
-            year_min=filters.year_min or context.filters.year_min,
-            mileage_max=filters.mileage_max or context.filters.mileage_max,
-            family=filters.family or context.filters.family,
-            include_old=filters.include_old or context.filters.include_old,
-        ))
+        return Intent("find", merge_filters(context.filters, filters))
+
+    if (context and context.kind in {"suggest", "liquidity"} and filters.numeric() and not filters.search
+            and (context.kind != "suggest" or context.filters.budget or filters.budget)):
+        # "a od 2020?" in reply to a shortlist: same question, narrower bounds
+        return Intent(context.kind, merge_filters(context.filters, filters))
 
     if not filters.is_empty():
-        if (filters.search and filters.budget is None and not filters.family and filters.year_min is None
-                and filters.mileage_max is None and re.search(_STATS, folded)):
+        if (filters.search and not filters.family and not filters.numeric() and re.search(_STATS, folded)):
             return Intent("model_stats", filters)
         return Intent("find", filters)
 

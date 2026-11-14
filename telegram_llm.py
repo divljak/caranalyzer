@@ -28,6 +28,7 @@ import requests
 
 from telegram_intent import _search_tokens
 from telegram_intent import (
+    CORRECTABLE,
     Filters,
     Intent,
     MAX_QUESTION,
@@ -35,6 +36,9 @@ from telegram_intent import (
     PRICE_RANGE,
     YEAR_RANGE,
     clean_search,
+    fold,
+    merge_filters,
+    stated_filters,
 )
 
 
@@ -73,7 +77,9 @@ Your job now: turn the user's latest message into ONE JSON request. You do not a
 
 Choose intent:
 - find: the user wants listings. Set search (make/model words only, e.g. "golf", "skoda octavia"), \
-and any of budget_km (max price in KM), year_min, mileage_max (km). Set family to true when they want \
+and any of budget_km (max price in KM), price_min_km (min price in KM), year_min, year_max, mileage_max (km). \
+A range sets both ends: "od 50 - 60k" or "između 50 i 60 hiljada" is price_min_km 50000 and budget_km \
+60000; "godište 2022 - 2024" is year_min 2022 and year_max 2024. Never drop either end of a range. Set family to true when they want \
 a car for a family or a roomy car (estate, MPV, SUV, kids). Set include_old to true only when they ask \
 to include older or possibly expired ads.
 - model_stats: asks what a model typically costs. Set search.
@@ -82,9 +88,10 @@ to include older or possibly expired ads.
 - status: asks whether data is fresh or the collector works.
 - latest: asks what is new.
 - suggest: the user gives a budget and asks what to buy, what is best, smartest or best selling, or \
-for suggestions. Set budget_km (and year_min / mileage_max if given). Without a budget use clarify.
-- liquidity: asks which cars sell fastest or are easiest to resell. Set search, budget_km, year_min, \
-mileage_max only if given. "km" in lower case after a number is mileage; "KM" is a price.
+for suggestions. Set budget_km (and price_min_km / year_min / year_max / mileage_max if given). Without a \
+budget use clarify.
+- liquidity: asks which cars sell fastest or are easiest to resell. Set search, budget_km, price_min_km, \
+year_min, year_max, mileage_max only if given. "km" in lower case after a number is mileage; "KM" is a price.
 - follow: the user wants to follow or track a model. Set search (make/model words).
 - following: asks what they follow, or what is new on the models they follow.
 - shortlist: asks to see the cars they saved or shortlisted.
@@ -98,8 +105,12 @@ reply saying you only know what the database shows, and offer what you can look 
 For clarify, chitchat and unsupported the reply must contain no numbers unless the user wrote them, \
 and no links. Prices are in KM. recent_turns (if any) is the conversation so far. If a previous \
 scope is given and the message only refines it (for example "cheaper", "newer", "what about \
-passat", "show me"), set refines_previous to true and fill only what changed. Leave unused fields \
-empty or null. Output JSON only."""
+passat", "show me"), set refines_previous to true and fill only what changed. If the message corrects \
+the previous question ("mislim da sam stavio ...", "ne, nego ...", "rekao sam ..."), use the previous \
+scope's intent, set refines_previous to true and fill the corrected values; when the previous scope is \
+about price, "50.000km do 60.000km" there means a price in KM unless the user talks about mileage. \
+Never reply that you cannot change their searches: a correction is simply run again. Leave unused \
+fields empty or null. Output JSON only."""
 
 PHRASE_PROMPT = PERSONA + """
 
@@ -122,7 +133,9 @@ SCHEMA = {
         "family": {"type": "boolean"},
         "include_old": {"type": "boolean"},
         "budget_km": {"type": "integer"},
+        "price_min_km": {"type": "integer"},
         "year_min": {"type": "integer"},
+        "year_max": {"type": "integer"},
         "mileage_max": {"type": "integer"},
         "days": {"type": "integer"},
         "compare_a": {"type": "string"},
@@ -204,7 +217,38 @@ def _check_text(value, allowed_numbers, limit=MAX_REPLY_CHARS):
         return "", "link or markup in reply"
     if not _numbers(value) <= allowed_numbers:
         return "", "number not in the facts"
+    if re.search(_CANNOT_CHANGE, fold(value)):
+        return "", "refused to redo a search"
     return value, ""
+
+
+# "I can't change your searches": never true (a correction is re-run), so never sent.
+_CANNOT_CHANGE = (r"\b(?:ne mogu|nemam moguc\w*|nisam u moguc\w*)\b[^.!?]{0,40}\b(?:mijenja\w*|promijen\w*|"
+                  r"izmijen\w*|ispravi\w*)|\bcan'?t (?:change|edit|modify|fix|update)\b|\bcannot (?:change|edit|modify)\b|"
+                  r"\b(?:unable|not able) to (?:change|edit|modify)\b")
+
+
+def bounds_match(filters, message, previous=None):
+    """True when ``filters`` (Gemini's reading) keeps every price and year bound the message states.
+
+    The message is read by the free parser (with the same correction rules), so a range like
+    "od 50 - 60k, 2022 - 2024" must come back as 50.000-60.000 KM and 2022-2024, not "up to 60.000".
+    """
+    stated = stated_filters(message, previous)
+    for name in ("price_min", "budget", "year_min", "year_max"):
+        want = getattr(stated, name)
+        if want is not None and getattr(filters, name) != want:
+            return False
+    return True
+
+
+def reply_keeps_range(reply, filters):
+    """A phrased reply must not narrow a range to one end ("do 60.000 KM" for 50.000–60.000 KM)."""
+    found = _numbers(reply)
+    for low, high in ((filters.price_min, filters.budget), (filters.year_min, filters.year_max)):
+        if low and high and (str(low) in found) != (str(high) in found):
+            return False
+    return True
 
 
 def _safe_text(value, allowed_numbers, limit=MAX_REPLY_CHARS):
@@ -263,33 +307,24 @@ def intent_from_plan(plan, previous=None, message="", history=None):
         return Intent("following")
     if kind == "shortlist":
         return Intent("shortlist")
-    if kind == "suggest":
-        budget = _bounded(plan.get("budget_km"), PRICE_RANGE)
-        if budget is None:
-            return Intent("clarify", reply=reply)
-        return Intent("suggest", Filters(
-            budget=budget,
-            year_min=_bounded(plan.get("year_min"), YEAR_RANGE),
-            mileage_max=_bounded(plan.get("mileage_max"), MILEAGE_RANGE),
-            family=family))
-    filters = Filters(
+    filters = _ordered(Filters(
         search=search,
         budget=_bounded(plan.get("budget_km"), PRICE_RANGE),
         year_min=_bounded(plan.get("year_min"), YEAR_RANGE),
         mileage_max=_bounded(plan.get("mileage_max"), MILEAGE_RANGE),
         family=family,
         include_old=include_old,
-    )
-    if plan.get("refines_previous") is True and previous is not None and previous.kind == "find":
-        base = previous.filters
-        filters = Filters(
-            search=filters.search or base.search,
-            budget=filters.budget or base.budget,
-            year_min=filters.year_min or base.year_min,
-            mileage_max=filters.mileage_max or base.mileage_max,
-            family=filters.family or base.family,
-            include_old=filters.include_old or base.include_old,
-        )
+        price_min=_bounded(plan.get("price_min_km"), PRICE_RANGE),
+        year_max=_bounded(plan.get("year_max"), YEAR_RANGE),
+    ))
+    if plan.get("refines_previous") is True and previous is not None and previous.kind in CORRECTABLE:
+        filters = merge_filters(previous.filters, filters)
+    if kind == "suggest":
+        if filters.budget is None:
+            return Intent("clarify", reply=reply)
+        return Intent("suggest", Filters(budget=filters.budget, year_min=filters.year_min,
+                                          mileage_max=filters.mileage_max, family=filters.family,
+                                          price_min=filters.price_min, year_max=filters.year_max))
     if kind == "liquidity":
         return Intent("liquidity", filters)
     if filters.is_empty():
@@ -297,13 +332,24 @@ def intent_from_plan(plan, previous=None, message="", history=None):
     return Intent("find", filters)
 
 
+def _ordered(filters):
+    """Swap a reversed range (min above max) instead of returning nothing."""
+    if filters.price_min and filters.budget and filters.price_min > filters.budget:
+        filters = Filters(**{**filters.__dict__, "price_min": filters.budget, "budget": filters.price_min})
+    if filters.year_min and filters.year_max and filters.year_min > filters.year_max:
+        filters = Filters(**{**filters.__dict__, "year_min": filters.year_max, "year_max": filters.year_min})
+    return filters
+
+
 def _previous_scope(previous):
     if previous is None:
         return None
-    if previous.kind == "find":
+    if previous.kind in CORRECTABLE:
         f = previous.filters
-        scope = {"intent": "find", "search": f.search, "budget_km": f.budget,
+        scope = {"intent": previous.kind, "search": f.search, "budget_km": f.budget,
                  "year_min": f.year_min, "mileage_max": f.mileage_max}
+        scope.update({key: value for key, value in (("price_min_km", f.price_min), ("year_max", f.year_max))
+                      if value is not None})
         scope.update({name: True for name in ("family", "include_old") if getattr(f, name)})
         return scope
     if previous.kind == "trends":

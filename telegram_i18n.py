@@ -109,6 +109,7 @@ STRINGS = {
         # chat
         "chitchat": "Hi! I answer questions about used cars from our olx.ba database, for example “Golf under 15000 KM”, “how much is an Octavia” or “Golf vs Octavia”. What are you looking for?",
         "clarify_suffix": "(I can only show what our database has observed; I can't pick a car for you.)",
+        "clarify_correction": "Sorry about that! I no longer have your previous search here. Reply to my answer with the fix, or write the whole search again, e.g. “50.000 to 60.000 KM, 2022 to 2024”, and I'll run it right away.",
         "clarify_currency": "Prices in our database are asking prices in KM. Please give the amount in KM, e.g. “Golf under 15000 KM”.",
         "clarify_default": "I can't pick a car for you; I can only show what our database has observed.\n\nTell me a budget and, if you like, a model, year or mileage limit. For example:\n• Golf under 15000 KM\n• Octavia from 2016 under 150000 km\n• compare Golf vs Octavia",
         "unsupported_forecast": "I don't forecast prices or markets. I can only report what our database has observed, e.g. “trends last 30 days” or “how much is a Golf”.",
@@ -269,6 +270,7 @@ STRINGS = {
         "suggest_foot2": "Niska cijena u odnosu na slične oglase može značiti i oštećenje, brzu prodaju ili pogrešan unos. Provjeri svaki oglas. Ovo su viđene tražene cijene, a ne preporuke.",
         "chitchat": "Zdravo! Odgovaram na pitanja o polovnim autima iz naše olx.ba baze, npr. „Golf do 15000 KM“, „koliko košta Octavia“ ili „Golf vs Octavia“. Šta tražiš?",
         "clarify_suffix": "(Mogu samo pokazati šta je naša baza vidjela; ne mogu umjesto tebe birati auto.)",
+        "clarify_correction": "Izvini, moja greška! Više ne vidim tvoju prethodnu pretragu. Odgovori (reply) na moju poruku s ispravkom ili napiši cijelu pretragu ponovo, npr. „od 50.000 do 60.000 KM, 2022–2024“, i odmah ću je ponoviti.",
         "clarify_currency": "Cijene u našoj bazi su tražene cijene u KM. Navedi iznos u KM, npr. „Golf do 15000 KM“.",
         "clarify_default": "Ne mogu umjesto tebe birati auto; mogu samo pokazati šta je naša baza vidjela.\n\nReci mi budžet, a ako želiš i model, godište ili ograničenje kilometraže. Na primjer:\n• Golf do 15000 KM\n• Octavia od 2016 do 150000 km\n• uporedi Golf i Octavia",
         "unsupported_forecast": "Ne predviđam cijene niti tržište. Mogu samo reći šta je naša baza vidjela, npr. „trend zadnjih 30 dana“ ili „koliko košta Golf“.",
