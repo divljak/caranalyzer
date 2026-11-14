@@ -151,5 +151,5 @@ jobs:
           name: car-analyzer-recovery-${{ github.run_id }}
           path: ${{ runner.temp }}/car-analyzer-recovery-${{ github.run_id }}.json.gz.age
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 30
           compression-level: 0
