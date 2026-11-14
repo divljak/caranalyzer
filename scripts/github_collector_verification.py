@@ -14,6 +14,10 @@ import tempfile
 PROJECT = "ojmokmsjppkqwppmrzpv"
 HOST = "aws-0-eu-north-1.pooler.supabase.com"
 SECRET_NAMES = ("COLLECTOR_DB_PASSWORD", "BACKUP_DB_PASSWORD")
+DAILY_WORKFLOW = "/.github/workflows/daily-collect.yml@"
+# Public-repo artifact: counts, timings and source URLs only. No credentials or backup content.
+DIAGNOSTIC_KEYS = ("started_at", "finished_at", "exit_code", "failure_class", "sqlstate",
+                   "connection", "backup_verified", "verify_only", "collection")
 
 
 class ConfigurationError(RuntimeError):
@@ -63,17 +67,41 @@ def encrypt_latest_backup(state_dir, output, recipient_file, *, environ, runner=
     return 0
 
 
+def collection_authorized(environ):
+    """A real collection needs a confirmed manual shadow run or the daily workflow itself."""
+    event = environ.get("GITHUB_EVENT_NAME")
+    shadow = event == "workflow_dispatch" and environ.get("COLLECTOR_SHADOW_CONFIRMATION") == "COLLECT_ONCE"
+    daily = (environ.get("COLLECTOR_RUN_MODE") == "daily" and event in {"workflow_dispatch", "schedule"}
+             and DAILY_WORKFLOW in environ.get("GITHUB_WORKFLOW_REF", ""))
+    return shadow or daily
+
+
+def write_diagnostics(state_dir, output, collect):
+    marker = "latest-direct-attempt.json" if collect else "latest-direct-verification.json"
+    source = state_dir / marker
+    try:
+        result = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        result = {"failure_class": "CollectorResultMissing"}
+    summary = {key: result[key] for key in DIAGNOSTIC_KEYS if key in result}
+    for stage in ("before", "after"):
+        if isinstance(result.get(stage), dict) and "counts" in result[stage]:
+            summary[f"{stage}_counts"] = result[stage]["counts"]
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(summary, indent=2, sort_keys=True, default=str), encoding="utf-8")
+    return summary
+
+
 def run_verification(image, environ=None, runner=subprocess.run, *, encrypted_backup=None,
-                     recipient_file=None, collect=False):
+                     recipient_file=None, collect=False, diagnostics=None):
     environ = dict(os.environ if environ is None else environ)
     if environ.get("GITHUB_ACTIONS") != "true":
         raise ConfigurationError("This wrapper only runs inside GitHub Actions")
     if not image or image.isspace():
         raise ConfigurationError("Collector image name is missing")
-    if collect and (environ.get("GITHUB_EVENT_NAME") != "workflow_dispatch" or
-                    environ.get("COLLECTOR_SHADOW_CONFIRMATION") != "COLLECT_ONCE"):
+    if collect and not collection_authorized(environ):
         raise ConfigurationError(
-            "Shadow collection requires a manual workflow dispatch and COLLECT_ONCE confirmation")
+            "Collection requires the daily workflow, or a manual dispatch with COLLECT_ONCE confirmation")
     if bool(encrypted_backup) != bool(recipient_file):
         raise ConfigurationError("Encrypted backup and recipient file must be provided together")
     encrypted_backup = Path(encrypted_backup) if encrypted_backup else None
@@ -102,7 +130,8 @@ def run_verification(image, environ=None, runner=subprocess.run, *, encrypted_ba
             "docker", "run", "--rm", "--read-only", "--cap-drop=ALL",
             "--security-opt=no-new-privileges",
             "--user", f"{os.getuid()}:{os.getgid()}",
-            "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
+            # Chromium needs a writable HOME and room for its profile in /tmp.
+            "--tmpfs", "/tmp:rw,noexec,nosuid,size=512m", "--env", "HOME=/tmp",
             "--mount", f"type=bind,src={secrets_dir},dst=/run/car-analyzer-secrets,readonly",
             "--mount", f"type=bind,src={state_dir},dst=/state",
             image,
@@ -113,6 +142,8 @@ def run_verification(image, environ=None, runner=subprocess.run, *, encrypted_ba
         if not collect:
             command.append("--verify-only")
         completed = runner(command, env=child_env, check=False)
+        if diagnostics is not None:
+            write_diagnostics(state_dir, Path(diagnostics), collect)
         if encrypted_backup is None:
             return completed.returncode
         try:
@@ -134,6 +165,8 @@ def main(argv=None):
     parser.add_argument("--image", required=True)
     parser.add_argument("--encrypted-backup", type=Path)
     parser.add_argument("--recipient-file", type=Path)
+    parser.add_argument("--diagnostics", type=Path,
+                        help="Write a small non-secret run summary (counts, timings, failures) here")
     parser.add_argument(
         "--collect", action="store_true",
         help="Run one manually confirmed source collection instead of no-source verification",
@@ -145,6 +178,7 @@ def main(argv=None):
             encrypted_backup=args.encrypted_backup,
             recipient_file=args.recipient_file,
             collect=args.collect,
+            diagnostics=args.diagnostics,
         )
     except ConfigurationError as exc:
         print(str(exc), file=sys.stderr)

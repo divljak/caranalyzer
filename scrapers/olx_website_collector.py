@@ -1,4 +1,4 @@
-"""Read rendered website pages only. No direct OLX API calls or automatic retries."""
+"""Read rendered website pages only. No direct OLX API calls; the only retry is one bounded page-1 retry in the caller."""
 from datetime import datetime
 import json
 import logging
@@ -25,28 +25,68 @@ const clean = e => e ? e.innerText.replace(/\s+/g, ' ').trim() : '';
 const visible = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
 const body = document.body ? document.body.innerText : '';
 const blocked = /verify you are human|checking your browser|access denied|too many requests|potvrdite da niste robot|captcha/i.test(body);
+// Screen-reader prefixes ("Akcijska cijena:") and struck-through old prices are not the current price.
+const priceText = e => {
+  if (!e) return '';
+  const copy = e.cloneNode(true);
+  copy.querySelectorAll('.sr-only, del').forEach(x => x.remove());
+  return copy.textContent.replace(/\s+/g, ' ').trim();
+};
 const headings = Array.from(document.querySelectorAll('h1,h2,h3')).filter(visible).map(clean);
 const attributes = {};
+// Legacy layout (until Nov 2026): label/value <h4> pairs.
 for (const h of document.querySelectorAll('h4')) {
   if (!visible(h)) continue;
   const next = h.nextElementSibling;
   if (next && next.tagName === 'H4') attributes[clean(h)] = clean(next);
 }
-const cards = arguments[0] === 'search' ? Array.from(document.querySelectorAll('a[href*="/artikal/"]'))
-  .filter(a => visible(a) && a.querySelector('h1.main-heading'))
-  .map(a => ({url:a.getAttribute('href'), title:clean(a.querySelector('h1.main-heading')),
-    price:clean(a.querySelector('.price-wrap .smaller:not(.discount)')),
-    tags:Array.from(a.querySelectorAll('.standard-tag')).map(clean),
-    dealer:/PIK SHOP/.test(a.innerText)})) : [];
-const pageItems = Array.from(document.querySelectorAll('li')).filter(e => visible(e) && /^\d+$/.test(clean(e)));
-const activePage = pageItems.find(e => e.classList.contains('active'));
-const resultHeading = document.querySelector('h1.search-title');
-const mainTitle = document.querySelector('h1.main-title-listing');
-const prices = Array.from(document.querySelectorAll('.price-heading')).filter(visible).map(clean);
+// PIK layout (from 10 Nov 2026): <dt>label</dt><dd>value</dd>; "ID oglasa" is the listing ID.
+for (const dt of document.querySelectorAll('dl dt')) {
+  const dd = dt.nextElementSibling;
+  if (!dd || dd.tagName !== 'DD') continue;
+  const key = clean(dt) === 'ID oglasa' ? 'ID' : clean(dt);
+  if (key && !(key in attributes)) attributes[key] = clean(dd);
+}
+let cards = [];
+if (arguments[0] === 'search') {
+  cards = Array.from(document.querySelectorAll('a[href*="/artikal/"]'))
+    .filter(a => visible(a) && a.querySelector('h1.main-heading'))
+    .map(a => ({url:a.getAttribute('href'), title:clean(a.querySelector('h1.main-heading')),
+      price:clean(a.querySelector('.price-wrap .smaller:not(.discount)')),
+      tags:Array.from(a.querySelectorAll('.standard-tag')).map(clean),
+      dealer:/PIK SHOP/.test(a.innerText)}));
+  // PIK cards no longer mark shops, so seller type stays unknown (null) rather than guessed.
+  cards = cards.concat(Array.from(document.querySelectorAll('article.listing-card')).filter(visible)
+    .map(card => [card, card.querySelector('a.listing-card__title-link[href*="/artikal/"]')])
+    .filter(([card, link]) => link)
+    .map(([card, link]) => ({url:link.getAttribute('href'), title:clean(link),
+      price:priceText(card.querySelector('.listing-card__price strong')),
+      tags:Array.from(card.querySelectorAll('.listing-card__attributes > span')).map(clean),
+      dealer:null})));
+}
+let currentPage = null, lastPage = null;
+const pager = document.querySelector('nav.ui-pagination');
+if (pager) {
+  const numbers = Array.from(pager.querySelectorAll('.ui-pagination__page'))
+    .map(e => clean(e)).filter(t => /^\d+$/.test(t)).map(Number);
+  const current = pager.querySelector('.ui-pagination__page.is-current, .ui-pagination__list [aria-current="page"]');
+  lastPage = numbers.length ? Math.max(...numbers) : null;
+  currentPage = current && /^\d+$/.test(clean(current)) ? Number(clean(current)) : null;
+} else {
+  const pageItems = Array.from(document.querySelectorAll('li')).filter(e => visible(e) && /^\d+$/.test(clean(e)));
+  const activePage = pageItems.find(e => e.classList.contains('active'));
+  currentPage = activePage ? Number(clean(activePage)) : null;
+  lastPage = pageItems.length ? Math.max(...pageItems.map(e => Number(clean(e)))) : null;
+}
+const legacyHeading = document.querySelector('h1.search-title');
+const resultCount = legacyHeading ? clean(legacyHeading) :
+  clean(document.querySelector('#search-results-title ~ p[role="status"]'));
+const mainTitle = document.querySelector('h1.main-title-listing') || document.querySelector('h1#article-title');
+const prices = Array.from(document.querySelectorAll('.price-heading')).filter(visible).map(clean)
+  .concat(Array.from(document.querySelectorAll('.article-price__amount')).filter(visible).map(priceText));
 const onRequest = Array.from(document.querySelectorAll('.pricing')).filter(visible).some(e => /Na upit|Po dogovoru/i.test(e.innerText));
 return {url:location.href, title:document.title, blocked, headings, attributes, cards,
-  result_heading:clean(resultHeading), current_page:activePage ? Number(clean(activePage)) : null,
-  last_page:pageItems.length ? Math.max(...pageItems.map(e => Number(clean(e)))) : null,
+  result_heading:resultCount, current_page:currentPage, last_page:lastPage,
   main_title:clean(mainTitle), prices, on_request:onRequest};
 """
 
@@ -122,7 +162,10 @@ def listing_id(url):
     parsed = urlsplit(url)
     if parsed.netloc and parsed.netloc != 'olx.ba':
         raise WebsiteReadError('Unexpected listing host')
-    match = re.fullmatch(r'/artikal/(\d{1,20})/?', parsed.path)
+    # PIK URLs carry a title slug before the ID: /artikal/peugeot-308-2013-76348132.
+    # A slugged ID must be 6+ digits so "/artikal/peugeot-308" is never read as ad 308.
+    match = (re.fullmatch(r'/artikal/(\d{1,20})/?', parsed.path)
+             or re.fullmatch(r'/artikal/[^/]*-(\d{6,20})/?', parsed.path))
     if not match:
         raise WebsiteReadError('Unexpected listing URL')
     return match.group(1)
@@ -138,6 +181,16 @@ def verified_search_last_page(page, requested_page, total, card_count):
     if requested_page == 1 and last is None and current in (None, 1) and card_count == total:
         return 1
     raise WebsiteReadError('Search pagination is not verified')
+
+
+def result_count_match(text):
+    """Legacy "601 REZULTATA" or PIK "47.810 oglasa"; anything else is not a verified count."""
+    return re.fullmatch(r'([\d.\s]+)\s+(?:rezultata|oglasa)', text or '', re.I)
+
+
+def dotless_date(value):
+    """PIK writes "05.05.2026." and "14.11.2026. u 22:01"; drop the trailing year dot only."""
+    return re.sub(r'^(\d{2}\.\d{2}\.\d{4})\.', r'\1', value.strip())
 
 
 def search_card_ids(cards):
@@ -159,7 +212,7 @@ def parse_search(page, requested_page, query):
     actual_query, expected_query = parse_qs(parsed_url.query), parse_qs(urlsplit(query).query)
     if any(actual_query.get(k) != v for k, v in expected_query.items() if k != 'page'):
         raise WebsiteReadError('Search filters changed during navigation')
-    result_match = re.fullmatch(r'([\d.\s]+)\s+rezultata', page.get('result_heading', ''), re.I)
+    result_match = result_count_match(page.get('result_heading', ''))
     if not result_match:
         raise WebsiteReadError('Search result count is missing')
     total = numeric(result_match.group(1))
@@ -185,7 +238,8 @@ def parse_search(page, requested_page, query):
                 'year': next((numeric(t) for t in tags if re.fullmatch(r'(19|20)\d{2}', t)), None),
                 'mileage': next((numeric(t, 'km') for t in tags if t.casefold().endswith('km')), None),
                 'fuel_type': next((fuel(t) for t in tags if fuel(t)), None),
-                'seller_type': 'dealer' if card.get('dealer') else 'individual',
+                # None = the card does not say; an unknown never overwrites a stored seller type.
+                'seller_type': {True: 'dealer', False: 'individual'}.get(card.get('dealer')),
                 'collection_method': 'olx_website', 'source_query': query,
                 'source_page': requested_page, 'source_per_page': None})
             seen.add(lid)
@@ -204,6 +258,8 @@ SOLD_MESSAGES = {'oglas je prodan', 'ovaj oglas je prodan'}
 # OLX serves a removed ad as an HTTP 404 document whose only heading is the generic
 # "page not found" text. Both signals are required; the heading alone stays unknown.
 NOT_FOUND_PREFIX = 'oprostite, ne možemo pronaći ovu stranicu'
+# PIK layout (from 10 Nov 2026): a missing ad is a 404 document titled "Oglas nije pronađen".
+NOT_FOUND_MESSAGES = (NOT_FOUND_PREFIX, 'oglas nije pronađen')
 
 
 def parse_detail(page, expected_id):
@@ -227,9 +283,10 @@ def parse_detail(page, expected_id):
         return {**base, 'outcome': 'check_failed', 'evidence': {**base['evidence'], 'reason': 'conflicting_status'}}
     if (page.get('document_status') == 404 and not page.get('main_title')
             and not page.get('attributes', {}).get('ID')
-            and any(h.startswith(NOT_FOUND_PREFIX) for h in headings)):
+            and any(h.startswith(m) for h in headings for m in NOT_FOUND_MESSAGES)):
+        message = next(m for m in NOT_FOUND_MESSAGES if any(h.startswith(m) for h in headings))
         return {**base, 'outcome': 'unavailable',
-                'evidence': {**base['evidence'], 'message': NOT_FOUND_PREFIX, 'http_status': 404}}
+                'evidence': {**base['evidence'], 'message': message, 'http_status': 404}}
     for messages, outcome in [(UNAVAILABLE_MESSAGES, 'unavailable'), (ENDED_MESSAGES, 'source_reported_ended'),
                               (SOLD_MESSAGES, 'source_reported_sold')]:
         matching = headings & messages
@@ -259,12 +316,12 @@ def parse_detail(page, expected_id):
         'transmission': transmission(attrs.get('Transmisija')), 'collection_method': 'olx_website',
         'source_query': f'https://olx.ba/artikal/{expected_id}', 'source_page': None, 'source_per_page': None}
     try:
-        data['posted_date'] = datetime.strptime(attrs['Datum objave'], '%d.%m.%Y').date()
+        data['posted_date'] = datetime.strptime(dotless_date(attrs['Datum objave']), '%d.%m.%Y').date()
     except (KeyError, ValueError):
         pass
     renewed_at = None
     try:
-        renewed_at = datetime.strptime(attrs['Obnovljen'], '%d.%m.%Y u %H:%M').replace(
+        renewed_at = datetime.strptime(dotless_date(attrs['Obnovljen']), '%d.%m.%Y u %H:%M').replace(
             tzinfo=ZoneInfo('Europe/Sarajevo')).astimezone(ZoneInfo('UTC')).replace(tzinfo=None)
     except (KeyError, ValueError):
         pass
@@ -309,6 +366,21 @@ class WebsiteBrowser:
     def __exit__(self, *args):
         self.close()
 
+    def restart(self):
+        """Fresh Chromium process for the single bounded page-1 retry. Never used after a refusal."""
+        self.close()
+        return self.__enter__()
+
+    def page_state(self):
+        """Small, non-personal view of where the browser ended up; never the page body."""
+        try:
+            state = self.driver.execute_script(
+                'return {final_url: location.href, title: document.title, ready_state: document.readyState};')
+            return {'final_url': str(state.get('final_url', ''))[:300], 'title': str(state.get('title', ''))[:120],
+                    'ready_state': str(state.get('ready_state', ''))[:20]}
+        except Exception as exc:
+            return {'page_state_error': type(exc).__name__}
+
     def close(self):
         # Cleanup must also run when setup or quit fails. It must not hide the
         # refusal/timeout that the collector needs to record for this visit.
@@ -331,6 +403,7 @@ class WebsiteBrowser:
             raise ValueError('Unknown website page kind')
         expected_id = listing_id(url) if kind == 'detail' else None
         started = time.monotonic()
+        navigation_ms = dom_ms = None
         navigation_timeout, script_retries = False, 0
         previous_status = None
         last_dom, parser_reason = {}, None
@@ -358,7 +431,7 @@ class WebsiteBrowser:
                         'price_values': len(page.get('prices', [])),
                         'on_request': bool(page.get('on_request'))}
             if kind == 'search':
-                heading = re.fullmatch(r'([\d.\s]+)\s+rezultata', page.get('result_heading', ''), re.I)
+                heading = result_count_match(page.get('result_heading', ''))
                 if not heading:
                     return False
                 requested = int(parse_qs(urlsplit(url).query).get('page', ['1'])[0])
@@ -387,6 +460,15 @@ class WebsiteBrowser:
                 return page
             previous_status = status
             return False
+        def diagnostics():
+            # Structured telemetry for failed visits: phase, timings and where the
+            # browser ended up. No page body, seller text or contact data.
+            return {'stage': kind, 'url': url, 'navigation_timeout': navigation_timeout,
+                    'navigation_ms': navigation_ms, 'dom_ms': dom_ms,
+                    'script_retries': script_retries,
+                    'elapsed_ms': round((time.monotonic() - started) * 1000),
+                    'document_status': getattr(self, 'document_status', None),
+                    'last_dom': last_dom, 'parser_reason': parser_reason, **self.page_state()}
         try:
             try:
                 self.driver.get(url)
@@ -395,27 +477,39 @@ class WebsiteBrowser:
                 # readiness, HTTP refusal and identity/parser checks still apply.
                 self.check_responses()
                 navigation_timeout = True
+            navigation_ms = round((time.monotonic() - started) * 1000)
             self.check_responses()
+            dom_started = time.monotonic()
             try:
                 page = WebDriverWait(self.driver, self.DOM_TIMEOUT).until(ready)
             except TimeoutException:
                 raise WebsiteDOMTimeout('Reserved visit did not produce a verified DOM') from None
-        except WebsiteBlocked:
+            finally:
+                dom_ms = round((time.monotonic() - dom_started) * 1000)
+        except WebsiteBlocked as exc:
+            exc.diagnostics = diagnostics()
             raise
         except WebsiteDOMTimeout as exc:
-            exc.diagnostics = {'stage': kind, 'navigation_timeout': navigation_timeout,
-                               'script_retries': script_retries,
-                               'elapsed_ms': round((time.monotonic() - started) * 1000),
-                               'last_dom': last_dom, 'parser_reason': parser_reason}
-            self.check_responses()
+            exc.diagnostics = diagnostics()
+            try:
+                self.check_responses()
+            except WebsiteBlocked as blocked:
+                blocked.diagnostics = exc.diagnostics
+                raise
             raise
-        except Exception:
+        except Exception as exc:
+            if getattr(exc, 'diagnostics', None) is None:
+                try:
+                    exc.diagnostics = diagnostics()
+                except Exception:
+                    pass
             self.check_responses()  # A refusal may have caused the navigation/DOM timeout.
             raise
         self.check_responses()
         if page['blocked']:
             raise WebsiteBlocked('Website access was refused')
         page['browser'] = {'navigation_timeout': navigation_timeout, 'script_retries': script_retries,
+                           'navigation_ms': navigation_ms, 'dom_ms': dom_ms,
                            'elapsed_ms': round((time.monotonic() - started) * 1000)}
         return page
 

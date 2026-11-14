@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily 08:15 Europe/Sarajevo trigger for the GitHub Actions collection
+
+[Timer]
+OnCalendar=*-*-* 08:15:00 Europe/Sarajevo
+# Run once at boot if the VPS was off at 08:15; the workflow's concurrency group
+# and daily budget keep a late duplicate harmless.
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

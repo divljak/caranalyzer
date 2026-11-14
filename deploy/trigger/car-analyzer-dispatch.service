@@ -1,0 +1,14 @@
+[Unit]
+Description=Ask GitHub Actions to run the Car Analyzer daily collection
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/car-analyzer-dispatch collect
+TimeoutStartSec=5min
+# The script only needs to read its token and reach api.github.com.
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
