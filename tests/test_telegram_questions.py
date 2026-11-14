@@ -12,7 +12,6 @@ import telegram_bot
 from telegram_bot import (
     DB_UNAVAILABLE,
     TelegramConfig,
-    find_message,
     keyboard,
     model_stats_message,
     parse_refine_callback,
@@ -22,6 +21,12 @@ from telegram_bot import (
     compare_message,
 )
 from telegram_intent import Filters, Intent, context_from_reply, parse_question
+import telegram_bot
+
+def find_message(*args, **kwargs):
+    """The search answer as the reader sees it: HTML tags removed, link targets kept."""
+    return telegram_bot.html_to_text(telegram_bot.find_message(*args, **kwargs), keep_links=True)
+
 
 ENV = {
     "TELEGRAM_BOT_TOKEN": "test-only-token",
@@ -107,12 +112,13 @@ class ParserTests(unittest.TestCase):
         for text, budget, year, km in (
             ("imam 50k budzet, sta se najbolje prodaje i sta je najpametnije da kupim", 50000, None, None),
             ("Imam 20000 KM, šta da kupim?", 20000, None, None),
-            ("preporuci mi nesto do 15000 KM, nesto za porodicu", 15000, None, None),
             ("suggest something under 9000 KM from 2012", 9000, 2012, None),
             ("what is the best value car under 30k with less than 150k km mileage", 30000, None, 150000),
         ):
             intent = parse_question(text)
             self.assertEqual(("suggest", Filters("", budget, year, km)), (intent.kind, intent.filters), text)
+        intent = parse_question("preporuci mi nesto do 15000 KM, nesto za porodicu")
+        self.assertEqual(("suggest", Filters("", 15000, family=True)), (intent.kind, intent.filters))
 
     def test_suggestions_need_a_budget_and_named_models_stay_searches(self):
         self.assertEqual("clarify", parse_question("what car should I buy").kind)
@@ -467,7 +473,7 @@ class QuestionQueryTests(unittest.TestCase):
         order = [first.index(f"__tg_p{n}") for n in (3, 2, 7, 4, 5)]
         self.assertEqual(sorted(order), order)  # p3(2020,30k) p2(2020,90k) p7(2019) p4(2018,50k) p5(2018,?)
         self.assertIn("Showing 1–5 of 7", first)
-        self.assertIn("newest model year first", first)
+        self.assertIn("most recently seen first, then newest model year, then lowest mileage", first)
         self.assertNotIn("__tg_p1", first)
 
     def test_recently_seen_listings_rank_first_within_a_year_and_old_ones_are_flagged(self):
@@ -479,12 +485,22 @@ class QuestionQueryTests(unittest.TestCase):
                     'olx.ba','olx_api',:seen,:seen,true,0)"""),
                     {"id": lid, "mileage": mileage, "seen": self.now - timedelta(days=days)})
         reply = find_message(self.engine, Filters("golf", 15000))
+        self.assertIn("__tg_fresh", reply)
+        self.assertNotIn("__tg_old", reply)  # last seen 30 days ago: hidden by default
+        self.assertIn("Older matches not shown (seen 14–90 days ago, may no longer be listed): 1.", reply)
+        self.assertNotIn("⚠ Seen", reply)
+        _, page = telegram_bot.answer_intent(self.engine, Intent("find", Filters("golf", 15000)), CONFIG)
+        self.assertEqual(1, page.older_hidden)
+        older = next(b for row in keyboard(CONFIG, page)["inline_keyboard"] for b in row
+                     if b["text"].startswith("🕰"))
+        self.assertEqual(("🕰 Include older (1)", "fo:15000:0:0:0:golf"), (older["text"], older["callback_data"]))
+        reply = find_message(self.engine, Filters("golf", 15000, include_old=True))
         self.assertLess(reply.index("__tg_fresh"), reply.index("__tg_old"))  # fresh first despite higher mileage
         self.assertIn("Seen 2 days ago", reply)
         self.assertIn("⚠ Seen 4 weeks ago", reply)
         self.assertEqual(1, reply.count("⚠ Seen"))
         self.assertIn("may no longer be listed", reply)
-        self.assertIn("then recently seen, then lowest mileage", reply)
+        self.assertIn("(older ones included) · most recently seen first", reply)
 
     def test_no_age_warning_when_everything_is_fresh(self):
         self.seed()

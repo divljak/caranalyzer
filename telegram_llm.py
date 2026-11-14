@@ -41,16 +41,17 @@ LOG = logging.getLogger("telegram_llm")
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 DEFAULT_MODEL = "gemini-3.5-flash-lite"
 TIMEOUT_SECONDS = 8
-MAX_REPLY_CHARS = 600
+MAX_REPLY_CHARS = 700
 MAX_FACTS_CHARS = 3500
 MAX_HISTORY_TURNS = 6
 MAX_TURN_CHARS = 300
 LANGUAGE_NAMES = {"bs": "Bosnian", "en": "English"}
-INTENTS = ("status", "latest", "trends", "find", "model_stats", "compare", "suggest", "follow", "following",
+INTENTS = ("status", "latest", "trends", "find", "model_stats", "compare", "suggest", "liquidity", "follow",
+           "following",
            "shortlist", "clarify", "chitchat", "unsupported")
 
 PERSONA = """You are Garaža, a friendly, relaxed assistant in a private chat about used cars on \
-olx.ba (Bosnia). Reply in the language named in the "language" field (Bosnian or English), warmly and briefly, \
+OLX (Bosnia). Reply in the language named in the "language" field (Bosnian or English), warmly and briefly, \
 like a person texting. You know NOTHING about cars, prices or listings yourself: the only facts you \
 may use are the ones given to you from our database. Never state a price, count, year, mileage, \
 date or any car fact (reliability, common faults, value, forecasts) that was not given to you, and \
@@ -68,7 +69,9 @@ Your job now: turn the user's latest message into ONE JSON request. You do not a
 
 Choose intent:
 - find: the user wants listings. Set search (make/model words only, e.g. "golf", "skoda octavia"), \
-and any of budget_km (max price in KM), year_min, mileage_max (km).
+and any of budget_km (max price in KM), year_min, mileage_max (km). Set family to true when they want \
+a car for a family or a roomy car (estate, MPV, SUV, kids). Set include_old to true only when they ask \
+to include older or possibly expired ads.
 - model_stats: asks what a model typically costs. Set search.
 - compare: compares exactly two models. Set compare_a and compare_b.
 - trends: asks how asking prices changed. Set days (1-90).
@@ -76,6 +79,8 @@ and any of budget_km (max price in KM), year_min, mileage_max (km).
 - latest: asks what is new.
 - suggest: the user gives a budget and asks what to buy, what is best, smartest or best selling, or \
 for suggestions. Set budget_km (and year_min / mileage_max if given). Without a budget use clarify.
+- liquidity: asks which cars sell fastest or are easiest to resell. Set search, budget_km, year_min, \
+mileage_max only if given. "km" in lower case after a number is mileage; "KM" is a price.
 - follow: the user wants to follow or track a model. Set search (make/model words).
 - following: asks what they follow, or what is new on the models they follow.
 - shortlist: asks to see the cars they saved or shortlisted.
@@ -96,7 +101,8 @@ PHRASE_PROMPT = PERSONA + """
 
 Your job now: answer the user's latest message in 1-4 short sentences using ONLY the database \
 answer in "facts". Quote numbers exactly as they appear in the facts; do not calculate new ones, \
-round them, or add any. Do not include links. If the facts say there are no matches, that the data \
+round them, count or add any (say "a few" or "most" instead of counting). Do not include links, \
+web addresses or domain names: call the site OLX. Keep it under 500 characters. If the facts say there are no matches, that the data \
 is stale, partial or a thin sample, say so plainly. You may say what the data shows, but do not \
 recommend a car as best, predict prices, or add general car knowledge. If the facts list cars, \
 mention only the most useful points (how many, the typical range, what stands out) and set \
@@ -109,6 +115,8 @@ SCHEMA = {
     "properties": {
         "intent": {"type": "string", "enum": list(INTENTS)},
         "search": {"type": "string"},
+        "family": {"type": "boolean"},
+        "include_old": {"type": "boolean"},
         "budget_km": {"type": "integer"},
         "year_min": {"type": "integer"},
         "mileage_max": {"type": "integer"},
@@ -173,18 +181,31 @@ def _numbers(text):
     return found
 
 
+def _check_text(value, allowed_numbers, limit=MAX_REPLY_CHARS):
+    """Return (accepted text or "", rejection reason or ""). The reason never contains the text.
+
+    A bare mention of the site ("na olx.ba") is rewritten to "OLX" first: the model often names
+    the site, and that alone used to throw away an otherwise grounded answer. Anything that is
+    still a link, address, mention, markup, or a number not present in the facts is rejected.
+    """
+    if not isinstance(value, str):
+        return "", "missing reply"
+    value = re.sub(r"[ \t]+", " ", value).strip()
+    value = re.sub(r"(?<![\w./])olx\.ba\b(?![/\w])", "OLX", value, flags=re.I)
+    if not value:
+        return "", "empty reply"
+    if len(value) > limit:
+        return "", "reply too long"
+    if re.search(r"@|<|>|https?:|www\.|olx\.ba|\.com|\.ba\b|`|\w\.(?:ba|com|net|org|hr|rs)\b", value, re.I):
+        return "", "link or markup in reply"
+    if not _numbers(value) <= allowed_numbers:
+        return "", "number not in the facts"
+    return value, ""
+
+
 def _safe_text(value, allowed_numbers, limit=MAX_REPLY_CHARS):
     """A model-written sentence is accepted only if it carries no new facts or links."""
-    if not isinstance(value, str):
-        return ""
-    value = re.sub(r"[ \t]+", " ", value).strip()
-    if not value or len(value) > limit:
-        return ""
-    if re.search(r"@|<|>|https?:|www\.|olx\.ba|\.com|\.ba\b|`", value, re.I):
-        return ""
-    if not _numbers(value) <= allowed_numbers:
-        return ""
-    return value
+    return _check_text(value, allowed_numbers, limit)[0]
 
 
 def _safe_question(value):
@@ -228,6 +249,8 @@ def intent_from_plan(plan, previous=None, message="", history=None):
             return Intent("compare", labels=(first, second))
         return Intent("clarify")
     search = clean_search(" ".join(_search_tokens(str(plan.get("search") or ""))))
+    family = plan.get("family") is True
+    include_old = plan.get("include_old") is True
     if kind == "model_stats":
         return Intent("model_stats", Filters(search)) if search else Intent("clarify")
     if kind == "follow":
@@ -243,12 +266,15 @@ def intent_from_plan(plan, previous=None, message="", history=None):
         return Intent("suggest", Filters(
             budget=budget,
             year_min=_bounded(plan.get("year_min"), YEAR_RANGE),
-            mileage_max=_bounded(plan.get("mileage_max"), MILEAGE_RANGE)))
+            mileage_max=_bounded(plan.get("mileage_max"), MILEAGE_RANGE),
+            family=family))
     filters = Filters(
         search=search,
         budget=_bounded(plan.get("budget_km"), PRICE_RANGE),
         year_min=_bounded(plan.get("year_min"), YEAR_RANGE),
         mileage_max=_bounded(plan.get("mileage_max"), MILEAGE_RANGE),
+        family=family,
+        include_old=include_old,
     )
     if plan.get("refines_previous") is True and previous is not None and previous.kind == "find":
         base = previous.filters
@@ -257,7 +283,11 @@ def intent_from_plan(plan, previous=None, message="", history=None):
             budget=filters.budget or base.budget,
             year_min=filters.year_min or base.year_min,
             mileage_max=filters.mileage_max or base.mileage_max,
+            family=filters.family or base.family,
+            include_old=filters.include_old or base.include_old,
         )
+    if kind == "liquidity":
+        return Intent("liquidity", filters)
     if filters.is_empty():
         return Intent("clarify")
     return Intent("find", filters)
@@ -268,8 +298,10 @@ def _previous_scope(previous):
         return None
     if previous.kind == "find":
         f = previous.filters
-        return {"intent": "find", "search": f.search, "budget_km": f.budget,
-                "year_min": f.year_min, "mileage_max": f.mileage_max}
+        scope = {"intent": "find", "search": f.search, "budget_km": f.budget,
+                 "year_min": f.year_min, "mileage_max": f.mileage_max}
+        scope.update({name: True for name in ("family", "include_old") if getattr(f, name)})
+        return scope
     if previous.kind == "trends":
         return {"intent": "trends", "days": previous.days}
     return None
@@ -422,14 +454,14 @@ def phrase(message, facts, config, *, post=None, history=None, mode="", language
         if turns:
             user["recent_turns"] = turns
         system = PHRASE_PROMPT + (SUGGEST_ADDENDUM if mode == "suggest" else "")
-        plan, status = _generate(config, system, user, PHRASE_SCHEMA, 500, post)
+        plan, status = _generate(config, system, user, PHRASE_SCHEMA, 800, post)
         if not isinstance(plan, dict):
             LOG.warning("gemini phrasing unavailable: %s", status)
             return None
         allowed = _numbers(facts[:MAX_FACTS_CHARS]) | _numbers(message) | _history_numbers(turns)
-        reply = _safe_text(plan.get("reply"), allowed)
+        reply, reason = _check_text(plan.get("reply"), allowed)
         if not reply:
-            LOG.warning("gemini phrasing rejected by validation")
+            LOG.warning("gemini phrasing rejected by validation: %s", reason)
             return None
         return reply, plan.get("show_details") is True
     except Exception:

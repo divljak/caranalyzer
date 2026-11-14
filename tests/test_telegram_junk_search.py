@@ -5,10 +5,16 @@ import unittest
 from unittest.mock import Mock, patch
 
 import telegram_bot
-from telegram_bot import Page, TelegramAPIError, TelegramConfig, find_message, find_page, process_update
+from telegram_bot import Page, TelegramAPIError, TelegramConfig, find_page, process_update
 from telegram_intent import Filters, Intent, parse_question
 from telegram_llm import intent_from_plan
 from test_telegram_questions import QuestionQueryTests
+import telegram_bot
+
+def find_message(*args, **kwargs):
+    """The search answer as the reader sees it: HTML tags removed, link targets kept."""
+    return telegram_bot.html_to_text(telegram_bot.find_message(*args, **kwargs), keep_links=True)
+
 
 ENV = {
     "TELEGRAM_BOT_TOKEN": "test-only-token",

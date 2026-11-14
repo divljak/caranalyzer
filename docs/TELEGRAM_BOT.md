@@ -54,8 +54,9 @@ or candidate mutations to Telegram.
 ## Private setup sequence
 
 1. Add the bot to the private group and send `/start` from each person who should be
-   allowed. Keep BotFather privacy mode enabled; commands, replies and button callbacks
-   are sufficient.
+   allowed. With BotFather privacy mode enabled, commands, mentions, replies and button
+   callbacks work; the group window and untagged answers in a small all-allowlisted group
+   need it disabled (see "Small private groups" below).
 2. Before a webhook exists, load `TELEGRAM_BOT_TOKEN` into the local process
    environment without putting it in shell history, then run:
 
@@ -101,7 +102,7 @@ Examples: `Golf from 2016 under 15000 KM`, `Škoda Octavia under 150000 km milea
 zadnjih 14 dana`, and `what car should I buy` (answered with a request for a budget,
 because the database can show observed listings but cannot pick a car).
 
-How a message reaches the bot (Telegram privacy mode stays ON):
+How a message reaches the bot with Telegram privacy mode ON (see "Small private groups" for OFF):
 
 - `/ask <question>`;
 - `@mojagaraza_bot <question>`; or
@@ -319,7 +320,7 @@ and bounded like the other memory (it can be lost when the server instance chang
 and never lets a stranger in. `TELEGRAM_GROUP_WINDOW_SECONDS` changes it (0 turns it off, max 3600).
 
 Telegram only *delivers* un-tagged group messages to a bot that is a group **admin** or has privacy mode off
-in BotFather; otherwise the bot never sees them and tagging is the only way.
+in BotFather; otherwise the bot never sees them and tagging is the only way (see the BotFather step below).
 
 Gemini is told whether it is in a private chat or a group and may not claim that people can write without tagging
 it, which it had done ("no need to tag me") while ignoring the next message. The help text explains the rule.
@@ -328,6 +329,84 @@ it, which it had done ("no need to tag me") while ignoring the next message. The
 `telegram update ignored: chat_type=… chat_configured=… user_allowed=…` (no ids, no text). If the sender is
 Telegram's anonymous-admin account (an admin posting with "Remain anonymous" on), the bot cannot know who
 it is and says so, in a configured group only. A group the bot is not configured for is covered above.
+
+### Small private groups: car questions without a tag
+
+In a group where **everyone except the bot is on `TELEGRAM_ALLOWED_USER_IDS`** and that has at most
+10 members, the bot also answers plain messages that are clearly car questions (a price, year, mileage,
+"za porodicu", "najlakše prodati", a comparison, …) without being tagged. Ordinary chatter ("ajmo na kafu",
+"haha", "ok") is still ignored. The bot checks the group with Telegram's read-only `getChatMemberCount`
+and `getChatMember` (one call per allowlisted person), caches the result for an hour, and treats any other
+member, a larger group, or an API error as "tag me".
+
+**This needs Telegram to deliver un-tagged messages.** Check with `getMe`: `can_read_all_group_messages`
+must be `true`. If it is `false`, Ogi does this once (nothing in code or env changes):
+
+1. BotFather → `/setprivacy` → choose `@mojagaraza_bot` → **Disable**.
+2. Remove the bot from the group and add it again (Telegram applies the privacy change on re-join).
+   Making the bot a group admin has the same effect without changing privacy mode.
+
+### A vague tag answers what you just asked
+
+When someone tags the bot with something vague (`@mojagaraza_bot hey`, `probaj ovo`, `možeš li ovo`), the bot
+answers that person's most recent unanswered car question in the same group from the last
+`TELEGRAM_GROUP_WINDOW_SECONDS` (default 5 minutes). Up to three such messages per person are kept
+in memory only (never stored), per group and person; a used question is forgotten.
+
+### Language
+
+The reply follows the language of the message (Bosnian, Croatian and Serbian all get Bosnian copy, help and
+fallbacks included). A message with no clear language ("hey", "ok", a number) uses what that person last
+wrote in, then what was last written in that chat, then their Telegram app language, then
+`TELEGRAM_DEFAULT_LANGUAGE` (English if unset).
+
+## Search answers (formatting, freshness, plausibility, family)
+
+Search answers are Telegram HTML (`parse_mode=HTML`): bold title, the car name is the link (no raw URLs),
+bold price, link previews off. If Telegram rejects the formatting or the answer would exceed the length
+limit, the same answer is sent as plain text, so formatting can never lose a reply.
+
+- **Freshness first.** By default only listings seen in the last **14 days** are shown. How many older
+  matches (seen 14–90 days ago) were left out is stated, with a **🕰 Uključi starije** button; writing
+  "i starije" / "include older" (or replying to an answer with it) does the same. Order: most recently seen
+  day first, then newest model year, then lowest mileage.
+- **Plausibility.** Conservative checks flag a listing with **⚠ Neobični podaci** and move it to the end of the
+  results; nothing is hidden and stored data is never changed: a car at most 5 model years old with more than
+  80.000 km per year of age; a model year more than 8 years above that model's usual years (90th percentile of
+  at least 8 dated listings, e.g. a "2022" Mercedes E210); or a price under 35% of the median for the same model
+  and year (at least 5 listings).
+- **"Za porodicu" / family / karavan / monovolumen.** The database has no body-type column, so family searches are
+  limited to a short curated list of roomier models (estates, MPVs, SUVs; `FAMILY_MODELS` in `telegram_bot.py`) and
+  the answer says so. It narrows the search; it never calls a car "the best". The suggestion shortlist honours it too.
+- **Gemini phrasing.** Gemini sees the answer as plain text (no links). Before, any reply that named the site
+  ("na olx.ba …") failed validation and the plain list was sent; the persona prompt itself said "olx.ba". A bare
+  site name is now rewritten to "OLX"; real links, other domains, markup and numbers not in the facts are still
+  rejected, and the log line now says why (`gemini phrasing rejected by validation: number not in the facts`,
+  never the text). Messages with a price, year or mileage are still read by the free parser; only the reply is
+  phrased by Gemini.
+
+## "Najlakše prodati": what leaves our search fastest
+
+"Auto do 20000km, staro do 10 godina koje najlakse mogu prodati", "šta se najbrže prodaje", "likvidno",
+"what sells fastest" ask which models **disappear from our search** fastest. For listings first seen in the last
+180 days that have not been seen for 7+ days, the bot shows the median days between our first and last sighting
+per model, with how many disappeared out of how many were seen, and only ranks models with at least 5 that
+disappeared. It says plainly that disappearing is not a confirmed sale (deleted, expired or outside the pages we
+check) and that days count from our first sighting, not the posting date.
+
+Units: a number followed by **lowercase `km`** is mileage (`do 20000km`), **`KM`**, "maraka" or "BAM" is a price.
+A mixed-case `Km` gets a one-tap question (💰 cijena / 🛣 kilometraža). "staro do 10 godina", "ne starije od 8
+godina", "up to 10 years old" become "from (current year − N)".
+
+## Morning digest layout
+
+The digest is Telegram HTML: a bold header with the weekday, one status line (**✅ Sve radi** when the latest run
+completed with no errors, **⚠️** only when something is wrong), price drops as linked car names with the new price
+in bold, the old one struck through and the % change, a **🆕 Najzanimljivije novo** section only when a listing first
+seen in the latest run is priced at least 15% under the median of 4+ similar ads (same model and year) with mileage
+at or under theirs, one short italic honesty line, and the collector details in an expandable quote at the bottom.
+Buttons: **📉 Svi padovi** (the 10 largest drops of the last 7 days), **🆕 Novi oglasi**, **🔍 Pretraga**, plus the web
+links when `TELEGRAM_MARKET_URL` is set.
 
 ## Known MVP limits
 

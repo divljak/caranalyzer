@@ -1,4 +1,4 @@
-"""Deterministic morning digest. Read-only evidence, no inferred sales."""
+"""Deterministic morning digest in Telegram HTML. Read-only evidence, no inferred sales."""
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -7,13 +7,17 @@ import json
 import os
 import tempfile
 import threading
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 
+from telegram_i18n import plural_bs, t
 from telegram_bot import (
+    Html,
     SARAJEVO,
+    esc,
+    message_payload,
     TelegramAPIError,
     TelegramConfigurationError,
     _all,
@@ -25,12 +29,14 @@ from telegram_bot import (
 )
 
 
-MAX_DIGEST_CHARS = 1200
+MAX_DIGEST_CHARS = 4000  # Telegram allows 4096; HTML tags count here, so this is conservative
+DIGEST_CUTS = 5
 STALE_CLEAN_DAYS = 14
 PRICE_WINDOW_DAYS = 7
 SEND_HOUR = 9
 SEND_MINUTE_START = 40
 TEST_SEND_CONFIRM = "SEND_TEST"
+_WEEKDAYS = ("ponedjeljak", "utorak", "srijeda", "četvrtak", "petak", "subota", "nedjelja")
 _MONTHS = (
     "jan", "feb", "mar", "apr", "maj", "jun",
     "jul", "aug", "sep", "okt", "nov", "dec",
@@ -91,19 +97,37 @@ CUTS_SQL = """
   WHERE t.observed_at>=:cutoff AND t.observed_at<=:as_of
     AND t.asking_price<t.previous_price
   ORDER BY (t.previous_price-t.asking_price) DESC,t.observed_at DESC,t.listing_id
-  LIMIT 3
+  LIMIT CAST(:limit AS integer)
 """
+# "Najzanimljivije novo": listings first seen in the latest run that are priced at least 15% under
+# the median of the same model and year (at least 4 similar ads seen in 90 days), with mileage at or
+# under that cohort's median. Grounded in our data only; recent cars with absurd mileage are skipped.
 SEEN_SQL = """
-  SELECT c.listing_id,coalesce(l.make,c.make) AS make,
-    coalesce(l.model,c.model) AS model,c.year,
-    CASE WHEN c.price_status='priced' AND c.price>0 THEN c.price END AS price,
-    c.first_seen_at
-  FROM car_listings c
-  LEFT JOIN dealer_vehicle_labels l USING(listing_id)
-  WHERE c.source='olx.ba'
-    AND c.collection_method IN ('olx_api','olx_website')
-    AND c.first_seen_at BETWEEN :started AND :finished
-  ORDER BY c.first_seen_at DESC,c.listing_id
+  WITH recent AS (
+    SELECT c.listing_id,coalesce(l.make,c.make) AS make,coalesce(l.model,c.model) AS model,
+      trim(concat_ws(' ',coalesce(l.make,c.make),coalesce(l.model,c.model))) AS label,
+      c.year,c.price,c.mileage,c.first_seen_at
+    FROM car_listings c
+    LEFT JOIN dealer_vehicle_labels l USING(listing_id)
+    WHERE c.source='olx.ba'
+      AND c.collection_method IN ('olx_api','olx_website')
+      AND c.price_status='priced' AND c.price>0
+      AND c.year IS NOT NULL AND c.mileage IS NOT NULL
+      AND c.last_verified_at >= (now() AT TIME ZONE 'UTC') - interval '90 days'
+  ), cohort AS (
+    SELECT label,year,count(*) AS n,
+      percentile_cont(.5) WITHIN GROUP (ORDER BY price) AS med_price,
+      percentile_cont(.5) WITHIN GROUP (ORDER BY mileage) AS med_km
+    FROM recent WHERE label<>'' GROUP BY label,year HAVING count(*)>=4
+  )
+  SELECT r.listing_id,r.make,r.model,r.year,r.price,r.mileage,r.first_seen_at,k.n,k.med_price,
+    round((1-CAST(r.price AS numeric)/CAST(k.med_price AS numeric))*100) AS discount_pct
+  FROM recent r JOIN cohort k ON k.label=r.label AND k.year=r.year
+  WHERE r.first_seen_at BETWEEN :started AND :finished
+    AND r.price<=0.85*k.med_price AND r.mileage<=k.med_km
+    AND NOT (r.year >= CAST(extract(year FROM (now() AT TIME ZONE 'UTC')) AS integer) - 5
+             AND r.mileage > 80000*greatest(CAST(extract(year FROM (now() AT TIME ZONE 'UTC')) AS integer)-r.year,1))
+  ORDER BY discount_pct DESC,r.first_seen_at DESC,r.listing_id
   LIMIT 3
 """
 
@@ -293,7 +317,20 @@ def _stamp(value, tz):
 
 def _label(make, model, year):
     name = " ".join(part for part in (make, model) if part) or "Nepoznat model"
-    return f"{name} · {year}" if year else name
+    return f"{name} {year}" if year else name
+
+
+def _car(item):
+    return _link(_label(item.get("make"), item.get("model"), item.get("year")), item.get("listing_id"))
+
+
+def _link(label, listing_id):
+    url = f"https://olx.ba/artikal/{quote(str(listing_id or ''), safe='')}"
+    return f'<a href="{esc(url)}">{esc(label)}</a>'
+
+
+def _amount(value):
+    return f"{int(round(value)):,}".replace(",", ".")
 
 
 def assess(evidence):
@@ -309,19 +346,27 @@ def assess(evidence):
     return {"trends_stale": stale, "partial": partial, "empty": not run}
 
 
-def _quality(run, flags):
+def _status_line(run, flags):
+    """One line: ✅ when the latest run is clean, ⚠️ only when something is wrong."""
     if not run:
-        return "nema prolaza (empty)"
-    status = str(run.get("status") or "").lower()
-    if status == "completed" and not flags["partial"]:
-        return "čisto (clean)"
-    if status == "failed":
-        return "neuspjelo (failed)"
-    return "djelimično (partial)"
+        return "⚠️ Nema završenog prolaza kolektora"
+    new = int(run.get("new_listings") or 0)
+    errors = int(run.get("errors") or 0)
+    counts = (f"{new} {plural_bs(new, 'novi oglas', 'nova oglasa', 'novih oglasa')} · "
+              f"{errors} {plural_bs(errors, 'greška', 'greške', 'grešaka')}")
+    if not flags["partial"]:
+        return f"✅ Sve radi · {counts}"
+    if str(run.get("status") or "").lower() == "failed":
+        return f"⚠️ Prolaz kolektora nije uspio · {counts}"
+    return f"⚠️ Djelimičan prolaz kolektora · {counts}"
 
 
 def _assemble(parts, limit=MAX_DIGEST_CHARS):
-    """Join (text, optional) rows. Drop optional rows from the bottom until it fits."""
+    """Join (text, optional) rows. Drop optional rows from the bottom until it fits.
+
+    Rows are whole HTML fragments, so dropping rows never breaks a tag. Required rows are short;
+    if they alone were too long the plain-text fallback in the sender takes over.
+    """
 
     def joined(items):
         return "\n".join(text for text, _optional in items).strip()
@@ -332,10 +377,7 @@ def _assemble(parts, limit=MAX_DIGEST_CHARS):
             if chosen[index][1]:
                 del chosen[index]
                 break
-    text = joined(chosen)
-    if len(text) > limit:
-        text = text[: limit - 1].rstrip() + "…"
-    return text
+    return joined(chosen)
 
 
 def _row(text, optional=False):
@@ -343,94 +385,68 @@ def _row(text, optional=False):
 
 
 def render_digest(evidence, tz=SARAJEVO):
-    """Compact Bosnian digest with short English labels. Never infers a sale."""
+    """Bosnian morning digest in Telegram HTML. Never infers a sale or a publish date."""
     flags = assess(evidence)
     now = _aware(evidence.get("generated_at")) or datetime.now(timezone.utc)
     local = now.astimezone(tz)
     run = evidence.get("run")
     parts = [
-        _row(f"Garaža · {local.day}. {_MONTHS[local.month - 1]}, {local.strftime('%H:%M')}"),
-        _row(f"Status: {_quality(run, flags)}"),
-        _row("Pregled se šalje i kad je stanje djelimično ili zastarjelo."),
+        _row(f"🚗 <b>Garaža · {_WEEKDAYS[local.weekday()]} {local.day}. {_MONTHS[local.month - 1]}</b>"),
+        _row(esc(_status_line(run, flags))),
     ]
-    if not run:
-        parts.append(_row("Nema završenog prolaza kolektora (empty)."))
-    else:
-        parts.append(_row(
-            f"Pokušaj: {_stamp(run.get('finished_at') or run.get('started_at'), tz)}"))
-        parts.append(_row(
-            f"{int(run.get('observations') or 0)} zapažanja · "
-            f"{int(run.get('new_listings') or 0)} prvi put viđeno kod nas (first seen) · "
-            f"{int(run.get('errors') or 0)} grešaka"
-        ))
-        parts.append(_row(
-            f"Posjete: {int(run.get('search_attempted') or 0)} pretrage · "
-            f"{int(run.get('detail_attempted') or 0)} detalja "
-            f"({int(run.get('details_completed') or 0)} završeno)"
-        ))
-    parts.append(_row(
-        f"Svježina: zapažanje do {_stamp(evidence.get('latest_snapshot'), tz)} · "
-        f"zadnji čist prolaz {_stamp(evidence.get('clean_at'), tz)}"
-    ))
-    sample = int(evidence.get("price_sample") or 0)
-    drops = int(evidence.get("price_drops") or 0)
-    increases = int(evidence.get("price_increases") or 0)
-    parts.extend([
-        _row(""),
-        _row(f"Padovi cijene (price cuts) · zadnjih {PRICE_WINDOW_DAYS} dana"),
-    ])
     if flags["trends_stale"]:
-        parts.append(_row(
-            "Trendovi potisnuti (stale clean anchor): čist prolaz je star "
-            f"ili ga nema ({_stamp(evidence.get('clean_at'), tz)}). "
-            "Broj je označen, nije tržišni indeks."
-        ))
-    else:
-        parts.append(_row(
-            f"Uzorak: {sample} oglasa · {drops} padova · {increases} rastova tražene cijene. "
-            "Prozor i uzorak su u ovom redu. Ovo nije tržišni indeks."
-        ))
-    parts.append(_row(
-        f"Zabilježeni padovi tražene cijene u uzorku od {sample} oglasa: {drops}."
-    ))
-    for item in evidence.get("notable_cuts") or []:
-        parts.append(_row(
-            f"• {_label(item.get('make'), item.get('model'), item.get('year'))} · "
-            f"{_money(item.get('asking_price'))} ← {_money(item.get('previous_price'))}\n"
-            f"  zapaženo {_stamp(item.get('observed_at'), tz)} · "
-            f"https://olx.ba/artikal/{item.get('listing_id')}",
-            optional=True,
-        ))
-    seen_count = int((run or {}).get("new_listings") or 0)
-    parts.extend([_row(""), _row("Prvi put viđeno kod nas (first seen)")])
-    if not run:
-        parts.append(_row("Nema pokušaja iz kojeg bi se brojali novi ID-jevi (empty)."))
-    else:
-        parts.append(_row(
-            f"{seen_count} ID-jeva u ovom pokušaju. To je prvo viđenje u našoj bazi, "
-            "ne provjeren datum objave."
-        ))
-        if seen_count and not (evidence.get("first_seen") or []):
+        parts.append(_row(esc(f"⚠️ Zadnji potpuno čist prolaz: {_stamp(evidence.get('clean_at'), tz)}, "
+                              "pa su brojke o cijenama orijentacione.")))
+
+    drops = int(evidence.get("price_drops") or 0)
+    cuts = list(evidence.get("notable_cuts") or [])
+    parts.extend([_row(""), _row(f"📉 <b>Padovi cijena ({PRICE_WINDOW_DAYS} dana): {drops}</b>")])
+    if not cuts:
+        parts.append(_row(esc("Nema zabilježenih padova tražene cijene.")))
+    for item in cuts:
+        new, old = item.get("asking_price"), item.get("previous_price")
+        pct = round((old - new) / old * 100) if new and old else None
+        change = f" (−{pct}%)" if pct else ""
+        parts.append(_row(f"• {_car(item)}: <b>{esc(_money(new))}</b> <s>{esc(_amount(old))}</s>{esc(change)}",
+                          optional=True))
+    if drops > len(cuts) and cuts:
+        parts.append(_row(esc(f"• …još {drops - len(cuts)}"), optional=True))
+
+    standouts = list(evidence.get("first_seen") or [])
+    if standouts:
+        parts.extend([_row(""), _row("🆕 <b>Najzanimljivije novo</b>")])
+        for item in standouts:
             parts.append(_row(
-                "Nijedan od tih ID-jeva nije povezan s redom u ovom prozoru."))
-        elif not seen_count and not (evidence.get("first_seen") or []):
-            parts.append(_row("Nema ID-jeva prvi put viđenih u ovom pokušaju."))
-    for item in evidence.get("first_seen") or []:
-        parts.append(_row(
-            f"• {_label(item.get('make'), item.get('model'), item.get('year'))} · "
-            f"{_money(item.get('price'))}\n"
-            f"  prvo viđeno {_stamp(item.get('first_seen_at'), tz)} · "
-            f"https://olx.ba/artikal/{item.get('listing_id')}",
-            optional=True,
-        ))
+                f"• {_car(item)}: <b>{esc(_money(item.get('price')))}</b> · "
+                + esc(f"{int(item.get('discount_pct') or 0)}% ispod medijana {_money(item.get('med_price'))} "
+                      f"za {int(item.get('n') or 0)} sličnih · {_amount(item.get('mileage') or 0)} km"),
+                optional=True))
+
     parts.extend([
         _row(""),
-        _row(
-            "Nestanak iz pretrage nije prodaja. Tražene cijene nisu prodajne cijene. "
-            "Prvo viđeno kod nas nije provjeren datum objave."
-        ),
+        _row("<i>" + esc("Tražene cijene, ne prodajne. Novo = prvi put viđeno kod nas, ne datum objave. "
+                         "Nestanak iz pretrage nije prodaja. Ništa od ovoga nije preporuka.") + "</i>"),
     ])
-    return _assemble(parts)
+    details = []
+    if run:
+        details.append(f"Pokušaj: {_stamp(run.get('finished_at') or run.get('started_at'), tz)} "
+                       f"({str(run.get('status') or 'nepoznato').lower()})")
+        details.append(f"{int(run.get('observations') or 0)} zapažanja · "
+                       f"{int(run.get('new_listings') or 0)} prvi put viđeno kod nas · "
+                       f"{int(run.get('errors') or 0)} {plural_bs(int(run.get('errors') or 0), 'greška', 'greške', 'grešaka')}")
+        details.append(f"Posjete: {int(run.get('search_attempted') or 0)} pretrage · "
+                       f"{int(run.get('detail_attempted') or 0)} detalja "
+                       f"({int(run.get('details_completed') or 0)} završeno)")
+    else:
+        details.append("Nema završenog prolaza kolektora.")
+    details.append(f"Zadnje zapažanje: {_stamp(evidence.get('latest_snapshot'), tz)} · "
+                   f"zadnji čist prolaz: {_stamp(evidence.get('clean_at'), tz)}")
+    rises = int(evidence.get("price_increases") or 0)
+    details.append(f"Uzorak cijena ({PRICE_WINDOW_DAYS} dana): {int(evidence.get('price_sample') or 0)} oglasa · "
+                   f"{drops} {plural_bs(drops, 'pad', 'pada', 'padova')} · "
+                   f"{rises} {plural_bs(rises, 'rast', 'rasta', 'rastova')}")
+    parts.append(_row("<blockquote expandable>🔧 Detalji kolektora\n" + esc("\n".join(details)) + "</blockquote>"))
+    return Html(_assemble(parts))
 
 
 def load_digest_evidence(engine, now):
@@ -442,7 +458,7 @@ def load_digest_evidence(engine, now):
         clean = connection.execute(text(CLEAN_SQL)).scalar()
         latest = connection.execute(text(SNAPSHOT_SQL)).scalar()
         prices = _one(connection, PRICE_SQL, {"cutoff": cutoff, "as_of": as_of}) or {}
-        cuts = _all(connection, CUTS_SQL, {"cutoff": cutoff, "as_of": as_of})
+        cuts = _all(connection, CUTS_SQL, {"cutoff": cutoff, "as_of": as_of, "limit": DIGEST_CUTS})
         seen = []
         if run and run.get("started_at") and run.get("finished_at"):
             seen = _all(connection, SEEN_SQL, {
@@ -463,15 +479,42 @@ def load_digest_evidence(engine, now):
 
 
 def digest_keyboard(market_url):
-    if not market_url:
-        return None
-    parsed = urlparse(market_url)
-    origin = f"{parsed.scheme}://{parsed.netloc}"
-    return {"inline_keyboard": [[
-        {"text": "Market", "url": f"{origin}/market"},
-        {"text": "Compare", "url": f"{origin}/compare"},
-        {"text": "Following", "url": f"{origin}/following"},
-    ]]}
+    rows = [
+        [{"text": "📉 Svi padovi", "callback_data": "drops"}, {"text": "🆕 Novi oglasi", "callback_data": "latest"}],
+        [{"text": "🔍 Pretraga", "callback_data": "search"}],
+    ]
+    if market_url:
+        parsed = urlparse(market_url)
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        rows.append([
+            {"text": "Market", "url": f"{origin}/market"},
+            {"text": "Compare", "url": f"{origin}/compare"},
+            {"text": "Following", "url": f"{origin}/following"},
+        ])
+    return {"inline_keyboard": rows}
+
+
+def drops_message(engine, lang="bs", now=None, limit=10):
+    """The "📉 Svi padovi" button: the largest asking-price drops of the last 7 days, linked."""
+    as_of = _aware(now or datetime.now(timezone.utc))
+    cutoff = as_of - timedelta(days=PRICE_WINDOW_DAYS)
+    with engine.begin() as connection:
+        _statement_timeout(connection)
+        prices = _one(connection, PRICE_SQL, {"cutoff": cutoff, "as_of": as_of}) or {}
+        cuts = _all(connection, CUTS_SQL, {"cutoff": cutoff, "as_of": as_of, "limit": limit})
+    drops = int(prices.get("drops") or 0)
+    lines = [f"📉 <b>{esc(t(lang, 'drops_title', days=PRICE_WINDOW_DAYS, n=drops))}</b>"]
+    if not cuts:
+        lines.append(esc(t(lang, "drops_none")))
+    for item in cuts:
+        new, old = item.get("asking_price"), item.get("previous_price")
+        pct = round((old - new) / old * 100) if new and old else None
+        lines.append(f"• {_car(item)}: <b>{esc(_money(new, lang))}</b> <s>{esc(_amount(old))}</s>"
+                     + (esc(f" (−{pct}%)") if pct else ""))
+    if drops > len(cuts) and cuts:
+        lines.append(esc(t(lang, "drops_more", n=drops - len(cuts))))
+    lines.extend(["", "<i>" + esc(t(lang, "drops_note")) + "</i>"])
+    return Html("\n".join(lines))
 
 
 def plan_delivery(*, mode, now, tz, send_enabled, confirmed, ledger):
@@ -532,14 +575,8 @@ def handle_digest(engine, *, headers, mode, environ=None, now=None, ledger=None,
     }
     if plan["action"] != "send":
         return 200, body
-    payload = {
-        "chat_id": config.chat_id,
-        "text": text[:MAX_DIGEST_CHARS],
-        "disable_web_page_preview": True,
-    }
-    markup = digest_keyboard(config.market_url)
-    if markup:
-        payload["reply_markup"] = markup
+    payload = message_payload(config.chat_id, text)
+    payload["reply_markup"] = digest_keyboard(config.market_url)
     try:
         result = call(config, "sendMessage", payload)
     except TelegramAPIError:

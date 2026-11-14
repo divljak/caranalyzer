@@ -188,6 +188,70 @@ class CallTests(unittest.TestCase):
             self.assertNotIn(KEY, text)
 
 
+class AnswerQualityTests(unittest.TestCase):
+    """Why 'šta ima za porodicu do 10.000 KM' got the plain list, and the fixes."""
+
+    FACTS = ("Viđeni oglasi · do 10.000 KM · za porodicu\n"
+             "Prikazujem 1–3 od 3 oglasa viđenih u zadnjih 14 dana\n"
+             "• Škoda Octavia · 2012 · 9.800 KM · 210.000 km\n  Viđeno juče (13. nov, 09:10)\n")
+
+    def phrase(self, reply_text, message="šta ima za porodicu do 10.000 KM"):
+        post = Mock(return_value=plan_reply({"reply": reply_text, "show_details": True}))
+        return telegram_llm.phrase(message, self.FACTS, CFG, post=post)
+
+    def test_naming_the_site_no_longer_throws_the_answer_away(self):
+        self.assertEqual(("Na OLX sam našao 3 oglasa za porodicu do 10.000 KM.", True),
+                         self.phrase("Na olx.ba sam našao 3 oglasa za porodicu do 10.000 KM."))
+        for linked in ("Vidi olx.ba/artikal/1", "https://olx.ba", "www.olx.ba", "pogledaj auto.ba", "x.com"):
+            self.assertIsNone(self.phrase(linked), linked)
+
+    def test_rejections_log_the_reason_but_never_the_text(self):
+        for bad, reason in (("Ima 4 od 5 starih.", "number not in the facts"),
+                            ("Vidi https://x", "link or markup in reply"),
+                            ("x" * (telegram_llm.MAX_REPLY_CHARS + 1), "reply too long")):
+            with self.assertLogs("telegram_llm", level="WARNING") as logs:
+                self.assertIsNone(self.phrase(bad))
+            self.assertIn(reason, logs.output[0])
+            self.assertNotIn(bad[:12], logs.output[0])
+
+    def test_the_prompt_forbids_counting_and_domain_names(self):
+        prompt = telegram_llm.PHRASE_PROMPT
+        self.assertIn("call the site OLX", prompt)
+        self.assertIn("do not calculate new ones", prompt)
+        self.assertNotIn("olx.ba", telegram_llm.PERSONA)
+
+    def test_family_older_and_liquidity_plans_are_validated(self):
+        intent = intent_from_plan({"intent": "find", "budget_km": 10000, "family": True}, None, "x")
+        self.assertEqual(Filters("", 10000, family=True), intent.filters)
+        intent = intent_from_plan({"intent": "find", "budget_km": 10000, "include_old": "yes"}, None, "x")
+        self.assertFalse(intent.filters.include_old)  # only a real boolean counts
+        previous = Intent("find", Filters("", 10000, family=True))
+        intent = intent_from_plan({"intent": "find", "include_old": True, "refines_previous": True}, previous, "x")
+        self.assertEqual(Filters("", 10000, family=True, include_old=True), intent.filters)
+        intent = intent_from_plan({"intent": "liquidity", "year_min": 2016, "mileage_max": 200000}, None, "x")
+        self.assertEqual(("liquidity", Filters(year_min=2016, mileage_max=200000)), (intent.kind, intent.filters))
+        self.assertIn("liquidity", telegram_llm.SCHEMA["properties"]["intent"]["enum"])
+        scope = telegram_llm._previous_scope(previous)
+        self.assertTrue(scope["family"])
+        self.assertNotIn("include_old", scope)
+
+    def test_gemini_gets_plain_facts_and_its_reply_is_escaped_into_the_html_answer(self):
+        html_answer = telegram_bot.Html('<b>Viđeni oglasi · do 10.000 KM · za porodicu</b>\n'
+                                        '• <a href="https://olx.ba/artikal/77"><b>Škoda Octavia</b></a> · 2012')
+        phraser = Mock(return_value=("Evo <3 auta & više", True))
+        call = Mock(return_value={"message_id": 1})
+        with patch("telegram_bot.find_page", return_value=(html_answer, 1, {})):
+            process_update(msg("šta ima za porodicu do 10.000 KM"), Mock(), CONFIG, call=call, llm=None,
+                           phraser=phraser)
+        facts = phraser.call_args.args[1]
+        self.assertNotIn("https", facts)
+        self.assertNotIn("<b>", facts)
+        self.assertIn("Škoda Octavia · 2012", facts)
+        final = [c.args[2] for c in call.call_args_list if c.args[1] in {"sendMessage", "editMessageText"}][-1]
+        self.assertEqual("HTML", final["parse_mode"])
+        self.assertTrue(final["text"].startswith("Evo &lt;3 auta &amp; više\n\n<b>Viđeni oglasi"))
+
+
 def msg(text, *, user=123, chat_id=123, chat_type="private", uid=1, reply_to=None):
     body = {"chat": {"id": chat_id, "type": chat_type}, "from": {"id": user}, "text": text}
     if reply_to:
@@ -262,8 +326,8 @@ class PrivateChatTests(unittest.TestCase):
             process_update(msg("something sporty for my family please maybe", uid=2), Mock(), CONFIG,
                            call=self.call, llm=Mock(return_value=None))
         self.assertEqual("unsupported", captured[0].kind)
-        # filler words no longer turn into a model search, so this is honestly "can't answer"
-        self.assertEqual("unsupported", captured[1].kind)
+        # "for my family" is understood as a family search (roomier models) even without Gemini
+        self.assertEqual(("find", True), (captured[1].kind, captured[1].filters.family))
 
     def test_searches_with_a_filter_are_read_by_the_free_parser(self):
         for text in ("Golf from 2016", "golf 7 tdi under 12000 KM", "octavia max 150k km mileage"):

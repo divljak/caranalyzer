@@ -68,7 +68,28 @@ STRINGS = {
         "no_more": "No more matches.",
         "search_ignored": "I didn't recognise “{term}” as a car make or model, so I searched all models.",
         "find_hint": "If that was not a car make or model, send /help to see what I can answer.",
-        "find_showing": "Showing {span} of {total} database matches, newest model year first, then recently seen, then lowest mileage:",
+        "find_showing": "Showing {span} of {total} listings seen in the last {days} days · most recently seen first, then newest model year, then lowest mileage:",
+        "find_showing_all": "Showing {span} of {total} listings seen in the last 90 days (older ones included) · most recently seen first, then newest model year, then lowest mileage:",
+        "older_hidden": "🕰 Older matches not shown (seen 14–90 days ago, may no longer be listed): {n}. Tap “Include older” or write “include older”.",
+        "no_fresh": "Nothing matching was seen in the last {days} days.",
+        "suspect_row": "⚠ Unusual data (year, mileage or price far off similar ads), check the ad",
+        "suspect_note": "⚠ marks ads whose year, mileage or price is far off similar ads (often a typo by the seller). They are shown last; the stored data is unchanged.",
+        "family_note": "ℹ️ We don't have body-type data, so for a family I only show roomier models from a short list (estates, MPVs, SUVs, e.g. Octavia, Passat, Touran, Sportage). Not a recommendation.",
+        "title_family": "for a family",
+        "title_old": "incl. older",
+        "btn_include_old": "🕰 Include older ({n})",
+        "drops_title": "Asking-price drops · last {days} days: {n}",
+        "drops_none": "No asking-price drops recorded.",
+        "drops_more": "…and {n} more",
+        "drops_note": "Asking prices, not sale prices. Not a recommendation.",
+        "liquidity_title": "⏱ Fastest to disappear from our search",
+        "liquidity_how": "Days from when we first saw an ad to when we last saw it, for ads no longer in our search (first seen in the last {days} days, at least {n} gone per model), quickest first:",
+        "liquidity_row": "{label}: median {d} days · {gone} gone of {seen} seen",
+        "liquidity_none": "Not enough data: no model has at least {n} ads that disappeared from our search with these filters.",
+        "liquidity_caveat": "Disappearing from our search is not a confirmed sale: the ad may have been deleted, expired or fallen outside the pages we check. Days count from when we first saw the ad, not from when it was posted. Not a recommendation.",
+        "clarify_km_unit": "Did you mean {amount} KM (price) or {amount} km (mileage)?",
+        "btn_unit_price": "💰 Up to {amount} KM (price)",
+        "btn_unit_km": "🛣 Up to {amount} km (mileage)",
         "seen_row": "Seen {age} ({when})",
         "old_warning": "⚠ Last seen more than {days} days ago: the ad may no longer be listed. Check the link before relying on it.",
         "filters_note": "Listings without a recorded year or mileage are not included when those filters are used.",
@@ -208,7 +229,28 @@ STRINGS = {
         "no_more": "Nema više rezultata.",
         "search_ignored": "Nisam prepoznao „{term}“ kao marku ili model, pa tražim među svim modelima.",
         "find_hint": "Ako to nije marka ni model auta, pošalji /help da vidiš na šta mogu odgovoriti.",
-        "find_showing": "Prikazujem {span} od {total} rezultata iz baze, prvo najnovije godište, zatim nedavno viđeni, pa najmanja kilometraža:",
+        "find_showing": "Prikazujem {span} od {total} oglasa viđenih u zadnjih {days} dana · prvo nedavno viđeni, zatim novije godište, pa manja kilometraža:",
+        "find_showing_all": "Prikazujem {span} od {total} oglasa viđenih u zadnjih 90 dana (uključeni i stariji) · prvo nedavno viđeni, zatim novije godište, pa manja kilometraža:",
+        "older_hidden": "🕰 Starijih oglasa koji nisu prikazani (viđeni prije 14–90 dana, možda više nisu aktivni): {n}. Dodirni „Uključi starije“ ili napiši „i starije“.",
+        "no_fresh": "Ništa odgovarajuće nije viđeno u zadnjih {days} dana.",
+        "suspect_row": "⚠ Neobični podaci (godište, kilometraža ili cijena odskaču od sličnih), provjeri oglas",
+        "suspect_note": "⚠ označava oglase čije godište, kilometraža ili cijena jako odskaču od sličnih (često greška prodavca). Prikazani su na kraju; podaci u bazi nisu mijenjani.",
+        "family_note": "ℹ️ Nemamo podatak o karoseriji, pa za porodicu prikazujem samo prostranije modele s kratke liste (karavani, monovolumeni, SUV, npr. Octavia, Passat, Touran, Sportage). Nije preporuka.",
+        "title_family": "za porodicu",
+        "title_old": "i stariji",
+        "btn_include_old": "🕰 Uključi starije ({n})",
+        "drops_title": "Padovi tražene cijene · zadnjih {days} dana: {n}",
+        "drops_none": "Nema zabilježenih padova tražene cijene.",
+        "drops_more": "…još {n}",
+        "drops_note": "Tražene cijene, ne prodajne. Nije preporuka.",
+        "liquidity_title": "⏱ Najbrže nestaju iz naše pretrage",
+        "liquidity_how": "Dani od kad smo oglas prvi put vidjeli do zadnjeg viđenja, za oglase kojih više nema u pretrazi (prvi put viđeni u zadnjih {days} dana, bar {n} nestalih po modelu), najbrži prvi:",
+        "liquidity_row": "{label}: medijan {d} dana · nestalo {gone} od {seen} viđenih",
+        "liquidity_none": "Nema dovoljno podataka: nijedan model nema bar {n} oglasa koji su nestali iz pretrage uz ove filtere.",
+        "liquidity_caveat": "Nestanak iz naše pretrage nije potvrđena prodaja: oglas je mogao biti obrisan, istekao ili ispasti iz stranica koje pratimo. Dani se broje od kad smo oglas prvi put vidjeli, a ne od objave. Nije preporuka.",
+        "clarify_km_unit": "Misliš li {amount} KM (cijena) ili {amount} km (kilometraža)?",
+        "btn_unit_price": "💰 Do {amount} KM (cijena)",
+        "btn_unit_km": "🛣 Do {amount} km (kilometraža)",
         "seen_row": "Viđeno {age} ({when})",
         "old_warning": "⚠ Zadnji put viđeno prije više od {days} dana: oglas možda više nije aktivan. Provjeri link prije nego što se osloniš na njega.",
         "filters_note": "Oglasi bez upisane godine ili kilometraže nisu uključeni kad se koriste ti filteri.",
@@ -303,10 +345,12 @@ auto auta autom kupim kupiti kupovinu hvala molim bok zdravo pozdrav dobro dobar
 hoću zelim želim trazim tražim nesto nešto jeftino jeftinije novije stariji uporedi usporedi ispod preko
 budzet budžet godina godište kilometara kilometraža pokazi pokaži daj daj mi vise više manje najbolje
 najpametnije prodaje prati pratim pratiti zaprati praćeni sačuvao sačuvani sacuvao sacuvani lista nova novo novi nove koji koja koje ovo ono moje tvoje je li jel sam smo ste su
+mozes možeš moze može mozemo probaj probati probaci probaći pogledaj vidi evo ej cao ćao staro stari staru
+godina godine godinu najlakse najlakše najbrze najbrže prodati prodam prodaju kilometraze kilometraže pa ali jer
 """.split())
 _EN_WORDS = set("""
 the an is are was what which how much many show me find get buy want need looking for under below
-above over with without and or but than please hello hi hey thanks thank you cars car price prices cheap
+above over with without and or but than please hello hi thanks thank you cars car price prices cheap
 cheaper cheapest best deal deals budget year mileage latest new newest should can could would there have
 has does my it this that of in from follow following track watch followed
 """.split())

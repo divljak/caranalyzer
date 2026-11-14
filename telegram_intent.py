@@ -10,6 +10,7 @@ the user explicitly replied to, so it cannot cross users or chats.
 """
 
 from dataclasses import dataclass, replace
+from datetime import date
 import re
 import unicodedata
 
@@ -31,14 +32,16 @@ class Filters:
     budget: int | None = None
     year_min: int | None = None
     mileage_max: int | None = None
+    family: bool = False  # "za porodicu": limit to roomier models (see telegram_bot.FAMILY_MODELS)
+    include_old: bool = False  # also show listings last seen 14-90 days ago (hidden by default)
 
     def is_empty(self):
-        return not (self.search or self.budget or self.year_min or self.mileage_max)
+        return not (self.search or self.budget or self.year_min or self.mileage_max or self.family)
 
 
 @dataclass(frozen=True)
 class Intent:
-    kind: str  # status|latest|trends|find|compare|model_stats|clarify|unsupported
+    kind: str  # status|latest|trends|find|compare|model_stats|liquidity|clarify|unsupported
     filters: Filters = Filters()
     days: int = 7
     labels: tuple[str, ...] = ()
@@ -99,6 +102,8 @@ mogu mozes moze mozemo mozete mogao mogla htio htjela zelio zelim volio bih bi n
 reci kazi pitam pitao hocu hoces dobar dobra dobro dobre bolji bolja bolje fin fina fino lijep lijepa cao cao-cao ej hej
 hi hey hello thx yes no yeah ok okay maybe also just really very quite enough something anything
 moj moja moje my nesto family porodica porodicu porodicni porodicno familiju sporty
+ne nije se ovo ono ovu gore probaj probati probaci probajte pogledaj this above try mileage kilometraza kilometraze
+kilometers kilometres najlakse najbrze prodati prodam lako brzo staro stari staru godina godine godinu
 """.split())
 
 _MENTION = re.compile(r"@\w+")
@@ -107,6 +112,20 @@ _MILEAGE_CUES = r"(?:mileage|kilometraz\w*|kilometers|kilometres|odvozen\w*|prij
 
 def strip_mentions(value):
     return re.sub(r"\s+", " ", _MENTION.sub(" ", value or "")).strip()
+
+
+_FAMILY = (r"\b(?:porodic\w*|familij\w*|famil(?:y|ies)|djec\w*|dijete|djete|kids?|children|karavan\w*|"
+           r"monovolumen\w*|kombi\w*|wagon|estate|mpv|minivan|prostran\w*|roomy|spacious|sedmosjed\w*|7 sjedist\w*)\b")
+_INCLUDE_OLD = (r"\b(?:(?:i |ukljuci (?:i )?|pokazi (?:i )?|sa |s )starij\w*|"
+                r"include (?:the )?older|older (?:ones|ads|listings) too|with older|incl\w* old\w*)\b")
+
+
+def wants_family(folded):
+    return re.search(_FAMILY, folded) is not None
+
+
+def wants_older(folded):
+    return re.search(_INCLUDE_OLD, folded) is not None
 
 
 def _extract_filters(folded, original):
@@ -131,11 +150,42 @@ def _extract_filters(folded, original):
                 consume(match)
                 break
 
+    if year is None:
+        # "staro do 10 godina", "ne starije od 8 godina", "do 10 godina staro", "up to 10 years old"
+        for pattern in (
+            r"\b(?:star\w*|mladj?\w*|old)\s+(?:do|od|max|up to|under|less than|than)?\s*([0-9]{1,2})\s*(?:god\w*|years?)\b",
+            r"\b(?:do|max|up to|under|less than)\s*([0-9]{1,2})\s*(?:god\w*|years?)(?:\s*(?:star\w*|old))?\b",
+            r"\b([0-9]{1,2})\s*(?:god\w*|years?)\s*(?:star\w*|old)\b",
+        ):
+            match = re.search(pattern, folded)
+            if match and 1 <= int(match.group(1)) <= 40:
+                year = date.today().year - int(match.group(1))
+                consume(match)
+                break
+
     mileage = None
+    unit_unclear = None
+    # A number followed by "km" written in lowercase is mileage ("do 20000km"); "KM", "maraka" or
+    # "BAM" is a price. A mixed-case "Km" could be either, so the bot asks instead of guessing.
+    for match in re.finditer(rf"(?<![0-9.,]){_AMOUNT}\s*(km|Km|kM)\b", original):
+        if not all(mask[i] for i in range(match.start(), match.end())):
+            continue
+        if match.group(3) == "km":
+            candidate = _amount(match.group(1), match.group(2), MILEAGE_RANGE)
+            if candidate:
+                mileage = candidate
+                consume(match)
+                break
+        else:
+            unit_unclear = _amount(match.group(1), match.group(2), MILEAGE_RANGE)
+            consume(match)
+            break
     for pattern in (
         rf"{_AMOUNT}\s*(?:km|kilometara)?\s*(?:{_MILEAGE_CUES}|or less|max)\b",
         rf"{_MILEAGE_CUES}\D{{0,16}}?{_AMOUNT}\s*(?:km|kilometara)?",
     ):
+        if mileage is not None:
+            break
         match = re.search(pattern, folded)
         if match:
             candidate = _amount(match.group(1), match.group(2), MILEAGE_RANGE)
@@ -154,8 +204,17 @@ def _extract_filters(folded, original):
             consume(match)
             break
 
+    for match in (list(re.finditer(_FAMILY, folded)) + list(re.finditer(_INCLUDE_OLD, folded))
+                  + list(re.finditer(_LIQUID, folded))):
+        consume(match)
     rest = "".join(char if keep else " " for char, keep in zip(original, mask))
-    return Filters(budget=budget, year_min=year, mileage_max=mileage), rest
+    filters = Filters(budget=budget, year_min=year, mileage_max=mileage, family=wants_family(folded),
+                      include_old=wants_older(folded))
+    _UNCLEAR[0] = unit_unclear
+    return filters, rest
+
+
+_UNCLEAR = [None]  # amount whose unit (KM price or km mileage) was unclear in the last parse
 
 
 def _singular(token):
@@ -232,16 +291,19 @@ def looks_like_followup(text_value):
     if _FOLLOWUP_CUE.match(original):
         return True
     filters, rest = _extract_filters(fold(original), original)
-    return not filters.is_empty() and not _search_tokens(rest)
+    numeric = filters.budget or filters.year_min or filters.mileage_max
+    return bool(numeric or filters.include_old) and not _search_tokens(rest)
 
 
 # Titles the bot puts on its first line, per language. Replies are parsed back from them, so a
 # follow-up works whichever language the answer was in.
 _TITLES = (
     {"trends": "Observed asking-price changes · last ", "trends_unit": "days",
-     "budget": "Recently observed at or below ", "find": "Observed listings", "upto": "up to ", "from": "from "},
+     "budget": "Recently observed at or below ", "find": "Observed listings", "upto": "up to ", "from": "from ",
+     "family": "for a family", "old": "incl. older"},
     {"trends": "Zabilježene promjene tražene cijene · zadnjih ", "trends_unit": "dana",
-     "budget": "Nedavno viđeno do ", "find": "Viđeni oglasi", "upto": "do ", "from": "od "},
+     "budget": "Nedavno viđeno do ", "find": "Viđeni oglasi", "upto": "do ", "from": "od ",
+     "family": "za porodicu", "old": "i stariji"},
 )
 
 
@@ -262,13 +324,17 @@ def context_from_reply(reply_text):
                 return Intent("find", Filters(clean_search(search), budget))
             return None
         if first.startswith(titles["find"]):
-            search, budget, year, mileage = "", None, None, None
+            search, budget, year, mileage, family, old = "", None, None, None, False, False
             upto, since = titles["upto"], titles["from"]
             for piece in first[len(titles["find"]):].split(" · "):
                 piece = piece.strip()
                 if not piece:
                     continue
-                if piece.startswith(upto) and piece.endswith(" KM"):
+                if piece == titles["family"]:
+                    family = True
+                elif piece == titles["old"]:
+                    old = True
+                elif piece.startswith(upto) and piece.endswith(" KM"):
                     budget = _amount(piece[len(upto):-3], None, PRICE_RANGE)
                 elif piece.startswith(upto) and piece.endswith(" km"):
                     mileage = _amount(piece[len(upto):-3], None, MILEAGE_RANGE)
@@ -276,7 +342,7 @@ def context_from_reply(reply_text):
                     year = _amount(piece[len(since):], None, YEAR_RANGE)
                 else:
                     search = clean_search(piece)
-            return Intent("find", Filters(search, budget, year, mileage))
+            return Intent("find", Filters(search, budget, year, mileage, family, old))
     return None
 
 
@@ -286,6 +352,11 @@ _STATUS = r"\b(?:status|fresh\w*|up to date|stale|collector|how old|when was|azu
 _LATEST = r"\b(?:latest|newest|what'?s new|whats new|new listings|interesting|finds|najnovij\w*|sta ima novo|novo)\b"
 _TRENDS = (r"\b(?:trend\w*|price changes?|prices? (?:drop|fall|rise|change)\w*|pojeftin\w*|poskup\w*)|"
            r"\bcijen\w*.*\b(?:mijenj|pad|rast)\w*|\b(?:mijenj|pad|rast)\w*.*\bcijen\w*")
+_LIQUID = (r"\bnajlak\w*(?:\s+\w+){0,2}\s+prod\w*|\bnajbrz\w*(?:\s+\w+){0,2}\s+prod\w*|"
+           r"\b(?:brzo|lako|lakse|brze)\s+(?:se\s+)?prod\w*|\b(?:naj)?likvid\w*|\beasiest to sell\b|"
+           r"\bsells? (?:the )?(?:fastest|quickest)\b|\bquickest to sell\b|\bsell(?:s)? (?:fast|quickly)\b|"
+           r"\bfastest (?:to )?sell\w*\b")
+_GREETING = r"^(?:hej|hey|hi|hello|ej|bok|cao|zdravo|pozdrav|selam|merhaba|yo|sta ima|kako si|dobar dan|dobro jutro)\W*$"
 _FORECAST = r"\b(?:will|predict\w*|forecast\w*|going to|next (?:year|month|week)|prognoz\w*|hoce li|budu[cć]\w*)\b"
 _CURRENCY = r"\b(?:eur|euro|euros|usd|dollars?)\b|[€$]"
 _ACK = r"^(?:thanks|thank you|thx|ty|ok|okay|hvala|super|great|nice|cool|sjajno)\W*$"
@@ -307,6 +378,8 @@ def parse_question(text_value, context=None):
 
     if re.search(_ACK, folded):
         return Intent("ignore")
+    if re.search(_GREETING, folded):
+        return Intent("chitchat")
     if re.search(_FORECAST, folded):
         return Intent("unsupported", note="forecast")
     if re.search(_CURRENCY, folded):
@@ -323,9 +396,18 @@ def parse_question(text_value, context=None):
         return Intent("trends", days=days)
 
     filters, rest = _extract_filters(folded, original)
+    unclear = _UNCLEAR[0]
     tokens = _search_tokens(rest)
     named = tokens if any(not token.isdigit() for token in tokens) else []
     filters = replace(filters, search=clean_search(" ".join(named)))
+
+    if unclear and filters.budget is None and filters.mileage_max is None:
+        # one tap decides: price (KM) or mileage (km)
+        kind = ("liquidity",) if re.search(_LIQUID, folded) else ()
+        return Intent("clarify", filters, note="km_unit", offset=unclear, labels=kind)
+
+    if re.search(_LIQUID, folded):
+        return Intent("liquidity", filters)
 
     if re.search(_SHORTLIST, folded) and not filters.search and filters.budget is None:
         return Intent("shortlist")
@@ -340,7 +422,7 @@ def parse_question(text_value, context=None):
     model_words = [t for t in tokens if len(t) > 2 or any(c.isdigit() for c in t)]
     if filters.budget and re.search(_SUGGEST, folded) and (not model_words or len(model_words) >= 3):
         return Intent("suggest", Filters(budget=filters.budget, year_min=filters.year_min,
-                                          mileage_max=filters.mileage_max))
+                                          mileage_max=filters.mileage_max, family=filters.family))
 
     if filters.is_empty():
         if re.search(_ADVICE, folded):
@@ -357,16 +439,18 @@ def parse_question(text_value, context=None):
                            and len(original.split()) >= 9):
         return Intent("unsupported")  # a sentence, not a car name
 
-    if context and context.kind == "find" and not filters.is_empty():
+    if context and context.kind == "find" and (not filters.is_empty() or filters.include_old):
         return Intent("find", Filters(
             search=filters.search or context.filters.search,
             budget=filters.budget or context.filters.budget,
             year_min=filters.year_min or context.filters.year_min,
             mileage_max=filters.mileage_max or context.filters.mileage_max,
+            family=filters.family or context.filters.family,
+            include_old=filters.include_old or context.filters.include_old,
         ))
 
     if not filters.is_empty():
-        if (filters.search and filters.budget is None and filters.year_min is None
+        if (filters.search and filters.budget is None and not filters.family and filters.year_min is None
                 and filters.mileage_max is None and re.search(_STATS, folded)):
             return Intent("model_stats", filters)
         return Intent("find", filters)
