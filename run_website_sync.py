@@ -3,6 +3,7 @@
 import argparse
 from datetime import datetime, timezone
 import os
+from selenium.common.exceptions import WebDriverException
 from sqlalchemy.exc import SQLAlchemyError
 import json
 import logging
@@ -27,7 +28,8 @@ def sync(db, store, browser, *, search_pages=3, detail_checks=20, delay=15, bran
     report = dict(status='running', search_attempted=0, detail_attempted=0, discovery_complete=0,
                   details_completed=0, observations=0, new_listings=0, errors=0,
                   scope=query, coverage='bounded_newest_sample', source_total=None, page_stats=[],
-                  known_overlap=0, rejected=0, stopped_reason=None, sale_inference=False)
+                  known_overlap=0, rejected=0, stopped_reason=None, sale_inference=False,
+                  search_retries=0, failures=[])
     session_id, started = session_prefix + str(uuid.uuid4()), now()
     run_id = store.start_run(session_id, started, query, search_pages, detail_checks)
     log_id = db.add_scraping_log(session_id=session_id, start_time=started, status='running',
@@ -36,12 +38,41 @@ def sync(db, store, browser, *, search_pages=3, detail_checks=20, delay=15, bran
     validated_pages, terminal_page = 0, False
     discovery_pages, baseline = [], None
 
-    def visit(url, kind):
-        wait = store.reserve(kind, now(), search_pages, detail_checks, delay)
+    context = {}
+
+    def visit(url, kind, page=None, attempt=1):
+        context.update(phase=kind, url=url, page=page, attempt=attempt)
+        # After the single page-1 retry, this run's search ceiling is one visit
+        # higher so pages 2-3 still fit; every visit is still counted, spaced
+        # and subject to the persistent pause.
+        extra = {'retry_allowance': 1} if kind == 'search' and report['search_retries'] else {}
+        wait = store.reserve(kind, now(), search_pages, detail_checks, delay, **extra)
         report[kind + '_attempted'] += 1
         if wait:
             sleep(wait)
         return browser.read(url, kind)
+
+    def failure(exc):
+        record = {**context, 'exception': type(exc).__name__, 'message': str(exc)[:250]}
+        record.update(getattr(exc, 'diagnostics', None) or {})
+        return record
+
+    def read_search(page_number):
+        url = search_url(page_number, brand, model)
+        try:
+            return visit(url, 'search', page_number)
+        except (WebsiteDOMTimeout, WebDriverException) as exc:
+            # One bounded retry, page 1 only, on navigation/DOM timeout or a
+            # renderer failure. Refusals (403/429/challenge) are WebsiteBlocked
+            # and never reach this branch.
+            if page_number != 1 or report['search_retries']:
+                raise
+            report['failures'].append(failure(exc))
+            report['search_retries'] += 1
+            restart = getattr(browser, 'restart', None)
+            if restart:
+                restart()
+            return visit(url, 'search', page_number, attempt=2)
 
     try:
         budget = store.budget(now())
@@ -50,7 +81,7 @@ def sync(db, store, browser, *, search_pages=3, detail_checks=20, delay=15, bran
         if remaining_search and not (budget['pause_until'] and budget['pause_until'] > started.isoformat() + 'Z'):
             baseline = store.discovery_baseline(query, started)
         for page_number in range(1, remaining_search + 1):
-            page = parse_search(visit(search_url(page_number, brand, model), 'search'), page_number, query)
+            page = parse_search(read_search(page_number), page_number, query)
             ids = {item['listing_id'] for item in page['listings']}
             fingerprint = tuple(sorted(ids))
             if ids and fingerprint in fingerprints:
@@ -84,13 +115,13 @@ def sync(db, store, browser, *, search_pages=3, detail_checks=20, delay=15, bran
                 raise WebsiteReadError('Search terminal page conflicts with its result count')
         report['discovery_complete'] = int(
             remaining_search == search_pages and search_pages > 0 and report['rejected'] == 0
-            and validated_pages == report['search_attempted']
+            and validated_pages == report['search_attempted'] - report['search_retries']
             and (validated_pages == search_pages or terminal_page))
         # Search absence is deliberately unused. Only direct, successful checks affect status.
         for lid in store.candidates(now(), remaining_details):
             checked_at = now()
             try:
-                result = parse_detail(visit(f'https://olx.ba/artikal/{lid}', 'detail'), lid)
+                result = parse_detail(visit(f'https://olx.ba/artikal/{lid}', 'detail', lid), lid)
                 checked_at = now()
                 if result['outcome'] == 'blocked':
                     raise WebsiteBlocked('Website access was refused')
@@ -123,7 +154,8 @@ def sync(db, store, browser, *, search_pages=3, detail_checks=20, delay=15, bran
                 raise WebsiteReadError('Two consecutive detail failures; stopping without retries')
         report['status'] = ('partial' if report['errors'] or report['rejected'] else
                             'completed' if report['discovery_complete'] or report['observations'] or report['details_completed'] else 'budget_exhausted')
-    except WebsiteBlocked:
+    except WebsiteBlocked as exc:
+        report['failures'].append(failure(exc))
         store.pause(now())
         report.update(status='paused', stopped_reason='source_refusal', errors=report['errors'] + 1)
     except SourcePaused:
@@ -131,6 +163,7 @@ def sync(db, store, browser, *, search_pages=3, detail_checks=20, delay=15, bran
     except BudgetExhausted:
         report.update(status='budget_exhausted', stopped_reason='daily_page_budget')
     except Exception as exc:
+        report['failures'].append(failure(exc))
         report.update(status='partial' if report['observations'] else 'failed',
                       stopped_reason=type(exc).__name__ if isinstance(exc, SQLAlchemyError) else str(exc)[:250], errors=report['errors'] + 1)
     finally:

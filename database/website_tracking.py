@@ -110,12 +110,19 @@ class WebsiteStore:
                     'detail_used': row.detail_visits if row and row.day == now.date() else 0,
                     'pause_until': row.pause_until.isoformat() + 'Z' if row and row.pause_until else None}
 
-    def reserve(self, kind, now, search_limit, detail_limit, min_spacing):
-        """Count attempts BEFORE navigation; failed visits and reruns consume budget."""
+    def reserve(self, kind, now, search_limit, detail_limit, min_spacing, retry_allowance=0):
+        """Count attempts BEFORE navigation; failed visits and reruns consume budget.
+
+        retry_allowance=1 is only for the single bounded page-1 retry: it lets that
+        retry be counted without costing the run its last discovery page.
+        """
         if kind not in {'search', 'detail'}:
             raise ValueError('Unknown visit type')
         if not 0 <= search_limit <= 3 or not 0 <= detail_limit <= 50 or min_spacing < 15:
             raise ValueError('Pilot ceilings are 3 search pages, 50 ad pages, and at least 15 seconds between visits')
+        if retry_allowance not in (0, 1) or (retry_allowance and kind != 'search'):
+            raise ValueError('Only one extra search visit is allowed, for the page-1 retry')
+        search_limit += retry_allowance
         with self.sessions.begin() as session:
             row = session.query(WebsiteBudget).filter_by(id=1).with_for_update().first()
             if row is None:

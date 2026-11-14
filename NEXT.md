@@ -1,10 +1,62 @@
-# Next: arm the Garaža morning digest
+# Next
+
+## 1. Turn on the VPS trigger for the daily collection (Ogi, ~3 minutes)
+
+The collector now runs on GitHub Actions. The VPS only needs a token to start it.
+Fine-grained tokens can only be created in the GitHub UI.
+
+1. GitHub → Settings → Developer settings → Personal access tokens → **Fine-grained
+   tokens** → Generate new token.
+   - Name `car-analyzer-vps-dispatch`, expiry 1 year (set a reminder).
+   - Resource owner `divljak`. Repository access: **Only select repositories →
+     `divljak/caranalyzer`**.
+   - Repository permissions: **Actions → Read and write**. Leave everything else at
+     *No access* (Metadata: read-only is added automatically).
+2. On the VPS (the token is read from stdin, so it never appears in shell history or
+   argv):
+   ```bash
+   ( umask 077; cat > /etc/car-analyzer/github-dispatch-token )   # paste token, Enter, Ctrl-D
+   car-analyzer-dispatch verify          # should print "Dispatched daily-collect.yml ... (mode=verify)"
+   systemctl enable --now car-analyzer-dispatch.timer
+   systemctl list-timers car-analyzer-dispatch.timer
+   ```
+   The `verify` run visits no OLX pages and rolls back its test writes.
+
+Until then the GitHub `schedule` fallback collects at 09:40 UTC (10:40 Sarajevo).
+
+## 2. Decommission the VPS Postgres (later, needs Ogi's approval)
+
+Nothing writes to it: the last application write was 13 Oct 2026 17:48 Sarajevo. The
+container `car-analyzer-postgres-1` (postgres:16-alpine, 76 MB volume, no host port)
+is still running. Still tied to the VPS:
+
+| Thing | Depends on VPS Postgres? | Action |
+| --- | --- | --- |
+| `car-analyzer-collector.service` (disabled timer) | Original ExecStart did (`docker compose run collector`). The direct override does not. | Keep disabled; delete units at decommission |
+| `scripts/backup-postgres.sh`, `deploy/install-direct-collector.sh` | Yes (local dumps / one-time reconciliation) | Retire with the database |
+| `car-analyzer-health.timer` (`scripts/collector_health.py`) | No, but it reads the old timer state and `.daily-delivery/latest-direct-attempt.json` | Will report the timer disabled and the backup stale. Repoint at Supabase run rows or disable |
+| Canonical backup (`.daily-delivery/backup-tools/run-canonical-backup.sh`) | No (it reads Supabase), but it ran as the old timer's ExecStartPre | Stopped with the timer. Replaced by the encrypted per-run artifact. Re-home it if a longer history is needed |
+| `vault-sync.timer`, `/root/.hermes`, other bot images | Not part of Car Analyzer | Check before cancelling the droplet |
+
+Decommission steps, once approved:
+```bash
+cd /opt/car-analyzer
+docker compose exec -T postgres sh -c 'pg_dumpall -U "$POSTGRES_USER"' | gzip > /root/car-analyzer-final-$(date +%F).sql.gz
+# copy that file off the VPS and verify it opens, then:
+docker compose stop postgres && docker compose rm -f postgres
+docker volume ls | grep postgres_data       # note the volume name; remove it only after the off-VPS copy is verified
+systemctl disable --now car-analyzer-health.timer   # or repoint it first
+```
+Then the droplet only runs the dispatch timer. That can move to any always-on machine,
+or be dropped in favour of the GitHub schedule alone, before cancelling DigitalOcean.
+
+## 3. Arm the Garaža morning digest
 
 The digest code is in the repo and is **not live**. Nothing here starts the
 collector, changes a database role, cancels DigitalOcean, or registers a Telegram
 webhook. Do not paste `TELEGRAM_BOT_TOKEN` into chat, a commit, or a shell argument.
 
-## What the route does
+### What the route does
 
 `GET /api/telegram/digest`
 
@@ -37,7 +89,7 @@ same HTTPS origin (`/market`, `/compare`, `/following`). Those preview URLs are
 still behind Vercel login. Friends in the Telegram group may not be able to open
 them.
 
-## Env (names only)
+### Env (names only)
 
 Set these in Vercel Production. The token is already in the Grok Bot vault as
 login `t.me` (id 3166033). Copy it from there. Do not invent a new bot.
@@ -60,7 +112,7 @@ optional name, `TELEGRAM_BOT_USERNAME` (`mojagaraza_bot`), and the Gemini fallba
 language is unknown. All are optional:
 without the key the bot uses its built-in parser only.
 
-## Deploy checklist
+### Deploy checklist
 
 1. Read a dry render locally against a read-only connection. Export the env vars
    in the process environment (not in the repo), then request
@@ -92,7 +144,7 @@ without the key the bot uses its built-in parser only.
    the interactive bot is also being activated. That command is a separate
    production change.
 
-## Still blocked
+### Still blocked
 
 - Collector: partial 5 November run, clean anchor 1 October. The digest warns. It
   does not make collection healthy.

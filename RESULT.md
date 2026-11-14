@@ -1,5 +1,40 @@
 # Car Analyzer: current state and concrete next steps
 
+## Update 14 November 2026: collector moved to GitHub Actions
+
+This section replaces the collector parts of the 5 November status below.
+
+- **Why it broke:** OLX relaunched as **PIK** on 10 November. Every selector changed:
+  the count now reads "47.810 oglasa", cards are `article.listing-card`, URLs carry a
+  slug, and detail labels are `dt`/`dd`. Runs 43–47 (10–14 Nov) failed page 1 with
+  `Reserved visit did not produce a verified DOM`. There was no block (no 403/429), and
+  the VPS, disk, memory and Chrome were not the cause. Last clean collection: **9 Nov**
+  (run 42: 3 search pages, 20/20 details, 114 observations, 39 new).
+- **Fix (PR #36):** the parser reads both layouts with all integrity and refusal checks
+  unchanged; one bounded page-1 retry; structured failure telemetry in
+  `website_collection_runs.report.failures[]` and a diagnostics artifact.
+- **New flow:** `.github/workflows/daily-collect.yml` collects into Supabase. A tiny VPS
+  timer will call `workflow_dispatch` at 08:15 Europe/Sarajevo. A GitHub `schedule` at
+  09:40 UTC is a fallback that does nothing if today's run already succeeded. See
+  [docs/DAILY_COLLECTION.md](docs/DAILY_COLLECTION.md).
+- **First GitHub collection (14 Nov, 21:19 UTC, run 48):**
+  [Actions run 43642034890](https://github.com/divljak/caranalyzer/actions/runs/43642034890).
+  2 search pages (50/50 cards, 0 rejected), 20/20 details (6 listed, 14 confirmed
+  still unavailable), 0 errors, **90 observations, 76 new listings**. Listings went
+  7,521 → 7,597 and snapshots 18,482 → 18,572. Status is `partial` only because this
+  morning's failed VPS run had already used 1 of today's 3 search visits.
+- **VPS:** old `car-analyzer-collector.timer` is **disabled** (unit files, release and
+  local PostgreSQL kept). `car-analyzer-dispatch.timer` is installed but **not enabled**
+  until Ogi creates the GitHub token (NEXT.md). Until then the 09:40 UTC schedule
+  fallback collects each day.
+- **Known gaps:** PIK cards don't mark shops, so new listings have `seller_type = NULL`
+  (existing values are never overwritten). Featured cards repeat across pages, so 2
+  pages gave 90 rather than 100 unique listings. Disabling the old timer also stopped
+  the VPS canonical backup (it ran as that timer's `ExecStartPre`). Each Actions run now
+  keeps an age-encrypted before/after snapshot for 30 days instead.
+
+## Status as of 5 November 2026 (collector parts superseded above)
+
 Status checked on **5 November 2026**. No Telegram bot was created, no production
 rows or credentials were changed, and the DigitalOcean collector remains enabled.
 

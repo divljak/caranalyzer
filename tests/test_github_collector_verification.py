@@ -66,6 +66,44 @@ class GitHubCollectorVerificationTests(unittest.TestCase):
         self.assertNotIn("COLLECTOR_DB_PASSWORD", seen["env"])
         self.assertNotIn("BACKUP_DB_PASSWORD", seen["env"])
 
+    def test_daily_workflow_may_collect_but_other_workflows_may_not(self):
+        base = {
+            "GITHUB_ACTIONS": "true",
+            "COLLECTOR_DB_PASSWORD": "collector-test-only",
+            "BACKUP_DB_PASSWORD": "backup-test-only",
+            "COLLECTOR_RUN_MODE": "daily",
+            "PATH": os.environ.get("PATH", ""),
+        }
+        daily_ref = "divljak/caranalyzer/.github/workflows/daily-collect.yml@refs/heads/main"
+        for event, ref in [("pull_request", daily_ref), ("workflow_dispatch",
+                           "divljak/caranalyzer/.github/workflows/collector-verify.yml@refs/heads/main")]:
+            runner = Mock()
+            with self.assertRaises(ConfigurationError):
+                run_verification("test-image", environ={**base, "GITHUB_EVENT_NAME": event,
+                                 "GITHUB_WORKFLOW_REF": ref}, runner=runner, collect=True)
+            runner.assert_not_called()
+
+        def runner(command, *, env, check):
+            state = Path(command[command.index("--mount", command.index("--mount") + 1) + 1]
+                         .split("src=", 1)[1].split(",", 1)[0])
+            (state / "latest-direct-attempt.json").write_text(json.dumps({
+                "exit_code": 1, "collection": {"status": "failed", "failures": [{"phase": "search", "page": 1}]},
+                "before": {"path": "/state/x", "counts": {"car_listings": 7}, "checksums": {"a": "b"}},
+            }))
+            self.assertNotIn("--verify-only", command)
+            return SimpleNamespace(returncode=1)
+
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory) / "diag" / "diagnostics.json"
+            for event in ("workflow_dispatch", "schedule"):
+                self.assertEqual(1, run_verification(
+                    "test-image", environ={**base, "GITHUB_EVENT_NAME": event, "GITHUB_WORKFLOW_REF": daily_ref},
+                    runner=runner, collect=True, diagnostics=out))
+            summary = json.loads(out.read_text())
+        self.assertEqual("search", summary["collection"]["failures"][0]["phase"])
+        self.assertEqual({"car_listings": 7}, summary["before_counts"])
+        self.assertNotIn("before", summary)  # no backup path or checksums in a public artifact
+
     def test_failed_collection_still_encrypts_completed_after_snapshot(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
