@@ -94,7 +94,7 @@ def merge_filters(base, new):
 
 @dataclass(frozen=True)
 class Intent:
-    kind: str  # status|latest|trends|find|compare|model_stats|price_check|liquidity|clarify|unsupported
+    kind: str  # status|latest|trends|find|compare|model_stats|price_check|liquidity|deals|clarify|unsupported
     filters: Filters = Filters()
     days: int = 7
     labels: tuple[str, ...] = ()
@@ -403,6 +403,7 @@ def _extract_filters(folded, original, km_is_price=False):
     gearbox, gearbox_spans = _attribute(folded, _GEARBOXES)
     for match in (list(re.finditer(_FAMILY, folded)) + list(re.finditer(_INCLUDE_OLD, folded))
                   + list(re.finditer(_LIQUID, folded)) + list(re.finditer(_NEW_CARS, folded))
+                  + list(re.finditer(_DEALS, folded))
                   + list(fuel_spans) + list(gearbox_spans)):
         consume(match)
     rest = "".join(char if keep else " " for char, keep in zip(original, mask))
@@ -615,13 +616,13 @@ _TITLES = (
     {"trends": "Observed asking-price changes · last ", "trends_unit": "days",
      "budget": "Recently observed at or below ", "find": "Observed listings", "upto": "up to ", "from": "from ",
      "family": "for a family", "old": "incl. older", "suggest": "Data-based shortlist",
-     "liquidity": "⏱ Fastest to disappear from our search", "new": "incl. new",
+     "liquidity": "⏱ Fastest to disappear from our search", "new": "incl. new", "deals": "🏷 Good deals",
      "fuel": {"diesel": "diesel", "petrol": "petrol", "hybrid": "hybrid", "electric": "electric", "lpg": "LPG"},
      "gearbox": {"automatic": "automatic", "manual": "manual"}},
     {"trends": "Zabilježene promjene tražene cijene · zadnjih ", "trends_unit": "dana",
      "budget": "Nedavno viđeno do ", "find": "Viđeni oglasi", "upto": "do ", "from": "od ",
      "family": "za porodicu", "old": "i stariji", "suggest": "Uža lista na osnovu podataka",
-     "liquidity": "⏱ Najbrže nestaju iz naše pretrage", "new": "i novi",
+     "liquidity": "⏱ Najbrže nestaju iz naše pretrage", "new": "i novi", "deals": "🏷 Dobre prilike",
      "fuel": {"diesel": "dizel", "petrol": "benzin", "hybrid": "hibrid", "electric": "električni", "lpg": "LPG"},
      "gearbox": {"automatic": "automatik", "manual": "manuelni"}},
 )
@@ -642,6 +643,7 @@ def _title_filters(body, titles):
             continue
         price_span = re.fullmatch(rf"([0-9.]+){_DASH}([0-9.]+) KM", piece)
         year_span = re.fullmatch(rf"((?:19|20)[0-9]{{2}}){_DASH}((?:19|20)[0-9]{{2}})", piece)
+        one_year = re.fullmatch(r"(?:19|20)[0-9]{2}", piece)
         if piece == titles["family"]:
             values["family"] = True
         elif piece == titles["old"]:
@@ -658,6 +660,8 @@ def _title_filters(body, titles):
         elif year_span:
             values["year_min"] = _amount(year_span.group(1), None, YEAR_RANGE)
             values["year_max"] = _amount(year_span.group(2), None, YEAR_RANGE)
+        elif one_year:  # "golf 15" is shown as "· 2015": that model year only
+            values["year_min"] = values["year_max"] = _amount(piece, None, YEAR_RANGE)
         elif piece.startswith(upto) and piece.endswith(" KM"):
             values["budget"] = _amount(piece[len(upto):-3], None, PRICE_RANGE)
         elif piece.startswith(since) and piece.endswith(" KM"):
@@ -692,6 +696,8 @@ def _context_from_line(line):
         if line.startswith(titles["suggest"]):
             filters = replace(_title_filters(line[len(titles["suggest"]):], titles), search="")
             return Intent("suggest" if filters.budget else "find", filters)
+        if line.startswith(titles["deals"]):
+            return Intent("deals", _title_filters(line[len(titles["deals"]):], titles), days=DEAL_DEFAULT_DAYS)
         if line.startswith(titles["liquidity"]):
             return Intent("liquidity", _title_filters(line[len(titles["liquidity"]):], titles))
     return None
@@ -720,7 +726,92 @@ _LIQUID = (r"\bnajlak\w*(?:\s+\w+){0,2}\s+prod\w*|\bnajbrz\w*(?:\s+\w+){0,2}\s+p
            r"\b(?:brzo|lako|lakse|brze)\s+(?:se\s+)?prod\w*|\b(?:naj)?likvid\w*|\beasiest to sell\b|"
            r"\bsells? (?:the )?(?:fastest|quickest)\b|\bquickest to sell\b|\bsell(?:s)? (?:fast|quickly)\b|"
            r"\bfastest (?:to )?sell\w*\b")
-_GREETING = r"^(?:hej|hey|hi|hello|ej|bok|cao|zdravo|pozdrav|selam|merhaba|yo|sta ima|kako si|dobar dan|dobro jutro)\W*$"
+_GREETING = (r"^(?:hej|hey|hi|hello|ej|bok|cao|zdravo|pozdrav|selam|merhaba|yo|sta ima|kako si|dobar dan|dobro jutro|"
+             r"dobro vece|dobra vecer|laku noc|good (?:morning|evening|afternoon))"
+             r"(?:\s+(?:bote|bot|svima|ekipo|ekipa|garaza|there|everyone|all))?\W*$")
+# Small talk the bot answers itself (a short reply plus what it can do), so it never becomes a car
+# search ("kakvo je vrijeme danas?" used to search for a model called "vrijeme"). Checked only on
+# messages without digits. Gemini, when configured, still gets the first go and may word it better.
+_SMALL_TALK = (
+    ("weather", r"\b(?:kakvo (?:je )?vrijeme|vrijeme (?:je )?(?:danas|sutra|vani|napolju|ovdje)|"
+                r"(?:hoce li|da li ce) (?:padati|biti) (?:kisa|snijeg|suncan\w*|toplo|hladno)|"
+                r"weather|is it (?:raining|sunny|cold|hot)|vremensk\w* prognoz\w*|temperatur\w* (?:danas|vani|sutra))\b"),
+    ("how", r"^(?:(?:hej|hey|hi|hello|ej|bok|cao|zdravo)\W+)?(?:kako si|kako ste|kako ide|sta radis|"
+            r"sta ima novo kod tebe|how are you|how(?:'?s| is) it going|what'?s up|wassup)\b"),
+    ("about", r"\b(?:ko si (?:ti)?|sta si ti|ko te (?:je )?napravio|jesi li (?:ti )?(?:bot|covjek|robot)|"
+              r"who are you|what are you|are you (?:a )?(?:bot|human|robot)|"
+              r"sta (?:sve )?(?:znas|mozes|umijes)(?: raditi)?|what can you do|how do you work|kako radis|"
+              r"kako (?:mi )?mozes pomoci|how can you help)\W*$"),
+    ("joke", r"\b(?:ispricaj (?:mi )?(?:neki )?vic|reci (?:mi )?(?:neki )?vic|tell me a joke|a joke|vic)\W*$"),
+)
+
+
+SMALL_TALK_MAX_WORDS = 7
+
+
+def small_talk_topic(folded):
+    """'weather' | 'how' | 'about' | 'joke' | 'greeting' for small talk the bot can answer itself, else ''."""
+    if re.search(r"[0-9]", folded) or len(folded.split()) > SMALL_TALK_MAX_WORDS:
+        return ""  # a long sentence is not small talk the bot can answer itself
+    if re.search(_GREETING, folded):
+        return "greeting"
+    for topic, pattern in _SMALL_TALK:
+        if re.search(pattern, folded):
+            return topic
+    return ""
+
+
+# "dobre ponude", "dobre prilike", "povoljno", "good deals", "bargains": the deals section (listings
+# priced well below the same model and year). "je li ovo dobra cijena" stays a price check.
+_DEALS = (r"\b(?:dobr\w*|odlicn\w*|super|top|povoljn\w*|najbolj\w*|zanimljiv\w*)\s+(?:ponud\w*|prilik\w*|kupovin\w*)|"
+          r"\bpovoljn\w*|\bprilik\w*\b|\bispod (?:prosjek\w*|medijan\w*|trzisn\w*)|"
+          r"\b(?:good|great|best|hot|top|cheap)\s+deals\b|\bbargains?\b|\bunderpriced\b|\bdeals? (?:this|of the) week\b")
+_DEAL_CHEAPEST = r"\b(?:najjeftin\w*|cheapest)\b"
+DEAL_WEEK_DAYS = 7
+DEAL_DEFAULT_DAYS = 14  # same window as the shortlist's "priced well below similar listings"
+
+_YEAR_SINGLE = (
+    (r"(?:from|since|after|newer than|od|iza|nakon|novije od)\s*((?:19|20)[0-9]{2})\b", False),
+    (r"\b((?:19|20)[0-9]{2})\s*(?:\+|or newer|or later|and newer|ili novije|i novije)", False),
+    (r"\b((?:19|20)[0-9]{2})\b", True),
+)
+
+
+def _stated_years(folded):
+    """(match, low, high) for the model years a message names: "2016-2019", "od 2018" (open end),
+    or a bare "2018" (that year only). None when it names none."""
+    span = _year_range(folded)
+    if span:
+        return span
+    for pattern, exact in _YEAR_SINGLE:
+        match = re.search(pattern, folded)
+        if match and YEAR_RANGE[0] <= int(match.group(1)) <= YEAR_RANGE[1]:
+            year = int(match.group(1))
+            return match, year, (year if exact else None)
+    return None
+
+
+SHORT_YEAR_MAX = 30  # "golf 15" is 2015; "golf 31" or higher is not read as a year
+
+
+def short_model_year(tokens, folded):
+    """("golf", "15") -> (["golf"], 2015): a two-digit number (00-30) right after a model word is a
+    model year when it is not one of that model's generations. Not when a unit, "k" or "godina" follows
+    ("golf 15k", "golf 15 godina"). Returns (tokens, None) when there is no such pair."""
+    for index in range(1, len(tokens)):
+        word, number = tokens[index - 1], tokens[index]
+        if not re.fullmatch(r"[0-9]{2}", number) or int(number) > SHORT_YEAR_MAX:
+            continue
+        if not re.search(r"[a-z]", fold(word)) or fold(word) in _STOPWORDS:
+            continue
+        model = _generation_model(word)
+        if model and number in GENERATIONS[model]:
+            continue
+        after = (r"(?![0-9]|\s*(?:k(?![a-z])|km|kn|bam|kam|maraka|hiljad\w*|iljad\w*|tisuc\w*|thousand|"
+                 r"god\w*|years?|eur\w*|[.,]?[0-9]|%))")
+        if re.search(rf"\b{re.escape(fold(word))}\s+{number}{after}", folded):
+            return tokens[:index] + tokens[index + 1:], 2000 + int(number)
+    return tokens, None
 _FORECAST = r"\b(?:will|predict\w*|forecast\w*|going to|next (?:year|month|week)|prognoz\w*|hoce li|budu[cć]\w*)\b"
 _CURRENCY = r"\b(?:eur|euro|euros|usd|dollars?)\b|[€$]"
 _ACK = r"^(?:thanks|thank you|thx|ty|ok|okay|hvala|super|great|nice|cool|sjajno)\W*$"
@@ -771,7 +862,7 @@ def _model_search(rest, named):
     return canonical_search(clean_search(" ".join(named)))
 
 
-CORRECTABLE = frozenset({"find", "suggest", "liquidity"})
+CORRECTABLE = frozenset({"find", "suggest", "liquidity", "deals"})
 
 
 def km_reads_as_price(previous_filters, folded):
@@ -834,8 +925,9 @@ def parse_question(text_value, context=None, _restating=False):
 
     if re.search(_ACK, folded):
         return Intent("ignore")
-    if re.search(_GREETING, folded):
-        return Intent("chitchat")
+    topic = small_talk_topic(folded)
+    if topic:
+        return Intent("chitchat", labels=(topic,))
 
     if not _restating and _CORRECTION.search(folded):
         if context is not None and context.kind in CORRECTABLE:
@@ -858,6 +950,13 @@ def parse_question(text_value, context=None, _restating=False):
     if re.search(_CURRENCY, folded):
         return Intent("clarify", note="currency")
 
+    years = _stated_years(folded)
+    if years:
+        match, low, high = years
+        yearless = original[:match.start()] + " " * (match.end() - match.start()) + original[match.end():]
+        labels = _compare_labels(yearless)
+        if labels:  # "Octavia ili Passat 2016-2019?": both cohorts in the years the user gave
+            return Intent("compare", Filters(year_min=low, year_max=high), labels=labels)
     labels = _compare_labels(original)
     if labels:
         return Intent("compare", labels=labels)
@@ -872,10 +971,22 @@ def parse_question(text_value, context=None, _restating=False):
     unclear = _UNCLEAR[0]
     tokens = _search_tokens(rest)
     tokens, generation = generation_hint(tokens)
+    if not (generation or filters.year_min or filters.year_max):
+        tokens, short_year = short_model_year(tokens, folded)
+        if short_year:  # "golf 15": model year 2015
+            filters = replace(filters, year_min=short_year, year_max=short_year)
     named = tokens if any(not token.isdigit() for token in tokens) else []
     filters = replace(filters, search=_model_search(rest, named))
     if generation and not (filters.year_min or filters.year_max):
         filters = replace(filters, year_min=generation[0], year_max=generation[1])
+
+    if re.search(_DEALS, folded) and not re.search(_LIQUID, folded):
+        if re.search(r"\b(?:je li|da li|jel|is (?:this|that|it))\b", folded):
+            return _price_check(filters, folded)  # "je li ovo dobra ponuda: Golf 2017 15000 KM"
+        week = re.search(r"\b(?:ov[aeiu]|ovaj|this)\s+(?:sedmic\w*|tjed\w*|week)|\b(?:danas|today)\b", folded)
+        return Intent("deals", replace(filters, include_old=False),
+                      days=DEAL_WEEK_DAYS if week else DEAL_DEFAULT_DAYS,
+                      labels=("cheapest",) if re.search(_DEAL_CHEAPEST, folded) else ())
 
     if re.search(_PRICE_CHECK, folded) and not re.search(_LIQUID, folded):
         return _price_check(filters, folded)
@@ -919,11 +1030,12 @@ def parse_question(text_value, context=None, _restating=False):
     if context and context.kind == "find" and (not filters.is_empty() or filters.include_old):
         return Intent("find", merge_filters(context.filters, filters))
 
-    if (context and context.kind in {"suggest", "liquidity"} and (filters.numeric() or filters.attributes())
+    if (context and context.kind in {"suggest", "liquidity", "deals"} and (filters.numeric() or filters.attributes())
             and not filters.search
             and (context.kind != "suggest" or context.filters.budget or filters.budget)):
         # "a od 2020?" in reply to a shortlist: same question, narrower bounds
-        return Intent(context.kind, merge_filters(context.filters, filters))
+        return Intent(context.kind, merge_filters(context.filters, filters),
+                      days=context.days if context.kind == "deals" else 7)
 
     if not filters.is_empty():
         if (filters.search and not filters.family and not filters.numeric() and re.search(_STATS, folded)):

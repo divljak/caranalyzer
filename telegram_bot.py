@@ -393,27 +393,137 @@ def _cohort_lines(label, result, lang=DEFAULT_LANGUAGE):
     return lines
 
 
-def compare_message(engine, argument, lang=DEFAULT_LANGUAGE):
+COMPARE_SPREAD = (.1, .9)  # a model's "usual" model years: the 10th to 90th percentile of its listings
+COMPARE_SPREAD_MIN = 10  # listings with a model year a model needs before its usual years are trusted
+COMPARE_BAND_MIN = 3  # priced listings a model needs in a year band before its median is shown
+COMPARE_MAX_BANDS = 4
+
+
+def _year_spread(connection, search):
+    """(low, high) usual model years of a model's recent used listings, or None."""
+    row = _one(connection, f"""
+      SELECT count(*) AS n, percentile_disc({COMPARE_SPREAD[0]}) WITHIN GROUP (ORDER BY c.year) AS low,
+        percentile_disc({COMPARE_SPREAD[1]}) WITHIN GROUP (ORDER BY c.year) AS high
+      FROM car_listings c LEFT JOIN dealer_vehicle_labels l USING(listing_id)
+      WHERE {_RECENT_WHERE} AND c.year IS NOT NULL
+        AND {_LABEL_SQL} LIKE :pattern ESCAPE '\\'
+        AND NOT coalesce({_NEW_LIKE.format(p='c')}, false)
+    """, {"pattern": _like_pattern(search)})
+    if not row or row["low"] is None or row["n"] < COMPARE_SPREAD_MIN:
+        return None  # too few listings to say which years are usual: compare all years, as before
+    return int(row["low"]), int(row["high"])
+
+
+def _band_medians(connection, search, start, end, width):
+    """{band index: (priced listings, median)} for model years start..end in bands of ``width`` years."""
+    rows = _all(connection, f"""
+      SELECT (c.year - CAST(:start AS integer)) / CAST(:width AS integer) AS band, count(*) AS n,
+        percentile_cont(.5) WITHIN GROUP (ORDER BY c.price) AS median
+      FROM car_listings c LEFT JOIN dealer_vehicle_labels l USING(listing_id)
+      WHERE {_RECENT_WHERE}
+        AND c.year BETWEEN CAST(:start AS integer) AND CAST(:end AS integer)
+        AND {_LABEL_SQL} LIKE :pattern ESCAPE '\\'
+        AND NOT coalesce({_NEW_LIKE.format(p='c')}, false)
+      GROUP BY 1
+    """, {"pattern": _like_pattern(search), "start": start, "end": end, "width": width})
+    return {int(row["band"]): (int(row["n"]), row["median"]) for row in rows}
+
+
+def _years_text(low, high, lang):
+    if low and high and low == high:
+        return str(low)
+    return f"{low}–{high or t(lang, 'today_word')}"
+
+
+def _compare_years(spans, user, spreads):
+    """Pick the model years each cohort is measured in, so the two medians compare like with like.
+
+    ``spans`` are the generation years each label names ("golf 7" -> 2012-2020) or (None, None);
+    ``user`` the years the message gave; ``spreads`` each model's usual years in the data.
+    Returns ([(low, high)] per label, how, which label's generation was used).
+    """
+    if user[0] or user[1]:
+        chosen = []
+        for low, high in spans:  # within a named generation, keep to its years
+            lo = max(filter(None, (user[0], low)), default=None)
+            hi = min(filter(None, (user[1], high)), default=None)
+            chosen.append((lo, hi) if not (lo and hi and lo > hi) else user)
+        return chosen, "user", None
+    named = [index for index, span in enumerate(spans) if span[0]]
+    if len(named) == 2:
+        return list(spans), "generations", None  # "Golf 7 vs Octavia 3": each in its own generation
+    if len(named) == 1:
+        return [spans[named[0]]] * 2, "generation", named[0]  # "Golf 7 vs Passat": Passats of those years
+    if all(spreads):
+        low, high = max(s[0] for s in spreads), min(s[1] for s in spreads)
+        if low <= high:
+            return [(low, high)] * 2, "overlap", None
+    return [(None, None)] * 2, "none", None
+
+
+def compare(engine, argument, lang=DEFAULT_LANGUAGE, year_min=None, year_max=None):
+    """Compare two models' asking prices in the same model years. Returns (text, [(search, low, high)]).
+
+    The years are the ones the user gave; otherwise a named generation's; otherwise the years both
+    models have in the data. The answer says which years were compared and, when the span is wide,
+    shows the medians per band of model years as well.
+    """
     labels = [value.strip() for value in re.split(r"\s*(?:\||\bvs\.?\b)\s*", argument, flags=re.I) if value.strip()]
     if len(labels) != 2:
-        return t(lang, "compare_usage")
-    results = []
+        return t(lang, "compare_usage"), []
     with engine.begin() as connection:
         _statement_timeout(connection)
+        searches, spans = [], []
         for label in labels:
-            search, year_min, year_max = model_hint(label)  # "golf 7" -> golf, 2012-2020
+            search, low, high = model_hint(label)  # "golf 7" -> golf, 2012-2020
             search = search or label
             if not _is_known_model(connection, search):
                 search = resolve_search(_model_labels(connection), search)[0] or search
-            shown = f"{label} ({year_min}–{year_max or t(lang, 'today_word')})" if year_min else label
-            results.append((shown, _cohort_stats(connection, search, year_min, year_max)))
+            searches.append(search)
+            spans.append((low, high))
+        user = (year_min, year_max)
+        spreads = ([_year_spread(connection, search) for search in searches]
+                   if not (any(user) or any(low for low, _ in spans)) else [None, None])
+        chosen, how, generation_of = _compare_years(spans, user, spreads)
+        results = [_cohort_stats(connection, search, low, high) for search, (low, high) in zip(searches, chosen)]
+        bands = []
+        low, high = chosen[0]
+        if how != "generations" and low:
+            high = high or datetime.now(timezone.utc).year
+            width = max(2, -(-(high - low + 1) // COMPARE_MAX_BANDS))
+            if high - low + 1 > width:
+                per_model = [_band_medians(connection, search, low, high, width) for search in searches]
+                for band in range((high - low) // width + 1):
+                    start = low + band * width
+                    bands.append(((start, min(start + width - 1, high)), [m.get(band, (0, None)) for m in per_model]))
     lines = [t(lang, "compare_title")]
+    if how == "user":
+        lines.append(t(lang, "compare_years_user", years=_years_text(*user, lang)))
+    elif how == "overlap":
+        lines.append(t(lang, "compare_years_overlap", years=_years_text(*chosen[0], lang)))
+    elif how == "generation":
+        lines.append(t(lang, "compare_years_generation", years=_years_text(*chosen[0], lang),
+                       label=labels[generation_of]))
+    elif how == "none" and any(spreads):
+        lines.append(t(lang, "compare_years_none"))
     newest = None
-    for label, result in results:
+    for label, (low, high), result in zip(labels, chosen, results):
         newest = max(filter(None, (newest, _utc(result["newest"]))), default=None)
-        lines.extend(["", *_cohort_lines(label, result, lang)])
-    lines.extend(["", t(lang, "fresh_line", when=_time(newest, lang)), t(lang, "compare_note")])
-    return "\n".join(lines)
+        shown = f"{label} ({_years_text(low, high, lang)})" if low else label
+        lines.extend(["", *_cohort_lines(shown, result, lang)])
+    if bands:
+        lines.extend(["", t(lang, "compare_bands_h")])
+        for (start, end), cells in bands:
+            parts = [f"{label} {_money(median, lang) if n >= COMPARE_BAND_MIN else '–'} ({n})"
+                     for label, (n, median) in zip(labels, cells)]
+            lines.append(t(lang, "compare_band_row", years=_years_text(start, end, lang), cells=" · ".join(parts)))
+    note = "compare_note" if how in {"generations", "none"} else "compare_note_years"
+    lines.extend(["", t(lang, "fresh_line", when=_time(newest, lang)), t(lang, note)])
+    return "\n".join(lines), [(search, low, high) for search, (low, high) in zip(searches, chosen)]
+
+
+def compare_message(engine, argument, lang=DEFAULT_LANGUAGE, year_min=None, year_max=None):
+    return compare(engine, argument, lang, year_min, year_max)[0]
 
 
 def model_stats_message(engine, label, lang=DEFAULT_LANGUAGE):
@@ -464,7 +574,9 @@ def _bound_parts(filters, lang=DEFAULT_LANGUAGE):
         parts.append(t(lang, "title_upto", x=_money(filters.budget, lang)))
     elif filters.price_min:
         parts.append(t(lang, "title_from", x=_money(filters.price_min, lang)))
-    if filters.year_min and filters.year_max:
+    if filters.year_min and filters.year_max and filters.year_min == filters.year_max:
+        parts.append(str(filters.year_min))  # "golf 15": that model year only
+    elif filters.year_min and filters.year_max:
         parts.append(f"{filters.year_min}–{filters.year_max}")
     elif filters.year_min:
         parts.append(t(lang, "title_from", x=filters.year_min))
@@ -764,6 +876,79 @@ def _has_filters(filters):
     return bool(filters.numeric() or filters.family or filters.attributes())
 
 
+def _real_sql():
+    return f"""
+  SELECT count(*) AS n, percentile_cont(.5) WITHIN GROUP (ORDER BY c.price) AS median,
+    min(c.price) AS low, max(c.price) AS high
+  FROM car_listings c LEFT JOIN dealer_vehicle_labels l USING(listing_id)
+  WHERE {_RECENT_WHERE} AND {_BOUNDS_WHERE.format(p='c')}
+    AND (CAST(:search AS text) = '' OR {_LABEL_SQL} LIKE :pattern ESCAPE '\\')
+    AND (NOT CAST(:family AS boolean) OR {_LABEL_SQL} ~ :family_re)
+"""
+
+
+# The cheapest real match, ignoring placeholder prices (under SUSPECT_PRICE_SHARE of the median) and
+# implausible mileage, so "1 KM" ads are never offered as the answer.
+def _cheapest_sql():
+    return f"""
+  SELECT c.listing_id, coalesce(l.make,c.make) AS make, coalesce(l.model,c.model) AS model, c.year, c.price,
+    {_KM} AS mileage
+  FROM car_listings c LEFT JOIN dealer_vehicle_labels l USING(listing_id)
+  WHERE {_RECENT_WHERE} AND {_BOUNDS_WHERE.format(p='c')}
+    AND (CAST(:search AS text) = '' OR {_LABEL_SQL} LIKE :pattern ESCAPE '\\')
+    AND (NOT CAST(:family AS boolean) OR {_LABEL_SQL} ~ :family_re)
+    AND c.price >= CAST(:floor AS numeric)
+    AND NOT coalesce({_KM_SUSPECT.format(p='c')}, false)
+  ORDER BY c.price ASC, c.last_verified_at DESC, c.listing_id LIMIT 1
+"""
+
+
+def _describe(filters, lang):
+    """ "tesla · do 10.000 KM · od 2024": what a search asked for, without the title word."""
+    parts = ([filters.search] if filters.search else []) + _attr_parts(filters, lang) + _bound_parts(filters, lang)
+    if filters.family:
+        parts.append(t(lang, "title_family"))
+    return " · ".join(parts) or t(lang, "find_title").lower()
+
+
+def _nearest_real(connection, filters):
+    """For a search with no match in 90 days: the same search without its price bounds, then also without
+    its year bounds. Returns (relaxed filters, "without_price" | "model", stats, cheapest row) or None."""
+    steps = []
+    if filters.budget or filters.price_min:
+        steps.append((replace(filters, budget=None, price_min=None, include_old=True), "without_price"))
+    if filters.year_min or filters.year_max:
+        steps.append((replace(filters, budget=None, price_min=None, year_min=None, year_max=None,
+                              mileage_max=None, include_old=True), "model"))
+    for relaxed, how in steps:
+        params = {**_bound_params(relaxed), "search": relaxed.search or "", "pattern": _like_pattern(relaxed.search),
+                  "family": bool(relaxed.family), "family_re": FAMILY_REGEX}
+        stats = _one(connection, _real_sql(), params)
+        if stats and stats["n"]:
+            floor = SUSPECT_PRICE_SHARE * float(stats["median"]) if stats["n"] >= SUSPECT_MIN_COHORT else 0
+            cheapest = _one(connection, _cheapest_sql(), {**params, "floor": floor})
+            return relaxed, how, stats, cheapest
+    return None
+
+
+def _nearest_lines(filters, nearest, lang):
+    relaxed, how, stats, cheapest = nearest
+    key = "unreal_scope_without_price" if how == "without_price" else "unreal_scope_model"
+    scope = t(lang, key, what=_describe(replace(relaxed, include_old=False), lang))
+    lines = [esc(t(lang, "unreal_none", what=_describe(filters, lang)))]
+    if cheapest:
+        label = " ".join(value for value in (cheapest["make"], cheapest["model"]) if value) or t(lang, "unparsed_model")
+        details = "".join(f" · {value}" for value in (
+            cheapest["year"], f"{_thousands(cheapest['mileage'])} km" if cheapest["mileage"] is not None else None)
+            if value)
+        car = "\x00"
+        sentence = esc(t(lang, "unreal_cheapest", scope=scope, car=car, price=_money(cheapest["price"], lang)))
+        lines.append(sentence.replace(car, _car_link(label, cheapest["listing_id"]) + esc(details)))
+    lines.append(esc(t(lang, "unreal_typical", scope=scope, median=_money(stats["median"], lang), n=stats["n"],
+                       low=_money(stats["low"], lang), high=_money(stats["high"], lang))))
+    return lines
+
+
 class NoMatch(Html):
     """A find answer that names no listings because the model was not recognised. It is sent as is
     (never rephrased by Gemini, which could hide that nothing was searched)."""
@@ -786,6 +971,7 @@ def find_page(engine, filters, offset=0, lang=DEFAULT_LANGUAGE):
     assumed = unknown = ""
     older_hidden = new_hidden = without_gearbox = 0
     gearbox_days = FRESH_DAYS
+    nearest = None
     with engine.begin() as connection:
         _statement_timeout(connection)
         if offset == 0 and filters.search and not _is_known_model(connection, filters.search):
@@ -805,6 +991,8 @@ def find_page(engine, filters, offset=0, lang=DEFAULT_LANGUAGE):
             if probe:
                 new_hidden = int(probe[0]["new_hidden"] or 0)
                 older_hidden = 0 if filters.include_old else int(probe[0]["all_total"])
+            if not older_hidden and not unknown and not filters.transmission:
+                nearest = _nearest_real(connection, filters)  # "Tesla 2024 do 10k": say it doesn't exist
             if filters.transmission:  # the gearbox is rarely recorded: say what dropping it would find
                 wider = _find_rows(connection, replace(filters, transmission=""), 0, probe=True)
                 if wider:
@@ -827,6 +1015,11 @@ def find_page(engine, filters, offset=0, lang=DEFAULT_LANGUAGE):
             lines.append(esc(t(lang, "no_more")))
         elif older_hidden:
             lines.append(esc(t(lang, "no_fresh", days=FRESH_DAYS)))
+        elif nearest:
+            lines.append(esc(t(lang, "no_match_90")))
+            lines.extend(_nearest_lines(filters, nearest, lang))
+            stats["nearest"] = replace(nearest[0], include_old=False)
+            stats["nearest_how"] = nearest[1]
         else:
             lines.append(esc(t(lang, "no_match_90")))
         if unknown:
@@ -920,6 +1113,43 @@ def _suggest_title(filters, lang=DEFAULT_LANGUAGE):
     return " · ".join(parts)
 
 
+_STANDOUT_ORDER = {"discount": "discount_pct DESC, r.mileage ASC, r.listing_id",
+                   "price": "r.price ASC, discount_pct DESC, r.listing_id"}
+
+
+def _standouts(connection, filters, days=None, limit=5, order="discount"):
+    """Listings priced well below the same model and year: at least 15% under that cohort's median,
+    mileage at or under its median, seen in the last ``days`` days. Used by the shortlist and "good deals"."""
+    params = {**_bound_params(filters), "family": bool(filters.family), "family_re": FAMILY_REGEX,
+              "search": filters.search or "", "pattern": _like_pattern(filters.search or ""),
+              "days": days or SUGGEST_FRESH_DAYS, "limit": limit}
+    return _all(connection, f"""
+          WITH recent AS (
+            SELECT c.listing_id, {_BASE_LABEL} AS label, {_LABEL_SQL} AS folded,
+              c.year, c.price, {_KM} AS mileage, c.last_verified_at, c.fuel_type, c.transmission
+            FROM car_listings c LEFT JOIN dealer_vehicle_labels l USING(listing_id)
+            WHERE {_RECENT_WHERE} AND c.year IS NOT NULL AND {_KM} IS NOT NULL
+              AND NOT coalesce({_NEW_LIKE.format(p='c')}, false)
+          ), cohort AS (
+            SELECT label, year, count(*) AS n,
+              percentile_cont(.5) WITHIN GROUP (ORDER BY price) AS med_price,
+              percentile_cont(.5) WITHIN GROUP (ORDER BY mileage) AS med_km
+            FROM recent WHERE label <> '' GROUP BY label, year
+            HAVING count(*) >= {SUGGEST_MIN_COHORT}
+          )
+          SELECT r.listing_id, r.label, r.year, r.price, r.mileage, r.last_verified_at, k.n, k.med_price,
+            round((1 - CAST(r.price AS numeric) / CAST(k.med_price AS numeric)) * 100) AS discount_pct
+          FROM recent r JOIN cohort k ON k.label = r.label AND k.year = r.year
+          WHERE {_BOUNDS_WHERE.format(p='r')}
+            AND r.last_verified_at >= (now() AT TIME ZONE 'UTC') - interval '1 day' * CAST(:days AS integer)
+            AND r.price <= {SUGGEST_DISCOUNT} * k.med_price AND r.mileage <= k.med_km
+            AND NOT coalesce({_KM_SUSPECT.format(p='r')}, false)
+            AND (NOT CAST(:family AS boolean) OR r.folded ~ :family_re)
+            AND (CAST(:search AS text) = '' OR r.folded LIKE :pattern ESCAPE '\\')
+          ORDER BY {_STANDOUT_ORDER[order]} LIMIT CAST(:limit AS integer)
+    """, params)
+
+
 def suggest_message(engine, filters, lang=DEFAULT_LANGUAGE, with_models=False):
     """What the database shows for a budget: most listed models and listings priced under similar ones."""
     params = {**_bound_params(filters), "family": bool(filters.family), "family_re": FAMILY_REGEX}
@@ -941,30 +1171,7 @@ def suggest_message(engine, filters, lang=DEFAULT_LANGUAGE, with_models=False):
           GROUP BY label HAVING count(*) >= {SUGGEST_MIN_MODEL_LISTINGS}
           ORDER BY n DESC, label LIMIT 5
         """, params)
-        standouts = _all(connection, f"""
-          WITH recent AS (
-            SELECT c.listing_id, {_BASE_LABEL} AS label, {_LABEL_SQL} AS folded,
-              c.year, c.price, {_KM} AS mileage, c.last_verified_at, c.fuel_type, c.transmission
-            FROM car_listings c LEFT JOIN dealer_vehicle_labels l USING(listing_id)
-            WHERE {_RECENT_WHERE} AND c.year IS NOT NULL AND {_KM} IS NOT NULL
-              AND NOT coalesce({_NEW_LIKE.format(p='c')}, false)
-          ), cohort AS (
-            SELECT label, year, count(*) AS n,
-              percentile_cont(.5) WITHIN GROUP (ORDER BY price) AS med_price,
-              percentile_cont(.5) WITHIN GROUP (ORDER BY mileage) AS med_km
-            FROM recent WHERE label <> '' GROUP BY label, year
-            HAVING count(*) >= {SUGGEST_MIN_COHORT}
-          )
-          SELECT r.listing_id, r.label, r.year, r.price, r.mileage, r.last_verified_at, k.n, k.med_price,
-            round((1 - CAST(r.price AS numeric) / CAST(k.med_price AS numeric)) * 100) AS discount_pct
-          FROM recent r JOIN cohort k ON k.label = r.label AND k.year = r.year
-          WHERE {_BOUNDS_WHERE.format(p='r')}
-            AND r.last_verified_at >= (now() AT TIME ZONE 'UTC') - interval '{SUGGEST_FRESH_DAYS} days'
-            AND r.price <= {SUGGEST_DISCOUNT} * k.med_price AND r.mileage <= k.med_km
-            AND NOT coalesce({_KM_SUSPECT.format(p='r')}, false)
-            AND (NOT CAST(:family AS boolean) OR r.folded ~ :family_re)
-          ORDER BY discount_pct DESC, r.mileage ASC, r.listing_id LIMIT 5
-        """, params)
+        standouts = _standouts(connection, filters)
         note = _freshness_note(connection, lang)
     lines = [_suggest_title(filters, lang)]
     if filters.family:
@@ -996,6 +1203,53 @@ def suggest_message(engine, filters, lang=DEFAULT_LANGUAGE, with_models=False):
     lines.extend(["", t(lang, "suggest_foot1"), t(lang, "suggest_foot2")])
     text_value = "\n".join(lines)
     return (text_value, [item["label"] for item in models]) if with_models else text_value
+
+
+
+DEALS_LIMIT = 8
+
+
+def deals_title(filters, lang=DEFAULT_LANGUAGE):
+    parts = [t(lang, "deals_title")]
+    if filters.search:
+        parts.append(filters.search)
+    parts.extend(_attr_parts(filters, lang) + _bound_parts(filters, lang))
+    if filters.family:
+        parts.append(t(lang, "title_family"))
+    return " · ".join(parts)
+
+
+def deals_message(engine, filters, days=None, lang=DEFAULT_LANGUAGE, cheapest=False):
+    """ "dobre ponude", "povoljno", "good deals": the listings priced well below the same model and year
+    (the shortlist's standouts section on its own), within any model, price, year or fuel the user gave.
+    Returns (text, [(listing_id, year, price)])."""
+    days = days or SUGGEST_FRESH_DAYS
+    with engine.begin() as connection:
+        _statement_timeout(connection)
+        if filters.search and not _is_known_model(connection, filters.search):  # "povoljne Octavie"
+            filters = replace(filters, search=resolve_search(_model_labels(connection), filters.search)[0]
+                              or filters.search)
+        rows = _standouts(connection, filters, days=days, limit=DEALS_LIMIT,
+                          order="price" if cheapest else "discount")
+        note = _freshness_note(connection, lang)
+    lines = [deals_title(filters, lang)]
+    if filters.family:
+        lines.append(t(lang, "family_note"))
+    lines.extend(["", t(lang, "deals_h", days=days, order=t(lang, "deals_h_cheapest") if cheapest else "")])
+    for item in rows:
+        lines.append(
+            "• " + t(lang, "suggest_standout_row", label=item["label"], year=item["year"],
+                     price=_money(item["price"], lang), pct=int(item["discount_pct"]),
+                     med=_money(item["med_price"], lang), n=item["n"],
+                     km=f"{int(item['mileage']):,}".replace(",", ".")) + "\n"
+            f"  {t(lang, 'seen_row', age=_age(item['last_verified_at'], lang), when=_time(item['last_verified_at'], lang))}"
+            f" · https://olx.ba/artikal/{item['listing_id']}")
+    if not rows:
+        lines.append(t(lang, "deals_none"))
+    if note:
+        lines.extend(["", note])
+    lines.extend(["", t(lang, "deals_foot")])
+    return "\n".join(lines), [(item["listing_id"], item["year"], item["price"]) for item in rows]
 
 
 PRICE_CHECK_MIN = 6  # comparable listings needed before the comparison is relaxed / called thin
@@ -1289,7 +1543,10 @@ def unit_choices(intent, lang):
     return Choices(tuple(rows))
 
 
-def chitchat_message(lang=DEFAULT_LANGUAGE):
+def chitchat_message(lang=DEFAULT_LANGUAGE, topic=""):
+    """Small talk without Gemini: a short reply to what was said, then what the bot can do."""
+    if topic in {"greeting", "weather", "how", "about", "joke"}:
+        return t(lang, f"smalltalk_{topic}") + "\n\n" + t(lang, "smalltalk_hint")
     return t(lang, "chitchat")
 
 
@@ -1640,7 +1897,7 @@ _SCOPES = {}
 
 
 def _remember_scope(key, intent):
-    if intent.kind not in {"find", "trends", "suggest", "liquidity"}:
+    if intent.kind not in {"find", "trends", "suggest", "liquidity", "deals"}:
         return
     now = time.monotonic()
     for stale in [k for k, (_, at) in _SCOPES.items() if now - at > SCOPE_TTL_SECONDS]:
@@ -1792,6 +2049,11 @@ def answer_intent(engine, intent, config, lang=DEFAULT_LANGUAGE):
             return text_value, _did_you_mean_choices(stats["filters"], stats.get("candidates", ()), lang)
         if stats.get("assumed"):
             text_value.must_mention = stats["assumed"]  # a phrased reply must keep saying which model it is
+        if stats.get("nearest"):  # nothing like it exists: offer the real ones instead of narrowing buttons
+            nearest = stats["nearest"]
+            label = (t(lang, "btn_unreal", what=_describe(nearest, lang)) if stats["nearest_how"] == "without_price"
+                     else f"🔎 {_describe(nearest, lang)}")
+            return text_value, Choices((((label[:60], refine_callback(nearest)),),))
         following = offset + PAGE_SIZE
         if stats.get("without_gearbox"):
             data = refine_callback(replace(stats["filters"], transmission="",
@@ -1828,8 +2090,18 @@ def answer_intent(engine, intent, config, lang=DEFAULT_LANGUAGE):
                         for model in models[:3])
         return text_value, (Choices((buttons,)) if buttons else False)
     if intent.kind == "compare":
-        buttons = tuple((f"🔎 {label[:24]}", refine_callback(Filters(label))) for label in intent.labels)
-        return compare_message(engine, " | ".join(intent.labels), lang), Choices((buttons,))
+        text_value, used = compare(engine, " | ".join(intent.labels), lang, intent.filters.year_min,
+                                   intent.filters.year_max)
+        buttons = tuple((f"🔎 {label[:24]}", refine_callback(Filters(search, year_min=low, year_max=high)))
+                        for label, (search, low, high) in zip(intent.labels, used or [(l, None, None) for l in intent.labels]))
+        return text_value, Choices((buttons,))
+    if intent.kind == "deals":
+        text_value, items = deals_message(engine, intent.filters, intent.days, lang,
+                                          cheapest="cheapest" in intent.labels)
+        saves = [(t(lang, "btn_save", label=" · ".join(str(p) for p in (year, _money(price, lang)) if p)),
+                  save_callback(listing_id)) for listing_id, year, price in items[:6] if _valid_listing_id(listing_id)]
+        rows = tuple(tuple(saves[i:i + 2]) for i in range(0, len(saves), 2))
+        return text_value, (Choices(rows) if rows else False)
     if intent.kind in {"follow", "follow_do", "unfollow", "following"}:
         return _follow_answer(engine, intent, lang)
     if intent.kind in {"save_car", "remove_car", "shortlist"}:
@@ -1840,7 +2112,7 @@ def answer_intent(engine, intent, config, lang=DEFAULT_LANGUAGE):
         if intent.reply:
             text_value = intent.reply
         elif intent.kind == "chitchat":
-            text_value = chitchat_message(lang)
+            text_value = chitchat_message(lang, intent.labels[0] if intent.labels else "")
         elif intent.kind == "clarify":
             text_value = clarify_message(intent.note, intent.question, lang)
         else:
@@ -1851,6 +2123,9 @@ def answer_intent(engine, intent, config, lang=DEFAULT_LANGUAGE):
             return text_value, budget_choices(lang)
         if intent.kind == "clarify" and intent.note == "correction":
             return text_value, False
+        if intent.kind == "chitchat" and not intent.reply and intent.labels:
+            # small talk the parser recognised (no Gemini): a short reply, what the bot can do, examples
+            return text_value, example_choices(lang)
         if intent.kind == "chitchat":
             return text_value, False  # small talk ("thanks") needs no buttons
         return text_value, example_choices(lang)
@@ -1858,7 +2133,8 @@ def answer_intent(engine, intent, config, lang=DEFAULT_LANGUAGE):
 
 
 _DEFAULT_LLM = object()
-DB_KINDS = {"find", "model_stats", "price_check", "compare", "trends", "status", "latest", "suggest", "liquidity"}
+DB_KINDS = {"find", "model_stats", "price_check", "compare", "trends", "status", "latest", "suggest", "liquidity",
+            "deals"}
 
 # Best-effort memory of the last few chat turns in a private chat (see SCOPE_* above): the
 # same rules apply. Group chats keep no history.
@@ -2040,7 +2316,7 @@ def _take_pending(key):
 
 MAX_QUESTION_CHARS = 400
 _VAGUE_KINDS = {"unsupported", "chitchat", "clarify", "ignore"}
-_STRONG_KINDS = {"suggest", "liquidity", "compare", "model_stats", "price_check", "trends"}
+_STRONG_KINDS = {"suggest", "liquidity", "compare", "model_stats", "price_check", "trends", "deals"}
 _CAR_CUE = re.compile(r"\b(?:auto|auta|autom|automobil\w*|kola|car|cars|oglas\w*|vozil\w*)\b")
 
 
@@ -2342,7 +2618,7 @@ def _process_update(update, engine, config, call, llm, phraser, started):
                 trace["phrasing_reason"] = "" if phrased else telegram_llm.PHRASE_STATUS.get()
                 if phrased:
                     chat_text, show_details = phrased
-                    show_details = show_details or intent.kind == "suggest"  # the user wants to see them
+                    show_details = show_details or intent.kind in {"suggest", "deals"}  # the user wants to see them
                     if isinstance(response, Html):
                         response = Html(esc(chat_text) + ("\n\n" + response if show_details else ""))
                     else:

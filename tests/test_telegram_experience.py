@@ -349,7 +349,7 @@ class ContextualButtonTests(unittest.TestCase):
             _, choices = answer_intent(Mock(), Intent("model_stats", Filters("octavia")), CONFIG, lang="bs")
         self.assertEqual("🔎 Pokaži oglase", choices.rows[0][0][0])
         self.assertEqual("f:0:0:0:0:octavia", choices.rows[0][0][1])
-        with patch("telegram_bot.compare_message", return_value="t"):
+        with patch("telegram_bot.compare", return_value=("t", [])):
             _, choices = answer_intent(Mock(), Intent("compare", labels=("golf", "octavia")), CONFIG)
         self.assertEqual(["🔎 golf", "🔎 octavia"], [label for label, _ in choices.rows[0]])
         with patch("telegram_bot.suggest_message", return_value=("t", ["Volkswagen Golf", "Škoda Octavia", "Audi A4", "BMW 3"])):

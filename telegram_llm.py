@@ -184,6 +184,12 @@ below similar ones, always as "what the data shows" and never as a guarantee or 
 Say plainly that we cannot see what actually sells: most listed is not best selling. Remind them \
 to check each ad. Set show_details to true."""
 
+DEALS_ADDENDUM = """
+
+This answer lists listings priced well below the same model and year in our data. Describe them as \
+"what the data shows", never as a guarantee: a low asking price can also mean a problem with the car. \
+Remind them to check each ad. Set show_details to true."""
+
 PHRASE_SCHEMA = {
     "type": "object",
     "properties": {
@@ -620,7 +626,7 @@ def phrase(message, facts, config, *, post=None, history=None, mode="", language
         turns = _clean_history(history)
         if turns:
             user["recent_turns"] = turns
-        system = PHRASE_PROMPT + (SUGGEST_ADDENDUM if mode == "suggest" else "")
+        system = PHRASE_PROMPT + {"suggest": SUGGEST_ADDENDUM, "deals": DEALS_ADDENDUM}.get(mode, "")
         plan, status = _generate(config, system, user, PHRASE_SCHEMA, 800, post)
         if not isinstance(plan, dict):
             LOG.warning("gemini phrasing unavailable: %s", status)
