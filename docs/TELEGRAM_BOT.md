@@ -118,6 +118,23 @@ replies to, and only from that message in the same update. Context therefore can
 users or chats, and replying to a human message gives no context. Find answers also carry
 `Budget −10%` / `Budget +10%` buttons that encode the whole query in the callback.
 
+**Ranges.** `od 50 - 60k`, `50-60k`, `između 50 i 60 hiljada` and `50.000 do 60.000 KM` set both a
+minimum and a maximum price; `godište od 2022 - 2024`, `2022-2024` and `2022 do 2024` set both a
+minimum and a maximum year. Both ends go into the SQL (listings, shortlist counts and medians,
+liquidity), the answer title states them (`50.000–60.000 KM · 2022–2024`), and the buttons carry
+them (`f:50000-60000:2022-2024:...`; buttons sent before ranges existed still work).
+
+**Corrections.** "Mislim da sam stavio …", "ne, nego …", "rekao sam …", "I meant …" (or any reply to
+the bot's answer) are merged into the previous question instead of starting over: the corrected
+bounds replace the old ones, everything else (intent, model, other bounds) is kept, and the
+question is run again. The description of what the bot showed ("a ti mi pokazuješ škodu od 33k")
+is ignored. After a price question, "50.000km do 60.000km" in a correction means KM unless the
+message talks about mileage. In the group, a correction may reuse the same person's previous
+question from the in-process memory (30 minutes, keyed by chat and user); with no previous question
+known the bot asks for the search again. It never answers that it cannot change searches, and
+Gemini readings or phrasings that drop or change a stated range end are discarded in favour of
+the parser and the plain database answer.
+
 **Honesty rules in answers.** Matching is over listings observed in the last 90 days and
 priced listings only, ranked newest model year first, then recently seen (last 14 days), then lowest mileage, five per page with a **Show more** button. Each listing shows how long ago it was last seen; sightings older than 14 days get a ⚠ because the ad may no longer be listed. Results state "N of M matches". Year and mileage filters say that
 listings without those fields are excluded. Empty results, a database with no
@@ -134,10 +151,11 @@ is in `TELEGRAM_ALLOWED_USER_IDS` **and** that the chat is a private chat whose 
 the sender's id, so another account, a group, or a spoofed chat id gets no reply. Replies go
 to the chat the message came from. The Garaža group works exactly as before.
 
-**Short memory (private chat only).** Follow-ups like `from 2018` or `under 9000` apply to
-the last find/trend answer for 30 minutes. This memory is in-process only (a serverless
+**Short memory.** In a private chat, follow-ups like `from 2018` or `under 9000` apply to
+the last find/trend/shortlist answer for 30 minutes. This memory is in-process only (a serverless
 instance may not share it, in which case the message is simply read on its own), keyed by
-chat **and** user, bounded to 64 entries, and never used in the group.
+chat **and** user, and bounded to 64 entries. In the group it is used only for a person's
+correction of their own previous question.
 
 **Gemini planning (free tier).** The built-in parser runs first and costs nothing. Gemini
 is consulted when that parser cannot read the message (gibberish, or a loose sentence

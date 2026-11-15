@@ -27,6 +27,7 @@ from telegram_intent import (
     TITLE_FIND,
     clean_search,
     context_from_reply,
+    is_correction,
     fold,
     looks_like_followup,
     parse_question,
@@ -433,16 +434,34 @@ def _freshness_note(connection, lang=DEFAULT_LANGUAGE):
     return " ".join(notes)
 
 
+def _bound_parts(filters, lang=DEFAULT_LANGUAGE):
+    """Title pieces for the price, year and mileage bounds: "50.000–60.000 KM", "2022–2024", "do 60.000 KM".
+
+    Every answer's title is built from these, so the title always states exactly the bounds that
+    were queried (and ``telegram_intent.context_from_reply`` can read them back from a reply)."""
+    parts = []
+    if filters.price_min and filters.budget:
+        parts.append(f"{_thousands(filters.price_min)}–{_money(filters.budget, lang)}")
+    elif filters.budget:
+        parts.append(t(lang, "title_upto", x=_money(filters.budget, lang)))
+    elif filters.price_min:
+        parts.append(t(lang, "title_from", x=_money(filters.price_min, lang)))
+    if filters.year_min and filters.year_max:
+        parts.append(f"{filters.year_min}–{filters.year_max}")
+    elif filters.year_min:
+        parts.append(t(lang, "title_from", x=filters.year_min))
+    elif filters.year_max:
+        parts.append(t(lang, "title_upto", x=filters.year_max))
+    if filters.mileage_max:
+        parts.append(t(lang, "title_upto", x=f"{_thousands(filters.mileage_max)} km"))
+    return parts
+
+
 def _filter_title(filters, lang=DEFAULT_LANGUAGE):
     parts = [t(lang, "find_title")]
     if filters.search:
         parts.append(filters.search)
-    if filters.budget:
-        parts.append(t(lang, "title_upto", x=_money(filters.budget, lang)))
-    if filters.year_min:
-        parts.append(t(lang, "title_from", x=filters.year_min))
-    if filters.mileage_max:
-        parts.append(t(lang, "title_upto", x=f"{filters.mileage_max:,} km".replace(",", ".")))
+    parts.extend(_bound_parts(filters, lang))
     if filters.family:
         parts.append(t(lang, "title_family"))
     if filters.include_old:
@@ -524,7 +543,9 @@ _FIND_SQL = f"""
   ), matched AS (
     SELECT * FROM base b
     WHERE (CAST(:budget AS integer) IS NULL OR b.price<=CAST(:budget AS integer))
+      AND (CAST(:price_min AS integer) IS NULL OR b.price>=CAST(:price_min AS integer))
       AND (CAST(:year_min AS integer) IS NULL OR b.year>=CAST(:year_min AS integer))
+      AND (CAST(:year_max AS integer) IS NULL OR b.year<=CAST(:year_max AS integer))
       AND (CAST(:mileage_max AS integer) IS NULL OR b.mileage<=CAST(:mileage_max AS integer))
       AND (:search='' OR b.folded LIKE :pattern ESCAPE '\\')
       AND (NOT CAST(:family AS boolean) OR b.folded ~ :family_re)
@@ -577,12 +598,16 @@ class Choices:
     rows: tuple
 
 
+def _bound_params(filters):
+    """SQL parameters for the price, year and mileage bounds (both ends of a range)."""
+    return {"budget": filters.budget, "price_min": filters.price_min, "year_min": filters.year_min,
+            "year_max": filters.year_max, "mileage_max": filters.mileage_max}
+
+
 def _find_rows(connection, filters, offset, probe=False):
     """One page of matches. ``probe`` ignores the freshness cut to learn how many older ones exist."""
     return _all(connection, _FIND_SQL, {
-        "budget": filters.budget,
-        "year_min": filters.year_min,
-        "mileage_max": filters.mileage_max,
+        **_bound_params(filters),
         "search": filters.search,
         "pattern": _like_pattern(filters.search),
         "family": bool(filters.family),
@@ -605,7 +630,7 @@ def _is_known_model(connection, search):
 
 
 def _has_filters(filters):
-    return bool(filters.budget or filters.year_min or filters.mileage_max or filters.family)
+    return bool(filters.numeric() or filters.family)
 
 
 def find_page(engine, filters, offset=0, lang=DEFAULT_LANGUAGE):
@@ -688,7 +713,7 @@ def find_page(engine, filters, offset=0, lang=DEFAULT_LANGUAGE):
         lines.extend(["", esc(t(lang, "old_warning", days=FRESH_DAYS))])
     if suspects:
         lines.extend(["", f"<i>{esc(t(lang, 'suspect_note'))}</i>"])
-    if filters.year_min or filters.mileage_max:
+    if filters.year_min or filters.year_max or filters.mileage_max:
         lines.extend(["", esc(t(lang, "filters_note"))])
     if note:
         lines.extend(["", esc(note)])
@@ -710,16 +735,14 @@ _RECENT_WHERE = """c.source='olx.ba'
             AND c.price_status='priced' AND c.price>0
             AND c.last_verified_at >= (now() AT TIME ZONE 'UTC') - interval '90 days'"""
 _BOUNDS_WHERE = """(CAST(:budget AS integer) IS NULL OR {p}.price<=CAST(:budget AS integer))
+            AND (CAST(:price_min AS integer) IS NULL OR {p}.price>=CAST(:price_min AS integer))
             AND (CAST(:year_min AS integer) IS NULL OR {p}.year>=CAST(:year_min AS integer))
+            AND (CAST(:year_max AS integer) IS NULL OR {p}.year<=CAST(:year_max AS integer))
             AND (CAST(:mileage_max AS integer) IS NULL OR {p}.mileage<=CAST(:mileage_max AS integer))"""
 
 
 def _suggest_title(filters, lang=DEFAULT_LANGUAGE):
-    parts = [t(lang, "suggest_title"), t(lang, "title_upto", x=_money(filters.budget, lang))]
-    if filters.year_min:
-        parts.append(t(lang, "title_from", x=filters.year_min))
-    if filters.mileage_max:
-        parts.append(t(lang, "title_upto", x=f"{filters.mileage_max:,} km".replace(",", ".")))
+    parts = [t(lang, "suggest_title")] + _bound_parts(filters, lang)
     if filters.family:
         parts.append(t(lang, "title_family"))
     return " · ".join(parts)
@@ -727,8 +750,7 @@ def _suggest_title(filters, lang=DEFAULT_LANGUAGE):
 
 def suggest_message(engine, filters, lang=DEFAULT_LANGUAGE, with_models=False):
     """What the database shows for a budget: most listed models and listings priced under similar ones."""
-    params = {"budget": filters.budget, "year_min": filters.year_min, "mileage_max": filters.mileage_max,
-              "family": bool(filters.family), "family_re": FAMILY_REGEX}
+    params = {**_bound_params(filters), "family": bool(filters.family), "family_re": FAMILY_REGEX}
     with engine.begin() as connection:
         _statement_timeout(connection)
         models = _all(connection, f"""
@@ -813,12 +835,7 @@ def _liquidity_title(filters, lang):
     parts = [t(lang, "liquidity_title")]
     if filters.search:
         parts.append(filters.search)
-    if filters.budget:
-        parts.append(t(lang, "title_upto", x=_money(filters.budget, lang)))
-    if filters.year_min:
-        parts.append(t(lang, "title_from", x=filters.year_min))
-    if filters.mileage_max:
-        parts.append(t(lang, "title_upto", x=f"{_thousands(filters.mileage_max)} km"))
+    parts.extend(_bound_parts(filters, lang))
     if filters.family:
         parts.append(t(lang, "title_family"))
     return " · ".join(parts)
@@ -851,8 +868,7 @@ def liquidity_message(engine, filters, lang=DEFAULT_LANGUAGE, with_models=False)
           FROM seen WHERE label <> ''
           GROUP BY label HAVING count(*) FILTER (WHERE gone) >= {LIQUIDITY_MIN_GONE}
           ORDER BY median_days ASC, gone_n DESC, label LIMIT {LIQUIDITY_LIMIT}
-        """, {"budget": filters.budget, "year_min": filters.year_min, "mileage_max": filters.mileage_max,
-              "search": filters.search, "pattern": _like_pattern(filters.search),
+        """, {**_bound_params(filters), "search": filters.search, "pattern": _like_pattern(filters.search),
               "family": bool(filters.family), "family_re": FAMILY_REGEX})
         note = _freshness_note(connection, lang)
     lines = [f"<b>{esc(_liquidity_title(filters, lang))}</b>"]
@@ -873,26 +889,61 @@ def liquidity_message(engine, filters, lang=DEFAULT_LANGUAGE, with_models=False)
     return (text_value, [row["label"] for row in rows]) if with_models else text_value
 
 
+def _parse_span(value):
+    """(low | None, high | None, is_range) from a button field; raises ValueError when malformed."""
+    low, dash, high = value.partition("-")
+    if not dash:
+        single = int(value)
+        return single or None, single or None, False
+    return int(low) or None, int(high) or None, True
+
+
+def _bounds_in_range(filters):
+    return ((filters.budget is None or 1_000 <= filters.budget <= 1_000_000)
+            and (filters.price_min is None or 1_000 <= filters.price_min <= 1_000_000)
+            and (filters.price_min is None or filters.budget is None or filters.price_min <= filters.budget)
+            and (filters.year_min is None or 1980 <= filters.year_min <= 2035)
+            and (filters.year_max is None or 1980 <= filters.year_max <= 2035)
+            and (filters.year_min is None or filters.year_max is None or filters.year_min <= filters.year_max)
+            and (filters.mileage_max is None or 1_000 <= filters.mileage_max <= 1_000_000))
+
+
+def _bound_fields(filters):
+    """'price:year:km'. A lone price is the upper bound and a lone year the lower one, exactly as on the
+    buttons sent before ranges existed; anything else is written as 'low-high' (0 = open end)."""
+    price = (f"{filters.price_min}-{filters.budget or 0}" if filters.price_min else f"{filters.budget or 0}")
+    year = (f"{filters.year_min or 0}-{filters.year_max}" if filters.year_max else f"{filters.year_min or 0}")
+    return f"{price}:{year}:{filters.mileage_max or 0}"
+
+
+def _filters_from_fields(search, price, year, mileage, **flags):
+    """Filters from the price / year / mileage button fields, or None when malformed."""
+    try:
+        price_low, price_high, price_range = _parse_span(price)
+        year_low, year_high, year_range = _parse_span(year)
+        mileage = int(mileage)
+    except ValueError:
+        return None
+    price_min, budget = (price_low, price_high) if price_range else (None, price_high)
+    if not year_range:  # a single year is the lower bound ("od 2018"), as on every older button
+        year_high = None
+    return Filters(clean_search(search), budget, year_low, mileage or None, price_min=price_min, year_max=year_high,
+                   **flags)
+
+
 def liquidity_callback(filters):
-    data = (f"l{'p' if filters.family else ''}:{filters.budget or 0}:{filters.year_min or 0}:"
-            f"{filters.mileage_max or 0}:{filters.search}")
+    data = f"l{'p' if filters.family else ''}:{_bound_fields(filters)}:{filters.search}"
     return data if len(data.encode()) <= 64 else None
 
 
 def parse_liquidity_callback(data):
-    """Return Filters from an 'l[p]:budget:year:km:search' button, or None."""
+    """Return Filters from an 'l[p]:price:year:km:search' button, or None. A price or year field is
+    either one number (the upper price / the lower year) or 'low-high'."""
     parts = (data or "").split(":", 4)
     if len(parts) != 5 or parts[0] not in {"l", "lp"}:
         return None
-    try:
-        budget, year, mileage = (int(value) for value in parts[1:4])
-    except ValueError:
-        return None
-    filters = Filters(clean_search(parts[4]), budget or None, year or None, mileage or None, family=parts[0] == "lp")
-    in_range = ((filters.budget is None or 1_000 <= filters.budget <= 1_000_000)
-                and (filters.year_min is None or 1980 <= filters.year_min <= 2035)
-                and (filters.mileage_max is None or 1_000 <= filters.mileage_max <= 1_000_000))
-    return filters if in_range else None
+    filters = _filters_from_fields(parts[4], *parts[1:4], family=parts[0] == "lp")
+    return filters if filters is not None and _bounds_in_range(filters) else None
 
 
 def unit_choices(intent, lang):
@@ -917,6 +968,8 @@ def clarify_message(note="", question="", lang=DEFAULT_LANGUAGE):
         return question + "\n\n" + t(lang, "clarify_suffix")
     if note == "currency":
         return t(lang, "clarify_currency")
+    if note == "correction":
+        return t(lang, "clarify_correction")
     return t(lang, "clarify_default")
 
 
@@ -1022,10 +1075,10 @@ def _round_budget(value):
 
 
 def refine_callback(filters, offset=0):
-    """'f[o][p]:budget:year:km:offset:search' — 'o' includes older listings, 'p' is a family search."""
+    """'f[o][p]:price:year:km:offset:search' — 'o' includes older listings, 'p' is a family search.
+    A price or year field is one number (upper price / lower year) or a 'low-high' range."""
     flags = ("o" if filters.include_old else "") + ("p" if filters.family else "")
-    data = (f"f{flags}:{filters.budget or 0}:{filters.year_min or 0}:{filters.mileage_max or 0}:"
-            f"{offset}:{filters.search}")
+    data = f"f{flags}:{_bound_fields(filters)}:{offset}:{filters.search}"
     return data if len(data.encode()) <= 64 else None
 
 
@@ -1036,18 +1089,14 @@ def parse_refine_page(data):
     if not flags or len(parts) not in (5, 6):
         return None
     try:
-        budget, year, mileage = (int(value) for value in parts[1:4])
         offset = int(parts[4]) if len(parts) == 6 else 0
     except ValueError:
         return None
-    filters = Filters(clean_search(parts[-1]), budget or None, year or None, mileage or None,
-                      family=bool(flags.group(2)), include_old=bool(flags.group(1)))
-    in_range = (
-        (filters.budget is None or 1_000 <= filters.budget <= 1_000_000)
-        and (filters.year_min is None or 1980 <= filters.year_min <= 2035)
-        and (filters.mileage_max is None or 1_000 <= filters.mileage_max <= 1_000_000)
-        and 0 <= offset <= MAX_OFFSET
-    )
+    filters = _filters_from_fields(parts[-1], *parts[1:4], family=bool(flags.group(2)),
+                                   include_old=bool(flags.group(1)))
+    if filters is None:
+        return None
+    in_range = _bounds_in_range(filters) and 0 <= offset <= MAX_OFFSET
     return (filters, offset) if in_range and not filters.is_empty() else None
 
 
@@ -1143,7 +1192,8 @@ def _find_refinements(filters, page, lang):
     if filters.budget:
         row = []
         for key, factor in (("btn_cheaper", 0.9), ("btn_pricier", 1.1)):
-            data = refine_callback(replace(filters, budget=_round_budget(filters.budget * factor)))
+            low = _round_budget(filters.price_min * factor) if filters.price_min else None  # a range moves as a whole
+            data = refine_callback(replace(filters, budget=_round_budget(filters.budget * factor), price_min=low))
             if data:
                 row.append(_button(t(lang, key), data))
         if row:
@@ -1160,6 +1210,8 @@ def _find_refinements(filters, page, lang):
     base_year = filters.year_min or page.min_year
     if base_year:
         newer = min(datetime.now(timezone.utc).year, base_year + 2)
+        if filters.year_max:
+            newer = min(newer, filters.year_max)
         data = refine_callback(replace(filters, year_min=newer))
         if newer > (filters.year_min or 0) and data:
             row.append(_button(t(lang, "btn_newer", year=newer), data))
@@ -1237,16 +1289,18 @@ def is_authorized(chat, user_id, config):
     return chat.get("type") == "private" and chat_id == user_id
 
 
-# Best-effort memory of the last answer's scope in a private chat. It lives only in this
-# process (serverless instances may not share it), is keyed by chat AND user, expires, and
-# is never used for the group: group follow-ups must reply to a bot message instead.
+# Best-effort memory of the last answer's scope. It lives only in this process (serverless
+# instances may not share it), is keyed by chat AND user, and expires. In a private chat it
+# carries ordinary follow-ups ("a od 2018?"); in a group it is used only when the same person
+# corrects their own previous question ("mislim da sam stavio 50-60k"). Other group follow-ups
+# must reply to a bot message.
 SCOPE_TTL_SECONDS = 1800
 SCOPE_MAX_ENTRIES = 64
 _SCOPES = {}
 
 
 def _remember_scope(key, intent):
-    if intent.kind not in {"find", "trends"}:
+    if intent.kind not in {"find", "trends", "suggest", "liquidity"}:
         return
     now = time.monotonic()
     for stale in [k for k, (_, at) in _SCOPES.items() if now - at > SCOPE_TTL_SECONDS]:
@@ -1363,6 +1417,12 @@ def _shortlist_answer(engine, intent, lang):
     return t(lang, "remove_gone"), my_list
 
 
+def _model_filters(model, filters):
+    """A 🔎 model button keeps the question's price, year and mileage bounds (not family / older)."""
+    return Filters(model, filters.budget, filters.year_min, filters.mileage_max, price_min=filters.price_min,
+                   year_max=filters.year_max)
+
+
 def answer_intent(engine, intent, config, lang=DEFAULT_LANGUAGE):
     """Map a parsed Intent onto the read-only helpers. Returns (text, buttons).
 
@@ -1390,13 +1450,13 @@ def answer_intent(engine, intent, config, lang=DEFAULT_LANGUAGE):
     if intent.kind == "suggest":
         text_value, models = suggest_message(engine, intent.filters, lang, with_models=True)
         f = intent.filters
-        buttons = tuple((f"🔎 {model[:24]}", refine_callback(Filters(model, f.budget, f.year_min, f.mileage_max)))
+        buttons = tuple((f"🔎 {model[:24]}", refine_callback(_model_filters(model, f)))
                         for model in models[:3])
         return text_value, (Choices((buttons,)) if buttons else False)
     if intent.kind == "liquidity":
         text_value, models = liquidity_message(engine, intent.filters, lang, with_models=True)
         f = intent.filters
-        buttons = tuple((f"🔎 {model[:24]}", refine_callback(Filters(model, f.budget, f.year_min, f.mileage_max)))
+        buttons = tuple((f"🔎 {model[:24]}", refine_callback(_model_filters(model, f)))
                         for model in models[:3])
         return text_value, (Choices((buttons,)) if buttons else False)
     if intent.kind == "compare":
@@ -1417,8 +1477,10 @@ def answer_intent(engine, intent, config, lang=DEFAULT_LANGUAGE):
             text_value = clarify_message(intent.note, intent.question, lang)
         else:
             text_value = unsupported_message(intent.note, lang)
-        if intent.kind == "clarify" and intent.note != "currency":
+        if intent.kind == "clarify" and intent.note not in {"currency", "correction"}:
             return text_value, budget_choices(lang)
+        if intent.kind == "clarify" and intent.note == "correction":
+            return text_value, False
         if intent.kind == "chitchat":
             return text_value, False  # small talk ("thanks") needs no buttons
         return text_value, example_choices(lang)
@@ -1619,8 +1681,7 @@ def looks_like_car_question(text_value):
         return True
     f = intent.filters
     if intent.kind == "find":
-        return bool(f.budget or f.year_min or f.mileage_max or f.family
-                    or _CAR_CUE.search(fold(strip_mentions(text_value or ""))))
+        return bool(f.numeric() or f.family or _CAR_CUE.search(fold(strip_mentions(text_value or ""))))
     return False
 
 
@@ -1865,7 +1926,7 @@ def process_update(update: dict[str, Any], engine, config: TelegramConfig, *, ca
     if free_text is not None:
         if llm is not None or phraser is not None:
             placeholder_id = _send_placeholder(call, config, chat_id, lang)
-        intent = _understand(free_text, message, private and scope_key, llm, _recall_history(history_key), lang,
+        intent = _understand(free_text, message, scope_key, llm, _recall_history(history_key), lang,
                              chat_kind, trace)
         command = intent.kind
     if intent is not None and intent.kind == "ignore":
@@ -1884,13 +1945,16 @@ def process_update(update: dict[str, Any], engine, config: TelegramConfig, *, ca
             command, markup = "llm", False
         elif intent is not None:
             response, markup = answer_intent(engine, intent, config, lang=lang)
-            if private:
+            if private or free_text is not None:
                 _remember_scope(scope_key, intent)
             if free_text is not None and phraser is not None and intent.kind in DB_KINDS:
                 facts = html_to_text(response) if isinstance(response, Html) else response
                 telegram_llm.PHRASE_STATUS.set("")
                 phrased = phraser(free_text, facts, _recall_history(history_key), mode=intent.kind,
                                   language=lang, chat_kind=chat_kind)
+                if phrased and not telegram_llm.reply_keeps_range(phrased[0], intent.filters):
+                    phrased = None  # it narrowed "50.000–60.000 KM" to one end: send the database answer
+                    telegram_llm.PHRASE_STATUS.set("rejected: range not kept")
                 trace["phrasing"] = "used" if phrased else "fallback"
                 trace["phrasing_reason"] = "" if phrased else telegram_llm.PHRASE_STATUS.get()
                 if phrased:
@@ -1962,8 +2026,7 @@ def _needs_interpreter(intent, text_value):
     """
     if intent.kind in {"ignore", "clarify", "chitchat", "unsupported"}:
         return not intent.note
-    return intent.kind == "find" and not (
-        intent.filters.budget or intent.filters.year_min or intent.filters.mileage_max)
+    return intent.kind == "find" and not intent.filters.numeric()
 
 
 def _understand(text_value, message, scope_key, llm, history=None, lang=DEFAULT_LANGUAGE, chat_kind="", trace=None):
@@ -1972,13 +2035,25 @@ def _understand(text_value, message, scope_key, llm, history=None, lang=DEFAULT_
     trace["path"] = "parser"
     context = reply_context(message)
     remembered = _recall_scope(scope_key) if scope_key else None
-    if context is None and remembered is not None and looks_like_followup(text_value):
+    correction = is_correction(text_value)
+    if chat_kind == "group" and not correction:
+        remembered = None  # in a group only a correction may reuse the person's previous question
+    if context is None and remembered is not None and (correction or looks_like_followup(text_value)):
         context = remembered
     intent = parse_question(text_value, context)
     if llm is not None and _needs_interpreter(intent, text_value):
         interpreted = llm(text_value, context or remembered, history or [], language=lang, chat_kind=chat_kind)
+        interpreted = _grounded(interpreted, text_value, context or remembered)
         if interpreted is not None:
             trace["path"] = "gemini"
             return interpreted
         trace["path"] = "parser_after_gemini_failed"
     return intent
+
+
+def _grounded(interpreted, text_value, previous):
+    """Gemini's reading is used only when its price and year bounds agree with what the message
+    states (as the free parser reads it); otherwise the parser's own reading is used."""
+    if interpreted is None or interpreted.kind not in {"find", "suggest", "liquidity"}:
+        return interpreted
+    return interpreted if telegram_llm.bounds_match(interpreted.filters, text_value, previous) else None
