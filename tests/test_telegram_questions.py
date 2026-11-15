@@ -409,7 +409,8 @@ class QuestionQueryTests(unittest.TestCase):
         self.assertIn("__tg_3", find_message(self.engine, Filters("Škoda Octavia")))
         for wildcard in ("%", "_", "g_lf", "%%"):
             reply = find_message(self.engine, Filters(wildcard))
-            self.assertIn("No matching listings", reply, wildcard)
+            self.assertNotIn("__tg_", reply, wildcard)  # a wildcard never matches every listing
+            self.assertNotIn("Showing", reply, wildcard)
 
     def test_hostile_text_is_data_and_never_changes_the_database(self):
         self.seed()

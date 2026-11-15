@@ -265,6 +265,8 @@ def seed_liquidity_scenario(engine, now):
     rows.append(("__qa_lact", "Volkswagen", "Golf", 2019, 16000, 90000, 30, 0))  # still listed
     rows.append(("__qa_lold", "Volkswagen", "Golf", 2008, 6000, 260000, 50, 45))  # older than 10 years
     rows.append(("__qa_lkm", "Volkswagen", "Golf", 2018, 15000, 900000, 50, 45))  # implausible mileage
+    for n in range(8):  # still listed: most ads we see do not vanish, so the ranking is not collector churn
+        rows.append((f"__qa_ly{n}", "Toyota", "Yaris", 2018, 14000, 100000, 20, 0))
     with engine.begin() as c:
         for lid, make, model, year, price, mileage, first_days, last_days in rows:
             c.execute(text("""INSERT INTO car_listings(listing_id,make,model,year,price,price_status,
@@ -353,8 +355,9 @@ class AnswerQualityDbTests(unittest.TestCase):
         intent = parse_question("Auto do 200000km, staro do 10 godina koje najlakse mogu prodati")
         reply, choices = telegram_bot.answer_intent(self.engine, intent, TelegramConfig.from_env(ENV), lang="bs")
         plain = telegram_bot.html_to_text(reply)
-        self.assertIn("1. Volkswagen Golf: medijan 6 dana · nestalo 6 od 7 viđenih", plain)
-        self.assertIn("2. Volkswagen Passat: medijan 30 dana · nestalo 5 od 5 viđenih", plain)
+        self.assertIn("1. Volkswagen Golf: medijan 6 dana na OLX-u · nestalo 6 od 7 viđenih", plain)
+        self.assertIn("2. Volkswagen Passat: medijan 30 dana na OLX-u · nestalo 5 od 5 viđenih", plain)
+        self.assertIn("Vrijeme na OLX-u, ne prodaja", plain)
         self.assertNotIn("Octavia", plain)  # fewer than 5 gone: not ranked
         self.assertIn("nije potvrđena prodaja", plain)
         self.assertIn("Nije preporuka", plain)
