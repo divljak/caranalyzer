@@ -18,25 +18,29 @@ and no error text, message text or key is ever logged.
 """
 
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import logging
 import os
 import re
+import time
 
 import requests
 
 from telegram_intent import _search_tokens
 from telegram_intent import (
     CORRECTABLE,
+    PRICE_CHECK_YEARS,
     Filters,
     Intent,
     MAX_QUESTION,
     MILEAGE_RANGE,
     PRICE_RANGE,
     YEAR_RANGE,
+    canonical_search,
     clean_search,
     fold,
+    generation_hint,
     merge_filters,
     stated_filters,
 )
@@ -48,13 +52,24 @@ LOG = logging.getLogger("telegram_llm")
 PHRASE_STATUS = ContextVar("telegram_llm_phrase_status", default="")
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 DEFAULT_MODEL = "gemini-3.5-flash-lite"
-TIMEOUT_SECONDS = 8
+TIMEOUT_SECONDS = 4.5  # read timeout for one call; the per-message budget below usually ends it sooner
+CONNECT_TIMEOUT_SECONDS = 2
+# Everything Gemini does for one message (interpret + phrase) must fit in this many seconds from when the
+# message arrived; after that the plain database answer is sent. A 429 pauses Gemini for a while so a
+# rate-limited key is not hit again for the phrasing call or the next few messages.
+MESSAGE_BUDGET_SECONDS = 6.0
+MIN_CALL_SECONDS = 0.8
+RATE_LIMIT_BACKOFF_SECONDS = 30
+_DEADLINE = ContextVar("telegram_llm_deadline", default=None)  # monotonic time, or None (no budget)
+_FAILED = ContextVar("telegram_llm_failed", default="")  # why an earlier call for this message failed
+_BACKOFF = {"until": 0.0}  # process-wide: no Gemini calls before this monotonic time (after HTTP 429)
 MAX_REPLY_CHARS = 700
 MAX_FACTS_CHARS = 3500
 MAX_HISTORY_TURNS = 6
 MAX_TURN_CHARS = 300
 LANGUAGE_NAMES = {"bs": "Bosnian", "en": "English"}
-INTENTS = ("status", "latest", "trends", "find", "model_stats", "compare", "suggest", "liquidity", "follow",
+INTENTS = ("status", "latest", "trends", "find", "model_stats", "price_check", "compare", "suggest", "liquidity",
+           "follow",
            "following",
            "shortlist", "clarify", "chitchat", "unsupported")
 
@@ -76,13 +91,22 @@ SYSTEM_PROMPT = PERSONA + """
 Your job now: turn the user's latest message into ONE JSON request. You do not answer questions.
 
 Choose intent:
-- find: the user wants listings. Set search (make/model words only, e.g. "golf", "skoda octavia"), \
+- find: the user wants listings. Set search (make/model words only, e.g. "golf", "skoda octavia"; never \
+question words like "normalna", "prosječno", "cheapest", "fair", and never fuel or gearbox words), \
 and any of budget_km (max price in KM), price_min_km (min price in KM), year_min, year_max, mileage_max (km). \
 A range sets both ends: "od 50 - 60k" or "između 50 i 60 hiljada" is price_min_km 50000 and budget_km \
-60000; "godište 2022 - 2024" is year_min 2022 and year_max 2024. Never drop either end of a range. Set family to true when they want \
+60000; "godište 2022 - 2024" is year_min 2022 and year_max 2024. Never drop either end of a range. \
+"preko / iznad / više od / over / above 40k" is price_min_km 40000 with NO budget_km. Set fuel (diesel, \
+petrol, hybrid, electric, lpg) for "dizel", "benzin", "hibrid", "električni", "plin/LPG", and transmission \
+(automatic, manual) for "automatik", "manuelni". A generation number after a model ("Golf 7") is not part \
+of search: write "golf 7" and it is handled. Set family to true when they want \
 a car for a family or a roomy car (estate, MPV, SUV, kids). Set include_old to true only when they ask \
 to include older or possibly expired ads.
-- model_stats: asks what a model typically costs. Set search.
+- model_stats: asks what a model typically costs, with no year or price. Set search.
+- price_check: asks whether a price is good or fair, or what a model of a given year normally costs \
+("je li ovo dobra cijena: Audi A4 2017 22.000 KM", "is this a good price", "koliko košta Superb 2019"). \
+Set search, year_min (the car's model year), asking_price_km (the price they quote, if any), mileage_max \
+(the car's mileage, if given), fuel and transmission. The quoted price is the price to judge, never a budget.
 - compare: compares exactly two models. Set compare_a and compare_b.
 - trends: asks how asking prices changed. Set days (1-90).
 - status: asks whether data is fresh or the collector works.
@@ -118,7 +142,9 @@ Your job now: answer the user's latest message in 1-4 short sentences using ONLY
 answer in "facts". Quote numbers exactly as they appear in the facts; do not calculate new ones, \
 round them, count or add any (say "a few" or "most" instead of counting). Do not include links, \
 web addresses or domain names: call the site OLX. Keep it under 500 characters. If the facts say there are no matches, that the data \
-is stale, partial or a thin sample, say so plainly. You may say what the data shows, but do not \
+is stale, partial or a thin sample, say so plainly. If the facts say a word or model was not recognised, \
+or that a different model was assumed, say that in your first sentence as your own doing (never say OLX \
+did not recognise something). You may say what the data shows, but do not \
 recommend a car as best, predict prices, or add general car knowledge. If the facts list cars, \
 mention only the most useful points (how many, the typical range, what stands out) and set \
 show_details to true when the user asked to see, find or list cars (or "show me"), so the listings \
@@ -137,6 +163,9 @@ SCHEMA = {
         "year_min": {"type": "integer"},
         "year_max": {"type": "integer"},
         "mileage_max": {"type": "integer"},
+        "fuel": {"type": "string", "enum": ["", "diesel", "petrol", "hybrid", "electric", "lpg"]},
+        "transmission": {"type": "string", "enum": ["", "automatic", "manual"]},
+        "asking_price_km": {"type": "integer"},
         "days": {"type": "integer"},
         "compare_a": {"type": "string"},
         "compare_b": {"type": "string"},
@@ -219,7 +248,14 @@ def _check_text(value, allowed_numbers, limit=MAX_REPLY_CHARS):
         return "", "number not in the facts"
     if re.search(_CANNOT_CHANGE, fold(value)):
         return "", "refused to redo a search"
+    if re.search(_BLAMES_OLX, fold(value)):
+        return "", "blamed OLX for the bot's own reading"
     return value, ""
+
+
+# "OLX didn't recognise that model": the bot read the message, not OLX.
+_BLAMES_OLX = (r"\bolx\b[^.!?]{0,30}\b(?:didn'?t|did not|couldn'?t|could not|doesn'?t|does not|nije|ne)\s+"
+               r"(?:\w+\s+)?(?:recogni\w*|understand\w*|find|know\w*|prepozna\w*|razum\w*|zna\w*)")
 
 
 # "I can't change your searches": never true (a correction is re-run), so never sent.
@@ -238,6 +274,10 @@ def bounds_match(filters, message, previous=None):
     for name in ("price_min", "budget", "year_min", "year_max"):
         want = getattr(stated, name)
         if want is not None and getattr(filters, name) != want:
+            return False
+    for name in ("fuel", "transmission"):  # "dizel" / "automatik" in the message must stay a filter
+        want = getattr(stated, name)
+        if want and getattr(filters, name) != want:
             return False
     return True
 
@@ -296,11 +336,16 @@ def intent_from_plan(plan, previous=None, message="", history=None):
         if first and second and first.lower() != second.lower():
             return Intent("compare", labels=(first, second))
         return Intent("clarify")
-    search = clean_search(" ".join(_search_tokens(str(plan.get("search") or ""))))
+    tokens, generation = generation_hint(_search_tokens(str(plan.get("search") or "")))
+    search = canonical_search(clean_search(" ".join(tokens)))
     family = plan.get("family") is True
     include_old = plan.get("include_old") is True
+    fuel = plan.get("fuel") if plan.get("fuel") in FUELS else ""
+    transmission = plan.get("transmission") if plan.get("transmission") in GEARBOXES else ""
     if kind == "model_stats":
         return Intent("model_stats", Filters(search)) if search else Intent("clarify")
+    if kind == "price_check":
+        return _price_check_plan(plan, search, generation, fuel, transmission)
     if kind == "follow":
         return Intent("follow", Filters(search)) if search else Intent("clarify", reply=reply)
     if kind == "following":
@@ -316,20 +361,46 @@ def intent_from_plan(plan, previous=None, message="", history=None):
         include_old=include_old,
         price_min=_bounded(plan.get("price_min_km"), PRICE_RANGE),
         year_max=_bounded(plan.get("year_max"), YEAR_RANGE),
+        fuel=fuel,
+        transmission=transmission,
     ))
+    if generation and not (filters.year_min or filters.year_max):
+        filters = replace(filters, year_min=generation[0], year_max=generation[1])
     if plan.get("refines_previous") is True and previous is not None and previous.kind in CORRECTABLE:
         filters = merge_filters(previous.filters, filters)
     if kind == "suggest":
         if filters.budget is None:
             return Intent("clarify", reply=reply)
-        return Intent("suggest", Filters(budget=filters.budget, year_min=filters.year_min,
-                                          mileage_max=filters.mileage_max, family=filters.family,
-                                          price_min=filters.price_min, year_max=filters.year_max))
+        return Intent("suggest", replace(filters, search="", include_old=False))
     if kind == "liquidity":
         return Intent("liquidity", filters)
     if filters.is_empty():
         return Intent("clarify")
     return Intent("find", filters)
+
+
+FUELS = ("diesel", "petrol", "hybrid", "electric", "lpg")
+GEARBOXES = ("automatic", "manual")
+
+
+def _price_check_plan(plan, search, generation, fuel, transmission):
+    """A validated price_check Intent from a plan: the quoted price is judged, never used as a cap."""
+    if not search:
+        return Intent("clarify", note="price_check")
+    price = _bounded(plan.get("asking_price_km"), PRICE_RANGE)
+    year = _bounded(plan.get("year_min"), YEAR_RANGE)
+    year_max = _bounded(plan.get("year_max"), YEAR_RANGE)
+    if year and year_max and year_max != year:
+        year_min, year = year, None
+    elif year:
+        year_min, year_max = year - PRICE_CHECK_YEARS, year + PRICE_CHECK_YEARS
+    elif generation:
+        year_min, year_max = generation
+    else:
+        year_min = year_max = None
+    return Intent("price_check", Filters(search, year_min=year_min, year_max=year_max, fuel=fuel,
+                                         transmission=transmission),
+                  price=price, year=year, mileage=_bounded(plan.get("mileage_max"), MILEAGE_RANGE))
 
 
 def _ordered(filters):
@@ -351,6 +422,7 @@ def _previous_scope(previous):
         scope.update({key: value for key, value in (("price_min_km", f.price_min), ("year_max", f.year_max))
                       if value is not None})
         scope.update({name: True for name in ("family", "include_old") if getattr(f, name)})
+        scope.update({name: getattr(f, name) for name in ("fuel", "transmission") if getattr(f, name)})
         return scope
     if previous.kind == "trends":
         return {"intent": "trends", "days": previous.days}
@@ -411,34 +483,78 @@ def _key_rejected(response):
     return "API_KEY_INVALID" in reasons or "api key not valid" in str(error.get("message", "")).lower()
 
 
+def start_message(budget=MESSAGE_BUDGET_SECONDS, started=None):
+    """Start the Gemini time budget for one incoming message (``started`` is a time.monotonic() value).
+    Returns a token for ``end_message``."""
+    return (_DEADLINE.set((time.monotonic() if started is None else started) + budget), _FAILED.set(""))
+
+
+def end_message(token):
+    """Close the budget opened by ``start_message`` (calls outside a message have no budget)."""
+    _DEADLINE.reset(token[0])
+    _FAILED.reset(token[1])
+
+
+def _call_window():
+    """(connect, read) timeouts for the next call, or a reason to skip Gemini for this message.
+
+    Outside a message (no budget started, e.g. a direct call) only the plain timeouts apply."""
+    deadline = _DEADLINE.get()
+    if deadline is None:
+        return (CONNECT_TIMEOUT_SECONDS, TIMEOUT_SECONDS), ""
+    now = time.monotonic()
+    if now < _BACKOFF["until"]:
+        return None, "skipped: backing off after a rate limit (HTTP 429)"
+    if _FAILED.get():
+        return None, "skipped: an earlier Gemini call for this message failed (" + _FAILED.get() + ")"
+    remaining = deadline - now
+    if remaining < MIN_CALL_SECONDS:
+        return None, "skipped: no time left for this message"
+    return (min(CONNECT_TIMEOUT_SECONDS, remaining), min(TIMEOUT_SECONDS, remaining)), ""
+
+
+def _fail(status, rate_limited=False):
+    if _DEADLINE.get() is not None:  # inside a message: stop calling Gemini for it (and, after 429, for a while)
+        if rate_limited:
+            _BACKOFF["until"] = time.monotonic() + RATE_LIMIT_BACKOFF_SECONDS
+        _FAILED.set(status)
+    return None, status
+
+
 def _generate(config, system, user, schema, max_tokens, post=None):
-    """Return (parsed JSON | None, status string). Never raises; status has no secrets."""
+    """Return (parsed JSON | None, status string). Never raises; status has no secrets.
+
+    Fails fast: a 429 or a timeout is not retried, and it stops further Gemini calls for this message
+    (a 429 also for the next RATE_LIMIT_BACKOFF_SECONDS), so the database answer goes out in time."""
     post = post or requests.post
     last = "failed"
     for level in (0, 1, 2):
+        timeout, skip = _call_window()
+        if timeout is None:
+            return None, skip
         try:
             response = post(
                 GEMINI_URL.format(model=config.model),
                 headers={"x-goog-api-key": config.api_key, "content-type": "application/json"},
                 json=_body(system, user, schema, max_tokens, level),
-                timeout=TIMEOUT_SECONDS,
+                timeout=timeout,
             )
         except requests.RequestException:
-            return None, "network error or timeout"
+            return _fail("network error or timeout")
         code = response.status_code
         if code == 429:
-            return None, "rate limit or free quota reached (HTTP 429)"
+            return _fail("rate limit or free quota reached (HTTP 429)", rate_limited=True)
         if code in (401, 403):
-            return None, f"key rejected (HTTP {code})"
+            return _fail(f"key rejected (HTTP {code})")
         if code == 404:
-            return None, "model name not found (HTTP 404)"
+            return _fail("model name not found (HTTP 404)")
         if code == 400:
             if _key_rejected(response):
-                return None, "key rejected (HTTP 400, API key not valid)"
+                return _fail("key rejected (HTTP 400, API key not valid)")
             last = "request rejected (HTTP 400)"
             continue  # retry with a simpler request shape
         if code != 200:
-            return None, f"Gemini error (HTTP {code})"
+            return _fail(f"Gemini error (HTTP {code})")
         try:
             text = _plan_text(response.json())
         except ValueError:
@@ -528,7 +644,11 @@ def check_message(config, *, post=None):
     """Human-readable health check for the /llm command. Contains no secrets."""
     if config is None:
         return "Gemini is not configured (no valid GEMINI_API_KEY / model). Plain questions use the built-in parser only."
-    plan, status = call_plan("golf under 15000 KM", None, config, post=post)
+    outside = _DEADLINE.set(None)  # a health check always calls Gemini, even during a 429 back-off
+    try:
+        plan, status = call_plan("golf under 15000 KM", None, config, post=post)
+    finally:
+        _DEADLINE.reset(outside)
     intent = intent_from_plan(plan, None, "golf under 15000 KM") if plan else None
     if intent is None:
         return f"Gemini check failed: {status}.\nModel: {config.model}"

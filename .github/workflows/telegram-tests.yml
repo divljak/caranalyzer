@@ -77,7 +77,7 @@ jobs:
           tests.test_telegram_experience tests.test_telegram_questions tests.test_telegram_companion
           tests.test_telegram_junk_search tests.test_telegram_shortlist tests.test_telegram_follow
           tests.test_telegram_group_window tests.test_telegram_chat_setup tests.test_telegram_log
-          tests.test_telegram_ranges
+          tests.test_telegram_ranges tests.test_telegram_sweep_fixes
 
       - name: Run the run-outcome and health-check tests
         run: PYTHONPATH=tests .venv/bin/python -m unittest -v tests.test_run_outcome tests.test_collector_health

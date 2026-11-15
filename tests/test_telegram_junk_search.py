@@ -63,7 +63,7 @@ class ParsingTests(unittest.TestCase):
     def test_real_car_names_are_kept(self):
         for text_value, search in (("Golf under 15000 KM", "golf"), ("Škoda Octavia do 20000 KM", "škoda octavia"),
                                    ("bmw 320d do 25000", "bmw 320d"), ("audi a4 do 9000 KM", "audi a4"),
-                                   ("golf 7 tdi do 12000 KM", "golf 7 tdi"), ("Golf, do 15000 KM.", "golf"),
+                                   ("golf 7 tdi do 12000 KM", "golf"), ("Golf, do 15000 KM.", "golf"),
                                    ("show me a Golf under 15000 KM please", "golf")):
             self.assertEqual(search, parse_question(text_value).filters.search, text_value)
 
@@ -94,49 +94,51 @@ class UnknownSearchDatabaseTests(unittest.TestCase):
     seed = QuestionQueryTests.seed
     seed_many = QuestionQueryTests.seed_many
 
-    def test_an_unrecognised_word_is_ignored_and_the_answer_says_so(self):
+    def test_an_unrecognised_word_lists_nothing_and_says_so(self):
+        # 2026-11-15 sweep: an unknown word used to be dropped and every model listed, which hid the miss.
         self.seed_many()
         reply = find_message(self.engine, Filters("budzet. je", 20000))
-        self.assertTrue(reply.startswith("Observed listings · up to 20.000 KM"))  # no junk in the title
-        self.assertIn("I didn't recognise “budzet. je” as a car make or model, so I searched all models.", reply)
-        self.assertIn("Showing 1–5 of 7", reply)
+        self.assertTrue(reply.startswith("Observed listings · budzet. je · up to 20.000 KM"), reply)
+        self.assertIn("No matching listings", reply)
+        self.assertIn("“budzet. je” doesn't match any make or model in our listings", reply)
+        self.assertNotIn("Showing", reply)
         bosnian = find_message(self.engine, Filters("budzet. je", 20000), lang="bs")
-        self.assertTrue(bosnian.startswith("Viđeni oglasi · do 20.000 KM"))
-        self.assertIn("Nisam prepoznao „budzet. je“ kao marku ili model, pa tražim među svim modelima.", bosnian)
+        self.assertIn("„budzet. je“ se ne poklapa ni s jednom markom ili modelom", bosnian)
 
-    def test_the_buttons_carry_the_filters_that_were_really_used(self):
+    def test_the_only_button_searches_without_the_unknown_word(self):
         self.seed_many()
-        _, page = telegram_bot.answer_intent(self.engine, Intent("find", Filters("budzet. je", 20000)), CONFIG)
-        self.assertEqual("", page.filters.search)
-        data = [b["callback_data"] for row in telegram_bot.keyboard(CONFIG, page)["inline_keyboard"] for b in row
-                if b.get("callback_data", "").startswith("f:")]
-        self.assertTrue(data)
-        self.assertTrue(all(":budzet" not in d for d in data), data)
-        self.assertIn("f:20000:0:0:5:", data)  # show more, with no search
+        text_value, choices = telegram_bot.answer_intent(self.engine, Intent("find", Filters("budzet. je", 20000)), CONFIG)
+        self.assertIsInstance(text_value, telegram_bot.NoMatch)  # sent as written, never rephrased
+        data = [b["callback_data"] for row in telegram_bot.keyboard(CONFIG, choices)["inline_keyboard"] for b in row]
+        self.assertEqual(["f:20000:0:0:0:"], data)
 
     def test_a_real_model_that_just_has_no_match_is_never_ignored(self):
         self.seed_many()
         reply = find_message(self.engine, Filters("golf", 100))  # Golf exists; nothing costs 100 KM
         self.assertIn("No matching listings", reply)
         self.assertNotIn("recognise", reply)
+        self.assertNotIn("doesn't match", reply)
         self.assertTrue(reply.startswith("Observed listings · golf · up to 100 KM"))
 
-    def test_a_search_with_no_other_filter_keeps_the_old_answer(self):
+    def test_a_search_with_no_other_filter_gets_the_hint_but_no_button(self):
         self.seed_many()
         reply = find_message(self.engine, Filters("budzet"))
         self.assertIn("No matching listings", reply)
-        self.assertIn("send /help", reply)
-        self.assertNotIn("recognise", reply)
+        self.assertIn("doesn't match any make or model", reply)
+        _, choices = telegram_bot.answer_intent(self.engine, Intent("find", Filters("budzet")), CONFIG)
+        self.assertIs(False, choices)
 
-    def test_year_or_mileage_filters_also_trigger_the_fallback(self):
+    def test_year_or_mileage_filters_never_widen_to_all_models(self):
         self.seed_many()
-        self.assertIn("recognise", find_message(self.engine, Filters("blah", None, 2015)))
-        self.assertIn("recognise", find_message(self.engine, Filters("blah", None, None, 200000)))
+        for filters in (Filters("blah", None, 2015), Filters("blah", None, None, 200000)):
+            reply = find_message(self.engine, filters)
+            self.assertIn("doesn't match any make or model", reply)
+            self.assertNotIn("Showing", reply)
 
     def test_paging_never_triggers_the_fallback(self):
         self.seed_many()
         self.assertIn("No more matches", find_message(self.engine, Filters("golf", 15000), 95))
-        self.assertNotIn("recognise", find_message(self.engine, Filters("blah", 20000), 5))
+        self.assertNotIn("doesn't match", find_message(self.engine, Filters("blah", 20000), 5))
 
     def test_the_search_stays_safe(self):
         self.seed_many()
