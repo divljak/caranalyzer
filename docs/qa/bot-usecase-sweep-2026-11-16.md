@@ -261,3 +261,81 @@ could land in the next test's log capture (it failed about half the time when ru
 
 Sweep re-run after these changes: the same 44 turns, parser-only, read-only, 0 exceptions. Intent, filters and reply text are identical to
 the first re-run on every turn (timestamps aside), so the result stays **33 PASS · 11 WEAK · 0 FAIL**.
+
+---
+
+# Improvements #5 (branch `feat/bot-improvements-5`, stacked on PR #42)
+
+Goes after the weak rows that PR #42 left (ranks 9 to 12 and the leftovers), plus two parser bugs the PR #42 re-check found.
+Same sweep, same read-only way: 44 turns through `telegram_bot.process_update` with a fake Telegram transport, parser-only
+(no Gemini), production Supabase through the backup role (secret streamed over ssh stdin, never printed or written to disk),
+`telegram_log.record` replaced by a no-op, 0 exceptions, slowest turn 0.7 s. Data snapshot: observations up to 16 Nov, 07:24 UTC.
+
+One correction to the method: this time every transaction starts with `SET TRANSACTION READ ONLY` and the run prints
+`transaction_read_only = on` before the first turn. A first attempt relied on the `default_transaction_read_only` start-up option, which the
+connection pooler ignores (`SHOW` said `off`). Nothing was written in that attempt either (the bot only reads, and logging was stubbed), but
+the guarantee now comes from the transaction itself.
+
+I ran the PR #42 head (`1293567`) and this branch back to back on the same snapshot: 55 turns (the 44 above plus 11 extra checks),
+**36 give byte-identical replies and buttons**, the other 19 are the cases below.
+
+| | PASS | WEAK | FAIL |
+|---|---|---|---|
+| PR #42 (`1293567`), parser-only | 33 | 11 | 0 |
+| This branch, parser-only | **42** | **2** | **0** |
+
+## What changed, row by row
+
+| # | Input | PR #42 | Now | What the bot does |
+|---|---|---|---|---|
+| 24 | audi a6 3.0 tdi quattro | WEAK | PASS | The tokens stay in the title (`audi a6 3.0 quattro · dizel`); no "nisam prepoznao". The answer says they are not fields in the data and that 8 of 19 ads mention them in their text, and those ads come first. Nothing is filtered out |
+| 26 | nešto jeftino i pouzdano | WEAK | PASS | Asks for a budget and a use, with budget buttons |
+| 27 | koji auto je najbolji za početnike? | WEAK | PASS | Same |
+| 28 | show me something nice | WEAK | PASS | Same; the "Mercedes-Benz CE" suggestion is gone for good (a one-to-three-letter name is never a near miss) |
+| 33 | Tesla Model 3 cijena | WEAK | PASS | "Nisam našao „tesla 3“, pa su ovi brojevi za „tesla“. U našim oglasima se vodi kao „Tesla Model / Tesla X“, pa ne mogu izdvojiti „3“." Then the 2 Teslas: median 72.000 KM, thin-sample warning. Same for the listing search and for typical mileage |
+| 34d | pokaži još | WEAK | PASS | After 34c (one listing) the answer is "To je sve što imam za ovu pretragu", with a button to include older ones. After "Golf 7 do 18k" (10 fresh) it shows 6–10, then "to je sve" |
+| 35 | koji se najbrže prodaje? | WEAK | PASS | The honest refusal stays, then: "modeli s najviše oglasa viđenih u zadnjih 14 dana. To je ponuda, ne brzina prodaje": Golf 55, Passat 37, A4 22, Octavia 22, Tiguan 21, with 🔎 buttons |
+| 35b | a do 15 hiljada? | WEAK | PASS | Same list for ≤ 15.000 KM (Golf 26, Passat 21, Octavia 12 ...) |
+| 38 | Mercedes E klasa 2012 dizel koliko km ima prosječno? | WEAK | PASS | "Tipična kilometraža · 2011–2013": 15 ads, median 270.000 km, middle half 233.500–304.602 km, range 107.116–364.000 km |
+| 7c, 10 | | WEAK | WEAK | Unchanged: both depend on Ogi's pending calls (years of "od 2017" replacing a span; compare thresholds) |
+
+Extra checks (not graded): `Golf ne manje od 100000 km` → `od 100.000 km` (52 fresh, all above); `Golf nikako preko 150000 km` →
+`do 150.000 km`, search `golf` (was `golf nikako`); `average mileage of a golf 7` → 236 ads, median 241.000 km;
+`pokaži još` with no earlier search → asks what to search.
+
+## What was done
+
+- **Liquidity (rank 9).** When the disappearance data cannot rank (collector churn, or no model with 5 vanished ads), the answer adds the most
+  listed models for the same filters, seen in the last 14 days, labelled as supply and not as speed of sale. The 🔎 buttons use them. A
+  follow-up like "a do 15 hiljada?" keeps its scope. A real ranking is untouched.
+- **"pokaži još" (rank 10).** New: `Intent.page_total` and a "more" step in the parser. In a private chat the bot remembers the page it
+  last showed; in a reply to one of its answers it reads the page from the "Prikazujem 6–10 od 26" line. Next page when there is one, "To je
+  sve što imam" when there is not, and "nemam prethodnu pretragu" without a find to continue (liquidity, trends and so on). Gemini is
+  not asked about it.
+- **Average mileage (rank 11).** New intent `mileage_stats`: median, middle half and range of the recorded mileage of the same model (year ±1 for a
+  bare year, a generation's or "od" years kept open, same fuel and gearbox, same relaxations as a price check). Mileage under 1.000 km,
+  new cars and implausible entries are left out, and the answer says so. Price words ("cijena", "košta") or a mileage bound keep the old
+  meaning.
+- **Unknown models (rank 12).** The model-level answers (typical price, price check, typical mileage) now repair an unknown name like a listing
+  search does ("tesla 3" → "tesla") and say so. When only a model number or letter was lost, the answer shows how the ads name the model.
+  A name that exists nowhere gets "nisam prepoznao … pa nema brojeva" after the "no listings" line.
+- **Engine and trim tokens (rank 8, second half).** `3.0`, `3,0`, `quattro`, `xdrive`, `4motion`, `4matic`, `4x4`, `awd`, `gti`, `gtd`, `gte`,
+  `amg`, `sline` and `msport` stay in the search text (titles, buttons, follow-ups) but never take part in matching the model. They rank:
+  ads whose text (or label) mentions all of them come first, and the answer says how many do. They never filter. If no ad mentions them,
+  it says that too. Typical price and typical mileage set them aside with a note.
+- **Vague questions.** A short wish with no car, no number and no attribute ("pouzdano", "nice", "početnike", "something", "najbolji") asks for a
+  budget and a use, with budget buttons. A named car or a filter keeps the old search; Gemini, when configured, still gets the first go.
+- **Stray suggestion.** "Did you mean" ignores vocabulary words under four letters (the "ce" of "Mercedes-Benz CE").
+- **Parser bugs.** `ne manje od / nikako manje od / not less than N km` is a minimum (and a price floor for KM); `nikako` and `nikada` are not
+  search words, so `Golf nikako preko 150000 km` searches `golf`.
+
+Not touched, as asked: what "Golf 2015" means, whether "golf 20" is a 2020 Golf, and the compare thresholds (tests pin all three).
+
+## Still open
+
+- Rows 7c and 10 (Ogi's calls above).
+- The hint ranking relies on the ad text. In today's data 8 of 19 A6 ads mention "3.0 quattro"; for a model whose ads rarely carry a description,
+  the answer says that no ad mentions it and lists everything.
+- "pokaži još" in a group chat works only as a reply to the bot's answer (a group keeps no memory of earlier searches, by design).
+- Gemini was not in this run. The new intents are parser-only; Gemini's plan does not know `mileage_stats` (the parser reads those questions first
+  and Gemini is not asked), and its reading of "pokaži još" is bypassed on purpose.

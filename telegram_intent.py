@@ -17,6 +17,8 @@ import unicodedata
 
 
 MAX_QUESTION = 400
+PAGE_SIZE = 5  # listings per page (telegram_bot.PAGE_SIZE is the same number)
+MAX_PAGE_OFFSET = 95
 MAX_SEARCH = 40
 PRICE_RANGE = (1_000, 1_000_000)
 YEAR_RANGE = (1980, 2035)
@@ -112,6 +114,8 @@ class Intent:
     price: int | None = None
     year: int | None = None
     mileage: int | None = None
+    # find only: how many matches the page shown had in all, so "pokaži još" knows when there is no more
+    page_total: int | None = None
 
 
 def fold(value):
@@ -167,7 +171,7 @@ mogu mozes moze mozemo mozete mogao mogla htio htjela zelio zelim volio bih bi n
 reci kazi pitam pitao hocu hoces dobar dobra dobro dobre bolji bolja bolje fin fina fino lijep lijepa cao cao-cao ej hej
 hi hey hello thx yes no yeah ok okay maybe also just really very quite enough something anything
 moj moja moje my nesto family porodica porodicu porodicni porodicno familiju sporty
-ne nije se ovo ono ovu gore probaj probati probaci probajte pogledaj this above try mileage kilometraza kilometraze
+ne nije se ovo ono ovu gore nikako nikada nikad never probaj probati probaci probajte pogledaj this above try mileage kilometraza kilometraze
 kilometers kilometres kilometara kilometar kilometri kilometre kms najlakse najbrze prodati prodam lako brzo staro stari staru godina godine godinu
 godiste godista godistem izmedu izmedju between hiljada hiljade hiljadu tisuca tisuce thousand
 mislim mislio mislila stavio stavila stavili napisao napisala rekao rekla trazio trazila nisam nego
@@ -239,8 +243,9 @@ _YEAR_SPAN = re.compile(
     r"(?!\s*(?:k(?![a-z])|km|bam|kam|marak\w*|hiljad\w*|tisuc\w*|thousand|eur\w*|[.,]?000))")
 _THOUSANDS = r"k(?![a-z0-9])|h?iljad\w*|tisuc\w*|thousand"
 # "preko 40k", "iznad 30.000 KM", "over 20k": a lower price bound only.
+_NOT_LESS = (r"(?:ne|nikako|no|not|never)\s+(?:manje|ispod|less|under|below|fewer)(?:\s+(?:than|od))?")
 _ABOVE = (r"(?<!\bne )(?<!\bno )(?<!\bnot )\b(?:preko|iznad|vise od|vece od|over|above|more than|at least|najmanje|"
-          r"minimalno|minimum)\s*")
+          r"minimalno|minimum|" + _NOT_LESS + r")\s*")
 _PRICE_UNIT = r"km|bam|kam|maraka|marke|marks?"
 _PRICE_SPAN = re.compile(
     r"(?<![a-z0-9.,])" + _RANGE_FROM
@@ -265,6 +270,7 @@ def _year_range(folded):
 _MIN_CUE = (r"(?:preko|iznad|vise od|vece od|over|above|more than|at least|najmanje|minimalno|minimum|min|od|from)"
             r"\s*(?:oko\s*)?$")
 _NEGATED = r"(?:no|not|ne|nikako|never)\s+(?:more|vise|preko|iznad|over|above|vece|bigger|higher)(?:\s+(?:than|od))?"
+_NOT_LESS_CUE = _NOT_LESS + r"\s*(?:oko\s*)?$"  # "ne manje od 100000 km": a minimum, whatever "manje od" says
 _MAX_CUE = (r"(?:manje|less|under|ispod|below|max\w*|do|up to|upto|until|najvise|at most|" + _NEGATED
             + r")\s*(?:od|than)?\s*(?:oko\s*)?$")
 # "malo kilometara", "mala kilometraza", "low mileage": a preference for few km, not a bound.
@@ -379,7 +385,7 @@ def _extract_filters(folded, original, km_is_price=False):
         """Store a mileage bound: "preko / više od / od N km" is a minimum, anything else a maximum."""
         nonlocal mileage, mileage_min
         before = folded[:start]
-        if re.search(_MIN_CUE, before) and not re.search(_MAX_CUE, before):
+        if re.search(_NOT_LESS_CUE, before) or (re.search(_MIN_CUE, before) and not re.search(_MAX_CUE, before)):
             if mileage_min is None:
                 mileage_min = value
         elif mileage is None:
@@ -496,6 +502,7 @@ def _singular(token):
 def _search_tokens(rest):
     tokens = []
     for raw in re.split(r"\s+", rest.lower().replace("'", "").replace("\u2019", "")):
+        raw = re.sub(r"^([0-9])[,]([0-9][a-z]?)$", r"\1.\2", raw)  # "3,0" is the engine size 3.0, not "3 0"
         token = clean_search(raw).strip(".-")
         folded = fold(token)
         if (token and folded not in _STOPWORDS and fold(token.rstrip("s")) not in _STOPWORDS
@@ -662,6 +669,28 @@ def _search_text(rest):
     return clean_search(" ".join(_search_tokens(rest)))
 
 
+# Engine sizes and trim names ("3.0", "quattro") are not in the data as fields. They stay in the search text the
+# user typed (so titles and buttons keep them) but never take part in matching the make and model.
+_ENGINE_SIZE = re.compile(r"[1-9]\.[0-9]")
+TRIM_WORDS = frozenset("quattro xdrive 4motion 4matic 4x4 awd gti gtd gte amg sline msport".split())
+
+
+def split_trim(search):
+    """"audi a6 3.0 quattro" -> ("audi a6", ("3.0", "quattro")). Unchanged when nothing, or only hints, is left."""
+    words = (search or "").split()
+    hints = tuple(word for word in words if _ENGINE_SIZE.fullmatch(word) or fold(word) in TRIM_WORDS)
+    model = [word for word in words if word not in hints]
+    if not hints or not model:
+        return search, ()
+    return " ".join(model), hints
+
+
+def hint_patterns(hints):
+    """Case-insensitive regexes that find each engine / trim hint in a listing's text."""
+    return [rf"(^|[^0-9.,]){re.escape(hint[0])}[.,]{re.escape(hint[2])}([^0-9]|$)" if _ENGINE_SIZE.fullmatch(hint)
+            else rf"\m{re.escape(fold(hint))}\M" for hint in hints]
+
+
 _COMPARE_SPLIT = re.compile(
     r"\s*(?:\||\bvs\.?\b|\bversus\b|\bnaspram\b|\bagainst\b|\bcompared to\b|\bor\b|\bili\b|\band\b|\bi\b|\bwith\b)\s*",
     re.I)
@@ -718,7 +747,7 @@ def looks_like_followup(text_value):
     ("from 2018", "under 12000") or ones opening with "what about ...".
     """
     original = strip_mentions((text_value or "")[:MAX_QUESTION]).strip()
-    if _FOLLOWUP_CUE.match(original):
+    if _FOLLOWUP_CUE.match(original) or re.search(_MORE, fold(original)):
         return True
     filters, rest = _extract_filters(fold(original), original)
     return bool(filters.numeric() or filters.include_old or filters.attributes()) and not _search_tokens(rest)
@@ -846,15 +875,24 @@ def _context_from_line(line):
     return None
 
 
+_PAGE_LINE = re.compile(r"(?:Showing|Prikazujem)\s+([0-9]+)(?:–[0-9]+)?\s+(?:of|od)\s+([0-9]+)\b")
+
+
 def context_from_reply(reply_text):
     """Recover the previous answer's scope from the bot message being replied to.
 
     The title is normally the first line; when Gemini phrased the answer, its sentences come first
     and the database answer (with its title) follows, so the first line that reads as a title wins.
     """
-    for line in (reply_text or "").strip().split("\n")[:40]:
-        found = _context_from_line(line.strip())
+    lines = [line.strip() for line in (reply_text or "").strip().split("\n")[:40]]
+    for line in lines:
+        found = _context_from_line(line)
         if found is not None:
+            if found.kind == "find":
+                for other in lines:  # "Showing 6–10 of 26 ...": which page this was, for "pokaži još"
+                    page = _PAGE_LINE.match(other)
+                    if page:
+                        return replace(found, offset=int(page.group(1)) - 1, page_total=int(page.group(2)))
             return found
     return None
 
@@ -955,6 +993,25 @@ def short_model_year(tokens, folded):
         if re.search(rf"\b{re.escape(fold(word))}\s+{number}{after}", folded):
             return tokens[:index] + tokens[index + 1:], 2000 + int(number)
     return tokens, None
+
+
+# "pokaži još", "još", "more", "next page": the next page of the last search.
+_MORE = (r"^(?:(?:hajde|ajde|molim te|please)\s+)?(?:(?:pokazi|prikazi|daj|show|give|load|see|vidi)(?:\s+mi)?\s+)?"
+         r"(?:jos|vise|more|dalje|next|nastavi|continue|sljedec\w*|iduc\w*)"
+         r"(?:\s+(?:jos|oglasa?|oglase|rezultat\w*|auta|stranic\w*|page|results?|ads|listings?|cars|ih|jedan|jednu))*\W*$")
+
+# "koliko km ima prosječno", "average mileage of a golf 7": the typical mileage of a model, not its price.
+_KM_NOUN = r"(?<![0-9])\b(?:km|kms|kilometar\w*|kilometr\w*|kilometraz\w*|mileage|odvozen\w*|prijeden\w*)\b"
+_AVG_ASK = (r"\b(?:prosje\w*|average|avg|typical|tipicn\w*|obicn\w*|uobicajen\w*|median\w*|medijan\w*|usually|"
+            r"normaln\w*|koliko|how many|how much)\b")
+_PRICE_WORD = r"\b(?:cijen\w*|price\w*|kosta\w*|cost\w*|vrijed\w*|eur|bam|kam)\b"
+
+# Words that describe a wish, not a car ("nešto jeftino i pouzdano", "show me something nice"): the bot asks for a
+# budget or a use instead of searching for a model with that name.
+_VAGUE = (r"\b(?:pouzdan\w*|reliable|dependable|nice|lijep\w*|dobar auto|good car|jeftin\w*|cheap\w*|best|najbolj\w*|"
+          r"beginner\w*|pocetnik\w*|pocetnic\w*|first car|prvi auto|prvo auto|udoban\w*|comfortabl\w*|ekonomic\w*|"
+          r"stedljiv\w*|economical|something|nesto|sporty|sigurn\w*|safe)\b")
+VAGUE_MAX_WORDS = 8
 _FORECAST = r"\b(?:will|predict\w*|forecast\w*|going to|next (?:year|month|week)|prognoz\w*|hoce li|budu[cć]\w*)\b"
 _CURRENCY = r"\b(?:eur|euro|euros|usd|dollars?)\b|[€$]"
 _ACK = r"^(?:thanks|thank you|thx|ty|ok|okay|hvala|super|great|nice|cool|sjajno)\W*$"
@@ -1028,6 +1085,20 @@ def _price_check(filters, folded, bare_year=True):
     return Intent("price_check", comparison, price=price, year=year, mileage=filters.mileage_max)
 
 
+def _mileage_check(filters, bare_year=True):
+    """A "typical mileage" Intent for a model (and its year +-1, like a price check); asks for the model if missing."""
+    year = None
+    year_min, year_max = filters.year_min, filters.year_max
+    if year_min and not year_max and bare_year:
+        year = year_min
+        year_min, year_max = year - PRICE_CHECK_YEARS, year + PRICE_CHECK_YEARS
+    comparison = Filters(search=filters.search, year_min=year_min, year_max=year_max, fuel=filters.fuel,
+                         transmission=filters.transmission, new_ok=filters.new_ok)
+    if not filters.search:
+        return Intent("clarify", comparison, note="mileage_stats")
+    return Intent("mileage_stats", comparison, year=year)
+
+
 def _model_search(rest, named):
     """The search text: a known alias ("C klasa", "Serija 3") wins, else the remaining model words."""
     folded_rest = fold(rest)
@@ -1089,6 +1160,16 @@ def _correct(original, folded, context):
     return Intent(kind, merged, note="correction")
 
 
+def _more(context):
+    """"pokaži još": the next page of the last find, or "no more" when it was the last page."""
+    if context is None or context.kind != "find":
+        return Intent("clarify", labels=("more",))
+    following = max(0, context.offset) + PAGE_SIZE
+    if (context.page_total is not None and following >= context.page_total) or following > MAX_PAGE_OFFSET:
+        return Intent("no_more", context.filters, page_total=context.page_total)
+    return Intent("find", context.filters, offset=following, note="more")
+
+
 def parse_question(text_value, context=None, _restating=False):
     """Turn one question into an Intent (see ``_parse_question``). A car search that mentions registration
     carries the label "registration", so the answer can say it is not a filter."""
@@ -1113,6 +1194,8 @@ def _parse_question(text_value, context=None, _restating=False):
     topic = small_talk_topic(folded)
     if topic:
         return Intent("chitchat", labels=(topic,))
+    if re.search(_MORE, folded):
+        return _more(context)
     if re.search(_OUT_OF_SCOPE_ALWAYS, folded):
         return Intent("chitchat", labels=("scope",))
     if re.search(_OUT_OF_SCOPE_UNLESS_FILTERS, folded):
@@ -1179,6 +1262,11 @@ def _parse_question(text_value, context=None, _restating=False):
     if generation and not (filters.year_min or filters.year_max):
         filters = replace(filters, year_min=generation[0], year_max=generation[1])
 
+    if (re.search(_KM_NOUN, folded) and re.search(_AVG_ASK, folded) and not re.search(_PRICE_WORD, folded)
+            and not (filters.mileage_max or filters.mileage_min or filters.low_km or filters.budget or filters.price_min)
+            and not re.search(_LIQUID, folded)):
+        return _mileage_check(filters, bare_year)
+
     if re.search(_DEALS, folded) and not re.search(_LIQUID, folded):
         if re.search(r"\b(?:je li|da li|jel|is (?:this|that|it))\b", folded):
             return _price_check(filters, folded, bare_year)  # "je li ovo dobra ponuda: Golf 2017 15000 KM"
@@ -1223,6 +1311,11 @@ def _parse_question(text_value, context=None, _restating=False):
             return Intent("status")
         if re.search(_LATEST, folded):
             return Intent("latest")
+
+    if (re.search(_VAGUE, folded) and len(original.split()) <= VAGUE_MAX_WORDS and not _names_a_car(folded)
+            and not filters.numeric() and not filters.attributes() and not filters.family
+            and not filters.include_old):
+        return Intent("clarify", labels=("vague",))  # asks for a budget or a use; Gemini may still word it
 
     if context and context.kind == "trends" and tokens and all(t.isdigit() for t in tokens):
         return Intent("trends", days=max(1, min(int(tokens[0]), 90)))
