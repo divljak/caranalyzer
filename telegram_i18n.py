@@ -219,6 +219,7 @@ STRINGS = {
         # small talk (answered without Gemini)
         "smalltalk_greeting": "Hi! 👋",
         "smalltalk_weather": "I don't follow the weather, only used cars from olx.ba. 🙂",
+        "registration_note": "ℹ️ Registration is not a filter in our data, so I searched without it.",
         "smalltalk_scope": "That's outside what I cover: I only answer questions about used-car listings from olx.ba, not finance, registration, insurance, motorcycles or anything else. 🙂",
         "smalltalk_how": "All good, thanks! 🙂",
         "smalltalk_about": "I'm a bot that reads the used-car ads from olx.ba that we have recorded.",
@@ -438,6 +439,7 @@ STRINGS = {
         # small talk (answered without Gemini)
         "smalltalk_greeting": "Zdravo! 👋",
         "smalltalk_weather": "Vrijeme ne pratim, samo polovna auta s olx.ba. 🙂",
+        "registration_note": "ℹ️ Registracija nije filter u našim podacima, pa sam tražio bez nje.",
         "smalltalk_scope": "To je izvan onoga što pokrivam: odgovaram samo na pitanja o oglasima polovnih auta s olx.ba, ne o kreditima, registraciji, osiguranju, motociklima ni ičemu drugom. 🙂",
         "smalltalk_how": "Dobro sam, hvala! 🙂",
         "smalltalk_about": "Ja sam bot koji čita oglase polovnih auta s olx.ba koje smo zabilježili.",

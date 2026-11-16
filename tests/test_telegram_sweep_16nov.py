@@ -16,6 +16,9 @@ from sqlalchemy import create_engine, text
 
 import telegram_bot
 import telegram_i18n
+import telegram_llm
+from telegram_intent import Intent, fold as telegram_intent_fold
+from telegram_llm import intent_from_plan
 from telegram_bot import TelegramConfig, answer_intent
 from telegram_intent import Filters, context_from_reply, merge_filters, parse_question, repair_typo
 
@@ -326,6 +329,94 @@ class SuggestionNoiseTests(unittest.TestCase):
         self.assertEqual((None, ["Volkswagen Golf"]), telegram_bot.resolve_search(self.LABELS, "gulff"))
 
 
+# ---- Codex review of PR #42 ------------------------------------------------------------------------
+
+class CodexReviewTests(unittest.TestCase):
+    def test_negated_minimums_are_maximums(self):  # blocker 1
+        for message in ("golf no more than 200000 km", "golf ne vise od 200000 km", "golf ne više od 200000 km",
+                        "golf not more than 200000 km", "golf ne preko 200000 km", "golf najviše 200000 km",
+                        "golf max 200000 km", "golf at most 200000 km"):
+            _, filters = parsed(message)
+            self.assertEqual((None, 200000, "golf"), (filters.mileage_min, filters.mileage_max, filters.search),
+                             message)
+        _, filters = parsed("golf ne više od 15000 KM")  # the same for a price
+        self.assertEqual((None, 15000), (filters.price_min, filters.budget))
+        for message in ("golf more than 200000 kilometers", "golf više od 200000 km", "golf preko 200000 km"):
+            self.assertEqual(200000, parsed(message)[1].mileage_min, message)
+
+    def test_real_models_are_not_rewritten(self):  # blocker 2
+        for message, search in (("Renault Austral do 40000 KM", "renault austral"),
+                                ("Renault Kadjar do 20000 KM", "renault kadjar"),
+                                ("Toyota Verso do 15000 KM", "toyota verso")):
+            intent, filters = parsed(message)
+            self.assertEqual(("find", search), (intent.kind, filters.search), message)
+        for word in ("austral", "kadjar", "verso", "arkana", "koleos"):
+            self.assertEqual(word, repair_typo(word), word)
+        self.assertEqual("renault astre", parsed("renault astre")[1].search)  # a make's model list decides
+        self.assertEqual("passat", parsed("pasat")[1].search)
+        self.assertEqual("volkswagen passat", parsed("Volkswagen pasat")[1].search)
+
+    def test_open_generations_and_bounds_keep_their_open_end(self):  # blocker 3
+        for message, years in (("Golf 8 cijena", (2019, None)), ("Passat B8 cijena", (2014, None)),
+                               ("Audi A4 B9 cijena", (2015, None)), ("Golf od 2018 cijena", (2018, None)),
+                               ("Golf 7 cijena", (2012, 2020)), ("Golf 2018 cijena", (2017, 2019))):
+            intent, filters = parsed(message)
+            self.assertEqual(("price_check", years), (intent.kind, (filters.year_min, filters.year_max)), message)
+        self.assertEqual((2018, None), (parsed("Golf 2018 cijena")[0].year, None))
+        self.assertIsNone(parsed("Golf 8 cijena")[0].year)
+
+    def test_a_mileage_range_follow_up_is_not_currency(self):  # blocker 4
+        _, first = parsed("golf do 20000 KM preko 100000 km")
+        self.assertEqual((20000, 100000), (first.budget, first.mileage_min))
+        context = context_from_reply(telegram_bot._filter_title(first, "bs"))
+        for message in ("100000 do 200000 km", "ne, 100000 do 200000 km", "a ne, 100000 do 200000 km"):
+            intent, filters = parsed(message, context)
+            self.assertEqual(("find", 20000, None, 100000, 200000),
+                             (intent.kind, filters.budget, filters.price_min, filters.mileage_min,
+                              filters.mileage_max), message)
+
+    def test_registration_is_a_qualifier_when_a_car_is_named(self):  # blocker 5
+        for message in ("Golf sa registracijom", "registered Golf", "Golf registrovan"):
+            intent, filters = parsed(message)
+            self.assertEqual(("find", "golf", ("registration",)), (intent.kind, filters.search, intent.labels),
+                             message)
+        for message in ("kako da registrujem auto u BiH?", "kako da registrujem Golf", "how do I register a Golf?",
+                        "registracija"):
+            self.assertEqual(("chitchat", ("scope",)), (parse_question(message).kind, parse_question(message).labels),
+                             message)
+
+    def test_a_range_of_mileage_and_a_range_of_price_in_one_message(self):  # nice-to-have (a)
+        for message in ("golf 100000-200000 km od 12000 do 16000 KM", "golf od 12000 do 16000 KM 100000-200000 km"):
+            _, filters = parsed(message)
+            self.assertEqual(("golf", 12000, 16000, 100000, 200000),
+                             (filters.search, filters.price_min, filters.budget, filters.mileage_min,
+                              filters.mileage_max), message)
+
+    def test_a_capital_dotted_I_does_not_break_the_offsets(self):  # nice-to-have (b)
+        for message in ("golf İ do 15000 KM", "İİİ golf do 15000 KM ſ", "golf do 15000 KM İstanbul"):
+            self.assertEqual(15000, parsed(message)[1].budget, message)
+            self.assertEqual(len(message), len(telegram_intent_fold(message)), message)
+
+    def test_gemini_keeps_low_km_family_years_and_orders_mileage(self):  # blocker 6, nice-to-have (c), (d)
+        intent = intent_from_plan({"intent": "find", "search": "golf", "low_km": True})
+        self.assertTrue(intent.filters.low_km)
+        self.assertFalse(intent_from_plan({"intent": "find", "search": "golf"}).filters.low_km)
+        stated = telegram_llm.stated_filters("golf low mileage")
+        self.assertTrue(stated.low_km)
+        self.assertFalse(telegram_llm.bounds_match(Filters("golf"), "golf low mileage"))
+        self.assertTrue(telegram_llm.bounds_match(Filters("golf", low_km=True), "golf low mileage"))
+        self.assertIn("low_km", telegram_llm.SCHEMA["properties"])
+        scope = telegram_llm._previous_scope(Intent("find", Filters("golf", low_km=True, mileage_min=100000)))
+        self.assertEqual((True, 100000), (scope["low_km"], scope["mileage_min"]))
+        reversed_range = intent_from_plan({"intent": "find", "search": "golf", "mileage_min": 200000,
+                                           "mileage_max": 100000})
+        self.assertEqual((100000, 200000), (reversed_range.filters.mileage_min, reversed_range.filters.mileage_max))
+        compare = intent_from_plan({"intent": "compare", "compare_a": "kia sportage", "compare_b": "hyundai tucson",
+                                    "year_min": 2019, "year_max": 2019, "family": True})
+        self.assertEqual(("compare", 2019, 2019, True), (compare.kind, compare.filters.year_min,
+                                                          compare.filters.year_max, compare.filters.family))
+
+
 # ---- the answers, against a throwaway database ----------------------------------------------------
 
 def _naive_now():
@@ -421,6 +512,30 @@ class SweepAnswerTests(unittest.TestCase):
                    ("m3", "Škoda", "Fabia", 2013, 8000, 55000)])
         reply, _ = self.answer("auto sa malo kilometara do 20k")
         self.assertEqual(["m2", "m3", "m1"], re.findall(r"artikal/__qa_s_(\w+)", reply))
+
+    def test_open_generation_price_check_says_from_and_counts_all_later_years(self):
+        self.seed([(f"g8{y}", "Volkswagen", "Golf", y, 15000 + 1000 * (y - 2012), 100000) for y in range(2012, 2024)])
+        reply, _ = self.answer("Golf 8 cijena")
+        self.assertTrue(reply.startswith("Provjera cijene · golf · od 2019\n"), reply)
+        self.assertIn("Uporedivih oglasa (zadnjih 90 dana): 5", reply)  # 2019-2023, not 2018-2020
+
+    def test_registration_is_searched_as_a_golf_and_said_not_to_be_a_filter(self):
+        self.seed([("r1", "Volkswagen", "Golf", 2016, 14000, 150000)])
+        for message in ("Golf sa registracijom", "registered Golf"):
+            reply, _ = self.answer(message)
+            self.assertEqual({"r1"}, self.ids(reply), message)
+            self.assertIn("Registracija nije filter", reply)
+
+    def test_real_models_are_searched_by_their_own_name(self):
+        self.seed([("au1", "Renault", "Austral", 2023, 38000, 20000)])
+        reply, _ = self.answer("Renault Austral do 40000 KM")
+        self.assertTrue(reply.startswith("Viđeni oglasi · renault austral"), reply)
+        self.assertNotIn("astra", reply.lower())
+
+    def test_a_negated_minimum_lists_the_low_mileage_cars(self):
+        self.seed([("n1", "Volkswagen", "Golf", 2015, 9000, 150000), ("n2", "Volkswagen", "Golf", 2013, 6000, 250000)])
+        reply, _ = self.answer("golf ne više od 200000 km")
+        self.assertEqual({"n1"}, self.ids(reply))
 
     def test_price_questions_get_price_statistics(self):  # rows 2, 3, 25
         self.seed([(f"b{n}", "BMW", "320d", 2018, 20000 + n * 500, 150000 + n * 1000) for n in range(6)]

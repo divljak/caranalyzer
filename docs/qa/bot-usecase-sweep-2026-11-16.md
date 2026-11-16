@@ -237,3 +237,27 @@ and the petrol slang "benca" (8, the petrol half). Ranks 9 to 12 and the engine-
 - Engine tokens ("3.0", "quattro") are still dropped with a note (row 24); vague questions (rows 26 to 28) still get no budget question.
 - Gemini was not in this run. With Gemini on, `bounds_match` now also checks the mileage bounds against what the parser read, so a
   Gemini reading that loses a "preko 200.000 km" falls back to the parser instead of being sent as-is.
+
+## Second pass: Codex review of PR #42
+
+Six blockers and four follow-ups from the review, fixed on the same branch (inputs are the ones Codex ran; each has a regression test in
+`tests/test_telegram_sweep_16nov.py`, class `CodexReviewTests` plus four database tests).
+
+| # | Codex input | Before | After |
+|---|---|---|---|
+| 1 | golf no more than 200000 km · golf ne vise od 200000 km | mileage_min=200000 (reversed) | mileage_max=200000; "ne više od 15000 KM" is a price ceiling too |
+| 2 | Renault Austral do 40000 KM | `renault astra` | `renault austral`; exact catalogue names are never rewritten, a typo is repaired only to a model of the make before it; `pasat` still gives `passat` |
+| 3 | Golf 8 cijena · Passat B8 cijena · Audi A4 B9 cijena · Golf od 2018 cijena | 2018–2020 / 2013–2015 / 2014–2016 / 2017–2019 | open ends kept: from 2019 / 2014 / 2015 / 2018 (title "od 2019"); `Golf 2018 cijena` is still 2017–2019 |
+| 4 | golf do 20000 KM preko 100000 km, then 100000 do 200000 km (also with "ne,") | price 100.000–200.000 KM | budget 20.000 KM kept, mileage 100.000–200.000 km |
+| 5 | Golf sa registracijom · registered Golf | scope message | searched as a Golf, plus the line "Registracija nije filter…"; "kako da registrujem auto/Golf" and "registracija" alone still get the scope message |
+| 6 | golf low mileage (Gemini) | low_km lost | in the schema, prompt, plan, previous scope and the grounding check |
+| a | golf 100000-200000 km od 12000 do 16000 KM | budget 12000, search `golf 16000` | price 12.000–16.000 KM and mileage 100.000–200.000 km, either order |
+| b | golf İ do 15000 KM | IndexError | `fold()` keeps one character per input character |
+| c | reversed Gemini mileage range | min 200000 / max 100000 | swapped |
+| d | Gemini compare plans | family and years dropped | kept |
+
+Also fixed while there: `test_telegram_log.test_a_slow_database_never_holds_the_caller_long` left a worker thread whose late warning
+could land in the next test's log capture (it failed about half the time when run after the Gemini tests); it now joins the thread.
+
+Sweep re-run after these changes: the same 44 turns, parser-only, read-only, 0 exceptions. Intent, filters and reply text are identical to
+the first re-run on every turn (timestamps aside), so the result stays **33 PASS · 11 WEAK · 0 FAIL**.

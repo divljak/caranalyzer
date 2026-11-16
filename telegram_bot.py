@@ -1344,6 +1344,8 @@ def price_check_message(engine, intent, lang=DEFAULT_LANGUAGE):
     parts = [t(lang, "pc_title"), f.search] + _attr_parts(shown, lang)
     if shown.year_min and shown.year_max:
         parts.append(f"{shown.year_min}–{shown.year_max}")
+    elif shown.year_min:  # a generation or "od 2018" keeps its open end
+        parts.append(t(lang, "title_from", x=shown.year_min))
     if intent.mileage and used and used["km_low"] is not None:
         parts.append(t(lang, "pc_km_band", low=_thousands(used["km_low"]), high=_thousands(used["km_high"])))
     lines = [" · ".join(str(part) for part in parts), ""]
@@ -2076,6 +2078,8 @@ def answer_intent(engine, intent, config, lang=DEFAULT_LANGUAGE):
     if intent.kind == "find":
         offset = max(0, min(intent.offset, MAX_OFFSET))
         text_value, total, stats = find_page(engine, intent.filters, offset, lang)
+        if "registration" in intent.labels:  # "Golf sa registracijom": searched as a Golf, said so
+            text_value = type(text_value)(f"{text_value}\n\n<i>{esc(t(lang, 'registration_note'))}</i>")
         if stats.get("unrecognised") or stats.get("unknown"):
             return text_value, _did_you_mean_choices(stats["filters"], stats.get("candidates", ()), lang)
         if stats.get("assumed"):

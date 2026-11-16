@@ -102,13 +102,13 @@ petrol, hybrid, electric, lpg) for "dizel", "benzin", "hibrid", "električni", "
 (automatic, manual) for "automatik", "manuelni". A generation number after a model ("Golf 7") is not part \
 of search: write "golf 7" and it is handled. Set family to true when they want \
 a car for a family or a roomy car (estate, MPV, SUV, kids). Set include_old to true only when they ask \
-to include older or possibly expired ads.
+to include older or possibly expired ads. Set low_km to true for "malo kilometara", "mala kilometraža" or "low mileage" (a preference, not a limit).
 - model_stats: asks what a model typically costs, with no year or price. Set search.
 - price_check: asks whether a price is good or fair, or what a model of a given year normally costs \
 ("je li ovo dobra cijena: Audi A4 2017 22.000 KM", "is this a good price", "koliko košta Superb 2019"). \
 Set search, year_min (the car's model year), asking_price_km (the price they quote, if any), mileage_max \
 (the car's mileage, if given), fuel and transmission. The quoted price is the price to judge, never a budget.
-- compare: compares exactly two models. Set compare_a and compare_b.
+- compare: compares exactly two models. Set compare_a and compare_b, plus year_min / year_max if the user gave years and family for a family car.
 - trends: asks how asking prices changed. Set days (1-90).
 - status: asks whether data is fresh or the collector works.
 - latest: asks what is new.
@@ -159,6 +159,7 @@ SCHEMA = {
         "search": {"type": "string"},
         "family": {"type": "boolean"},
         "include_old": {"type": "boolean"},
+        "low_km": {"type": "boolean"},
         "budget_km": {"type": "integer"},
         "price_min_km": {"type": "integer"},
         "year_min": {"type": "integer"},
@@ -283,6 +284,8 @@ def bounds_match(filters, message, previous=None):
         want = getattr(stated, name)
         if want is not None and getattr(filters, name) != want:
             return False
+    if stated.low_km and not filters.low_km:  # "malo kilometara" must stay a preference
+        return False
     for name in ("fuel", "transmission"):  # "dizel" / "automatik" in the message must stay a filter
         want = getattr(stated, name)
         if want and getattr(filters, name) != want:
@@ -342,7 +345,10 @@ def intent_from_plan(plan, previous=None, message="", history=None):
         first = clean_search(str(plan.get("compare_a") or ""))
         second = clean_search(str(plan.get("compare_b") or ""))
         if first and second and first.lower() != second.lower():
-            return Intent("compare", labels=(first, second))
+            years = _ordered(Filters(year_min=_bounded(plan.get("year_min"), YEAR_RANGE),
+                                     year_max=_bounded(plan.get("year_max"), YEAR_RANGE),
+                                     family=plan.get("family") is True))
+            return Intent("compare", years, labels=(first, second))
         return Intent("clarify")
     tokens, generation = generation_hint(_search_tokens(str(plan.get("search") or "")))
     search = canonical_search(clean_search(" ".join(tokens)))
@@ -368,6 +374,7 @@ def intent_from_plan(plan, previous=None, message="", history=None):
         mileage_min=_bounded(plan.get("mileage_min"), MILEAGE_RANGE),
         family=family,
         include_old=include_old,
+        low_km=plan.get("low_km") is True,
         price_min=_bounded(plan.get("price_min_km"), PRICE_RANGE),
         year_max=_bounded(plan.get("year_max"), YEAR_RANGE),
         fuel=fuel,
@@ -418,6 +425,9 @@ def _ordered(filters):
         filters = Filters(**{**filters.__dict__, "price_min": filters.budget, "budget": filters.price_min})
     if filters.year_min and filters.year_max and filters.year_min > filters.year_max:
         filters = Filters(**{**filters.__dict__, "year_min": filters.year_max, "year_max": filters.year_min})
+    if filters.mileage_min and filters.mileage_max and filters.mileage_min > filters.mileage_max:
+        filters = Filters(**{**filters.__dict__, "mileage_min": filters.mileage_max,
+                             "mileage_max": filters.mileage_min})
     return filters
 
 
@@ -431,7 +441,7 @@ def _previous_scope(previous):
         scope.update({key: value for key, value in (("price_min_km", f.price_min), ("year_max", f.year_max),
                                                     ("mileage_min", f.mileage_min))
                       if value is not None})
-        scope.update({name: True for name in ("family", "include_old") if getattr(f, name)})
+        scope.update({name: True for name in ("family", "include_old", "low_km") if getattr(f, name)})
         scope.update({name: getattr(f, name) for name in ("fuel", "transmission") if getattr(f, name)})
         return scope
     if previous.kind == "trends":
