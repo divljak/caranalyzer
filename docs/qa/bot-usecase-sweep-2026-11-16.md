@@ -164,3 +164,76 @@ different makes is not a compare (row 12), and "Tesla Model 3" says "none" while
 - Gemini interpret and phrasing (this run is parser-only), the Telegram group path (mentions, group window), button taps,
   and the weekly digest and follow commands.
 - Anything about data freshness beyond what the answers show. The data was current to 16 Nov, 08:18.
+
+---
+
+# After the fixes (same day, branch `fix/bot-qa-sweep-4`)
+
+Re-run of the same 44 turns: parser-only (no Gemini), `telegram_bot.process_update` with a fake Telegram transport, production
+Supabase through the backup role with `default_transaction_read_only=on`, `telegram_log.record` replaced by a no-op, the secret streamed
+over ssh stdin and never printed or written to disk. No writes, no Telegram messages. Data snapshot: observations up to 16 Nov, 08:24
+(six minutes newer than the first run, so the counts in a few replies differ slightly). 44 turns, 0 exceptions, slowest turn 1.2 s.
+
+| | PASS | WEAK | FAIL |
+|---|---|---|---|
+| Before (main @ `5fd4a10`) | 16 | 21 | 7 |
+| After | **33** | **11** | **0** |
+
+Changes this run covers: ranks 1 to 5 of the list above, plus the typo repair (6), "za porodicu" and "A ili B" in compares (7),
+and the petrol slang "benca" (8, the petrol half). Ranks 9 to 12 and the engine-token half of 8 are not done.
+
+| # | Input | Before | After | What the bot does now |
+|---|---|---|---|---|
+| 1 | koliko košta Golf 6 2010? | PASS | PASS | unchanged |
+| 2 | Audi A3 2016 cijena | WEAK | PASS | price check, 2015–2017, 17 ads, median 22.200 KM |
+| 3 | what does a 2018 BMW 320d cost? | FAIL | PASS | price check for 2017–2019, widened to ±2 with the thin-sample warning (2 ads); no 2024 car |
+| 4 | Opel Astra 2012 do 9000 KM | PASS | PASS | unchanged |
+| 5 | Renault Clio 2019 | PASS | PASS | unchanged |
+| 6 | Passat između 15 i 20 hiljada | PASS | PASS | unchanged |
+| 7 | Octavia 2014-2016 od 12000 do 16000 KM | FAIL | PASS | octavia · 12.000–16.000 KM · 2014–2016, 3 fresh, no "nisam prepoznao" |
+| 7b | a ne, do 14000 | WEAK | PASS | 12.000–14.000 KM · 2014–2016 (floor and years kept), 1 fresh |
+| 7c | mislio sam 2017 | WEAK | WEAK | chain is now correct and the answer honest, but "od 2017" still replaces the 2014–2016 span (the title shows it) |
+| 8 | auta od 8 do 12 hiljada maraka | PASS | PASS | unchanged |
+| 9 | Škoda Octavia vs VW Golf za porodicu | WEAK | PASS | same data plus one line: only the Octavia is on the family list, no body-type or boot data |
+| 10 | šta je bolje za porodicu: Passat ili Superb? | WEAK | WEAK | family line added (both on the list); still prices only, and the thin Superb sample is not flagged (compare thresholds are Ogi's call) |
+| 11 | compare Audi A4 and BMW 3 series | PASS | PASS | unchanged |
+| 12 | Kia Sportage ili Hyundai Tucson 2019 | FAIL | PASS | compare, 2019, samples 2 and 5, small-sample warning |
+| 13 | Golf 7 dizel automatik do 20k | PASS | PASS | unchanged |
+| 14 | benzinac do 10000 KM | PASS | PASS | unchanged |
+| 15 | petrol automatic under 15k | PASS | PASS | unchanged |
+| 16 | hibrid do 30 hiljada | PASS | PASS | unchanged |
+| 17 | električni auto do 25k | PASS | PASS | unchanged |
+| 18 | Passat B8 do 120 hiljada kilometara | FAIL | PASS | passat · od 2014 · do 120.000 km (no 8.000 KM floor); none fresh, 9 older |
+| 19 | auto sa malo kilometara do 20k, manje od 80000 km | FAIL | PASS | 4 fresh, lowest mileage first, title "malo kilometara · do 20.000 KM · do 80.000 km", no "nisam prepoznao" |
+| 20 | BMW X3 preko 200.000 km | FAIL | PASS | "od 200.000 km", 4 fresh, all ≥ 201.000 km |
+| 21 | pasat 2015 dizl | WEAK | PASS | passat · dizel · od 2015, 12 fresh (was 0 fresh) |
+| 22 | oktavija do 12 iljada | PASS | PASS | unchanged |
+| 23 | vw polo za grad do 11k, benca | WEAK | PASS | polo · benzin · do 11.000 KM, 2 fresh ("benca" is petrol) |
+| 24 | audi a6 3.0 tdi quattro | WEAK | WEAK | unchanged: "3.0" and "quattro" are still dropped, with a note |
+| 25 | bmw 320 2014 kolko je | WEAK | PASS | price check 2013–2015, 10 ads, median 20.450 KM |
+| 26 | nešto jeftino i pouzdano | WEAK | WEAK | no more "Fiat Punto?" guess, but it still does not ask for a budget |
+| 27 | koji auto je najbolji za početnike? | WEAK | WEAK | unchanged |
+| 28 | show me something nice | WEAK | WEAK | two of three random guesses gone, one ("Mercedes-Benz CE") remains |
+| 29 | kako da registrujem auto u BiH? | WEAK | PASS | scope message with examples |
+| 30 | koliki je kredit za auto na 5 godina? | WEAK | PASS | scope message |
+| 31 | daj mi recept za ćevape | WEAK | PASS | scope message |
+| 32 | Yamaha R6 motocikl do 8000 | WEAK | PASS | scope message |
+| 33 | Tesla Model 3 cijena | WEAK | WEAK | unchanged (rank 12): `tesla 3` still gives "nema oglasa" |
+| 34 | Golf 7 do 18k | FAIL | PASS | golf · do 18.000 KM · 2012–2020, 10 fresh |
+| 34b | a Passat? | PASS | PASS | passat · do 18.000 KM · 2012–2020 (the generation's years carry over) |
+| 34c | samo automatik | PASS | PASS | + automatik, 1 fresh |
+| 34d | pokaži još | WEAK | WEAK | unchanged (rank 10) |
+| 35 | koji se najbrže prodaje? | WEAK | WEAK | unchanged (rank 9) |
+| 35b | a do 15 hiljada? | WEAK | WEAK | unchanged (rank 9) |
+| 36 | is a 2016 A4 at 17.500 a good deal? | PASS | PASS | unchanged |
+| 37 | šta ima novo danas? | PASS | PASS | unchanged |
+| 38 | Mercedes E klasa 2012 dizel koliko km ima prosječno? | WEAK | WEAK | unchanged (rank 11): a price check |
+
+## Still open after this run
+
+- Not touched, waiting on Ogi: what "Golf 2015" means (that year only vs 2015 and newer), whether "golf 20" is a 2020 Golf, and the
+  compare thresholds (P10–P90, at least 10 ads). Rows 10 and 7c are partly these.
+- Ranks 9, 10, 11 and 12 (liquidity proxy, "pokaži još", "koliko km prosječno", "Tesla Model 3").
+- Engine tokens ("3.0", "quattro") are still dropped with a note (row 24); vague questions (rows 26 to 28) still get no budget question.
+- Gemini was not in this run. With Gemini on, `bounds_match` now also checks the mileage bounds against what the parser read, so a
+  Gemini reading that loses a "preko 200.000 km" falls back to the parser instead of being sent as-is.

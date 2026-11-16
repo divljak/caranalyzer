@@ -93,10 +93,11 @@ Your job now: turn the user's latest message into ONE JSON request. You do not a
 Choose intent:
 - find: the user wants listings. Set search (make/model words only, e.g. "golf", "skoda octavia"; never \
 question words like "normalna", "prosječno", "cheapest", "fair", and never fuel or gearbox words), \
-and any of budget_km (max price in KM), price_min_km (min price in KM), year_min, year_max, mileage_max (km). \
+and any of budget_km (max price in KM), price_min_km (min price in KM), year_min, year_max, mileage_max (km), mileage_min (km). \
 A range sets both ends: "od 50 - 60k" or "između 50 i 60 hiljada" is price_min_km 50000 and budget_km \
 60000; "godište 2022 - 2024" is year_min 2022 and year_max 2024. Never drop either end of a range. \
-"preko / iznad / više od / over / above 40k" is price_min_km 40000 with NO budget_km. Set fuel (diesel, \
+"preko / iznad / više od / over / above 40k" is price_min_km 40000 with NO budget_km, but \
+"preko / više od 200.000 km" or "300 hiljada kilometara" is mileage: mileage_min 200000 (or mileage_max for "do / manje od"). Set fuel (diesel, \
 petrol, hybrid, electric, lpg) for "dizel", "benzin", "hibrid", "električni", "plin/LPG", and transmission \
 (automatic, manual) for "automatik", "manuelni". A generation number after a model ("Golf 7") is not part \
 of search: write "golf 7" and it is handled. Set family to true when they want \
@@ -163,6 +164,7 @@ SCHEMA = {
         "year_min": {"type": "integer"},
         "year_max": {"type": "integer"},
         "mileage_max": {"type": "integer"},
+        "mileage_min": {"type": "integer"},
         "fuel": {"type": "string", "enum": ["", "diesel", "petrol", "hybrid", "electric", "lpg"]},
         "transmission": {"type": "string", "enum": ["", "automatic", "manual"]},
         "asking_price_km": {"type": "integer"},
@@ -277,7 +279,7 @@ def bounds_match(filters, message, previous=None):
     "od 50 - 60k, 2022 - 2024" must come back as 50.000-60.000 KM and 2022-2024, not "up to 60.000".
     """
     stated = stated_filters(message, previous)
-    for name in ("price_min", "budget", "year_min", "year_max"):
+    for name in ("price_min", "budget", "year_min", "year_max", "mileage_min", "mileage_max"):
         want = getattr(stated, name)
         if want is not None and getattr(filters, name) != want:
             return False
@@ -363,6 +365,7 @@ def intent_from_plan(plan, previous=None, message="", history=None):
         budget=_bounded(plan.get("budget_km"), PRICE_RANGE),
         year_min=_bounded(plan.get("year_min"), YEAR_RANGE),
         mileage_max=_bounded(plan.get("mileage_max"), MILEAGE_RANGE),
+        mileage_min=_bounded(plan.get("mileage_min"), MILEAGE_RANGE),
         family=family,
         include_old=include_old,
         price_min=_bounded(plan.get("price_min_km"), PRICE_RANGE),
@@ -425,7 +428,8 @@ def _previous_scope(previous):
         f = previous.filters
         scope = {"intent": previous.kind, "search": f.search, "budget_km": f.budget,
                  "year_min": f.year_min, "mileage_max": f.mileage_max}
-        scope.update({key: value for key, value in (("price_min_km", f.price_min), ("year_max", f.year_max))
+        scope.update({key: value for key, value in (("price_min_km", f.price_min), ("year_max", f.year_max),
+                                                    ("mileage_min", f.mileage_min))
                       if value is not None})
         scope.update({name: True for name in ("family", "include_old") if getattr(f, name)})
         scope.update({name: getattr(f, name) for name in ("fuel", "transmission") if getattr(f, name)})

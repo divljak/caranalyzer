@@ -40,6 +40,8 @@ class Filters:
     fuel: str = ""  # diesel|petrol|hybrid|electric|lpg ("dizel", "benzin", ...)
     transmission: str = ""  # automatic|manual ("automatik", "manuelni"); recorded on few listings
     new_ok: bool = False  # the user asks for new cars, so current-year cars under 1.000 km stay in
+    mileage_min: int | None = None  # "preko 200.000 km": at least this many km; ``mileage_max`` is the upper bound
+    low_km: bool = False  # "malo kilometara": a soft preference, lowest mileage first (never a hard filter)
 
     @property
     def price_max(self):
@@ -48,11 +50,12 @@ class Filters:
 
     def numeric(self):
         """True when any price, year or mileage bound is set."""
-        return bool(self.budget or self.price_min or self.year_min or self.year_max or self.mileage_max)
+        return bool(self.budget or self.price_min or self.year_min or self.year_max or self.mileage_max
+                    or self.mileage_min)
 
     def attributes(self):
-        """True when a fuel or gearbox filter is set."""
-        return bool(self.fuel or self.transmission)
+        """True when a fuel, gearbox or low-mileage preference is set."""
+        return bool(self.fuel or self.transmission or self.low_km)
 
     def is_empty(self):
         return not (self.search or self.numeric() or self.family or self.attributes())
@@ -77,11 +80,14 @@ def merge_filters(base, new):
 
     price_min, budget = bounds(base.price_min, base.budget, new.price_min, new.budget)
     year_min, year_max = bounds(base.year_min, base.year_max, new.year_min, new.year_max)
+    mileage_min, mileage_max = bounds(base.mileage_min, base.mileage_max, new.mileage_min, new.mileage_max)
     return Filters(
         search=new.search or base.search,
         budget=budget,
         year_min=year_min,
-        mileage_max=new.mileage_max or base.mileage_max,
+        mileage_max=mileage_max,
+        mileage_min=mileage_min,
+        low_km=new.low_km or base.low_km,
         family=new.family or base.family,
         include_old=new.include_old or base.include_old,
         price_min=price_min,
@@ -161,7 +167,7 @@ reci kazi pitam pitao hocu hoces dobar dobra dobro dobre bolji bolja bolje fin f
 hi hey hello thx yes no yeah ok okay maybe also just really very quite enough something anything
 moj moja moje my nesto family porodica porodicu porodicni porodicno familiju sporty
 ne nije se ovo ono ovu gore probaj probati probaci probajte pogledaj this above try mileage kilometraza kilometraze
-kilometers kilometres najlakse najbrze prodati prodam lako brzo staro stari staru godina godine godinu
+kilometers kilometres kilometara kilometar kilometri kilometre kms najlakse najbrze prodati prodam lako brzo staro stari staru godina godine godinu
 godiste godista godistem izmedu izmedju between hiljada hiljade hiljadu tisuca tisuce thousand
 mislim mislio mislila stavio stavila stavili napisao napisala rekao rekla trazio trazila nisam nego
 pogresno krivo meant mean said asked wrote wanted wrong
@@ -171,7 +177,7 @@ najjeftiniji najjeftinija najjeftinije najjeftinijeg najjeftinijih jeftin jeftin
 expensive skup skupa skupo skupi kosta kostaju kosti kostao vrijedi vrijede worth treba trebao trebala trebalo
 isto same that thats generacija generacije generation gen model modela modeli verzija iljada iljade
 is isn its it's price prices good fine okej ovog ovom taj tog
-ponuda ponude ponudu ponudi offer offers ove ovih sedmice sedmici tjedna tjedan
+kolko kolika koliki registracija registracije registraciju registracijom registrovan ponuda ponude ponudu ponudi offer offers ove ovih sedmice sedmici tjedna tjedan
 """.split())
 
 # Words that start a question or describe a price, never part of a make or model ("prosječno",
@@ -194,7 +200,7 @@ _INCLUDE_OLD = (r"\b(?:(?:i |ukljuci (?:i )?|pokazi (?:i )?|sa |s )starij\w*|"
 
 _FUELS = (
     ("diesel", r"\b(?:dizel\w*|diesel\w*|dizl\w*|tdi|tdci|hdi|dci|crdi|cdi|jtd\w*|multijet)\b"),
-    ("petrol", r"\b(?:benzin\w*|petrol|gasoline|tsi|tfsi)\b"),
+    ("petrol", r"\b(?:benzin\w*|benc\w*|petrol|gasoline|tsi|tfsi)\b"),
     ("hybrid", r"\b(?:hibrid\w*|hybrid\w*|phev)\b"),
     ("electric", r"\b(?:elektri\w*|elektro\w*|electric\w*)\b"),
     ("lpg", r"\b(?:lpg|plin\w*|autoplin\w*|autogas)\b"),
@@ -235,7 +241,7 @@ _THOUSANDS = r"k(?![a-z0-9])|h?iljad\w*|tisuc\w*|thousand"
 _ABOVE = r"\b(?:preko|iznad|vise od|vece od|over|above|more than|at least|najmanje|minimalno|minimum)\s*"
 _PRICE_UNIT = r"km|bam|kam|maraka|marke|marks?"
 _PRICE_SPAN = re.compile(
-    r"(?<![0-9.,])" + _RANGE_FROM
+    r"(?<![a-z0-9.,])" + _RANGE_FROM
     + r"(?P<a>[0-9]{1,3}(?:[., ][0-9]{3})+(?![0-9])|[0-9]+)\s*(?P<ma>" + _THOUSANDS + r")?\s*(?P<ua>" + _PRICE_UNIT
     + r")?(?![a-z0-9])" + _RANGE_SEP
     + r"(?P<b>[0-9]{1,3}(?:[., ][0-9]{3})+(?![0-9])|[0-9]+)\s*(?P<mb>" + _THOUSANDS + r")?\s*(?P<ub>" + _PRICE_UNIT
@@ -253,7 +259,28 @@ def _year_range(folded):
     return None
 
 
-def _price_range(folded, original, km_is_price):
+# "preko 200.000 km", "više od 300 hiljada km", "od 100000 km": the number is a minimum.
+_MIN_CUE = (r"(?:preko|iznad|vise od|vece od|over|above|more than|at least|najmanje|minimalno|minimum|min|od|from)"
+            r"\s*(?:oko\s*)?$")
+_MAX_CUE = r"(?:manje|less|under|ispod|below|max\w*|do|up to|upto|until)\s*(?:od|than)?\s*(?:oko\s*)?$"
+# "malo kilometara", "mala kilometraza", "low mileage": a preference for few km, not a bound.
+_LOW_KM = (r"\b(?:malo|mala|mali|nisk\w*|nizak|low|few|little)\s+(?:km|kms|kilometar\w*|kilometr\w*|mileage|"
+           r"kilometers|kilometres)(?![a-z0-9])")
+_KM_WORDS = r"kilometar\w*|kilometr\w*|kilometers|kilometres|kms"
+_MILEAGE_WORD_AFTER = re.compile(rf"\s*(?:{_KM_WORDS})(?![a-z0-9])")
+
+
+def _generation_digits(folded):
+    """Indexes of the digits of a model generation ("golf 7", "passat b8", "golf7"): never an amount."""
+    found = set()
+    for match in re.finditer(r"\b([a-z]+)\s*([a-z]?[0-9])(?![0-9])", folded):
+        model = _generation_model(match.group(1))
+        if model and match.group(2) in GENERATIONS[model]:
+            found.update(i for i in range(match.start(2), match.end(2)) if folded[i].isdigit())
+    return found
+
+
+def _price_range(folded, original, km_is_price, blocked=()):
     """A two-sided amount: ('od 50 - 60k' | '50.000 do 60.000 KM' | 'izmedu 50 i 60 hiljada').
 
     Returns (match, kind, low, high) where kind is "price" or "mileage", or None. A shared "k" /
@@ -263,6 +290,8 @@ def _price_range(folded, original, km_is_price):
     for match in _PRICE_SPAN.finditer(folded):
         if match.group("sep") in {"i", "and"} and not match.group("lead"):
             continue
+        if any(i in blocked for i in range(match.start(), match.end())):
+            continue  # part of a year span or a generation ("golf 7"): not an amount
         units = [original[match.start(g):match.end(g)] for g in ("ua", "ub") if match.group(g)]
         if len(units) == 2 and units[0] != units[1]:
             continue  # "12000 KM do 200000 km": a price and a mileage, not one range
@@ -276,7 +305,9 @@ def _price_range(folded, original, km_is_price):
             low *= 1000
         if many_b or (many_a and high < 1000):
             high *= 1000
-        if "km" in units and not km_is_price:
+        if _MILEAGE_WORD_AFTER.match(folded, match.end()):
+            kind, bounds = "mileage", MILEAGE_RANGE  # "100 do 200 hiljada kilometara"
+        elif "km" in units and not km_is_price:
             kind, bounds = "mileage", MILEAGE_RANGE
         elif any(unit in {"Km", "kM"} for unit in units) and not km_is_price:
             continue
@@ -331,45 +362,68 @@ def _extract_filters(folded, original, km_is_price=False):
                 consume(match)
                 break
 
-    mileage = None
+    mileage = mileage_min = None
     budget = price_min = None
     unit_unclear = None
-    price_span = _price_range(folded, original, km_is_price)
+    low_km = False
+    low = re.search(_LOW_KM, folded)
+    if low:  # "malo kilometara": a preference, never search text
+        low_km = True
+        consume(low)
+
+    def set_mileage(value, start):
+        """Store a mileage bound: "preko / više od / od N km" is a minimum, anything else a maximum."""
+        nonlocal mileage, mileage_min
+        before = folded[:start]
+        if re.search(_MIN_CUE, before) and not re.search(_MAX_CUE, before):
+            if mileage_min is None:
+                mileage_min = value
+        elif mileage is None:
+            mileage = value
+
+    blocked = {i for i, keep in enumerate(mask) if not keep} | _generation_digits(folded)
+    price_span = _price_range(folded, original, km_is_price, blocked)
     if price_span and all(mask[i] for i in range(price_span[0].start(), price_span[0].end())):
         consume(price_span[0])
         if price_span[1] == "price":
             price_min, budget = price_span[2], price_span[3]
         else:
-            mileage = price_span[3]
+            mileage_min, mileage = price_span[2], price_span[3]
     # A number followed by "km" written in lowercase is mileage ("do 20000km"); "KM", "maraka" or
     # "BAM" is a price. A mixed-case "Km" could be either, so the bot asks instead of guessing.
     # When correcting a price question (``km_is_price``) a lower-case "km" is read as KM too.
-    for match in re.finditer(rf"(?<![0-9.,]){_AMOUNT}\s*(km|Km|kM)\b", original):
-        if mileage is not None or km_is_price:
-            break
+    # "kilometara" / "hiljada kilometara" always names mileage, whatever the case.
+    for match in re.finditer(rf"(?<![0-9.,]){_AMOUNT}\s*(km|{_KM_WORDS})(?![a-z0-9])", original, re.I):
         if not all(mask[i] for i in range(match.start(), match.end())):
             continue
-        if match.group(3) == "km":
-            candidate = _amount(match.group(1), match.group(2), MILEAGE_RANGE)
-            if candidate:
-                mileage = candidate
-                consume(match)
-                break
-        else:
-            unit_unclear = _amount(match.group(1), match.group(2), MILEAGE_RANGE)
+        unit = original[match.start(3):match.end(3)]
+        if unit == "KM":
+            continue  # a price
+        if unit.lower() == "km" and unit != "km":
+            if km_is_price or mileage is not None or unit_unclear is not None or mileage_min is not None:
+                continue
+            unit_unclear = _amount(match.group(1), match.group(2).lower() if match.group(2) else None,
+                                   MILEAGE_RANGE)
             consume(match)
-            break
+            continue
+        if unit == "km" and km_is_price:
+            continue
+        candidate = _amount(match.group(1), match.group(2).lower() if match.group(2) else None, MILEAGE_RANGE)
+        if candidate:
+            set_mileage(candidate, match.start())
+            consume(match)
+    unconsumed = "".join(char if keep else " " for char, keep in zip(folded, mask))  # no "low mileage" here
     for pattern in (
         rf"{_AMOUNT}\s*(?:km|kilometara)?\s*(?:{_MILEAGE_CUES}|or less|max)\b",
         rf"{_MILEAGE_CUES}\D{{0,16}}?{_AMOUNT}\s*(?:km|kilometara)?",
     ):
         if mileage is not None:
             break
-        match = re.search(pattern, folded)
+        match = re.search(pattern, unconsumed)
         if match and all(mask[i] for i in range(match.start(1), match.end(1))):
             candidate = _amount(match.group(1), match.group(2), MILEAGE_RANGE)
             if candidate:
-                mileage = candidate
+                set_mileage(candidate, match.start(1))
                 consume(match)
                 break
 
@@ -407,9 +461,12 @@ def _extract_filters(folded, original, km_is_price=False):
                   + list(fuel_spans) + list(gearbox_spans)):
         consume(match)
     rest = "".join(char if keep else " " for char, keep in zip(original, mask))
+    if mileage_min and mileage and mileage_min > mileage:
+        mileage_min = None
     filters = Filters(budget=budget, year_min=year, mileage_max=mileage, family=wants_family(folded),
                       include_old=wants_older(folded), price_min=price_min, year_max=year_max,
-                      fuel=fuel, transmission=gearbox, new_ok=re.search(_NEW_CARS, folded) is not None)
+                      fuel=fuel, transmission=gearbox, new_ok=re.search(_NEW_CARS, folded) is not None,
+                      mileage_min=mileage_min, low_km=low_km)
     _UNCLEAR[0] = unit_unclear
     return filters, rest
 
@@ -487,6 +544,37 @@ def generation_hint(tokens):
     return tokens, None
 
 
+# Makes and models people misspell by one letter ("pasat", "golff", "skoda octavija" is left to the
+# database). A token is repaired only when it is not itself one of these and is very close to exactly one.
+COMMON_NAMES = (
+    "passat", "octavia", "superb", "fabia", "rapid", "kodiaq", "karoq", "tiguan", "touran", "touareg", "caddy",
+    "golf", "polo", "jetta", "arteon", "scirocco", "astra", "corsa", "insignia", "zafira", "vectra", "mokka",
+    "focus", "fiesta", "mondeo", "kuga", "megane", "clio", "scenic", "laguna", "captur", "duster", "logan",
+    "sandero", "punto", "panda", "stilo", "bravo", "doblo", "ibiza", "leon", "toledo", "altea", "corolla",
+    "yaris", "avensis", "auris", "rav4", "civic", "accord", "tucson", "sportage", "sorento", "ceed",
+    "qashqai", "juke", "micra", "note", "almera", "mazda", "peugeot", "citroen", "renault", "hyundai",
+    "toyota", "nissan", "suzuki", "mercedes", "volkswagen", "skoda", "volvo", "honda", "dacia", "chevrolet",
+    "mitsubishi", "subaru", "audi", "opel", "fiat", "seat", "kia", "bmw",
+)
+COMMON_NAMES = tuple(dict.fromkeys(COMMON_NAMES + tuple(GENERATIONS)))
+TYPO_CUTOFF = 0.8
+
+
+def repair_typo(token):
+    """"pasat" -> "passat": the one make / model word a token is a near miss of, else the token."""
+    folded = fold(token)
+    if len(folded) < 5 or not folded.isalpha() or folded in COMMON_NAMES or folded in _STOPWORDS:
+        return token
+    # "octavie", "passati", "golfovi" are inflected forms, not typos: the database search handles those
+    close = [name for name in difflib.get_close_matches(folded, COMMON_NAMES, n=2, cutoff=TYPO_CUTOFF)
+             if name[0] == folded[0] and not folded.startswith(name)
+             and not (folded[:-1] == name[:-1] and folded[-1] in "aeiou")]
+    if len(close) == 1 or (close and difflib.SequenceMatcher(None, folded, close[0]).ratio()
+                           - difflib.SequenceMatcher(None, folded, close[1]).ratio() > 0.05):
+        return close[0]
+    return token
+
+
 def model_hint(label):
     """A compare / stats label with an optional generation: "golf 7" -> ("golf", 2012, 2020)."""
     tokens, span = generation_hint(_search_tokens(label or ""))
@@ -547,10 +635,14 @@ def _compare_labels(text_value):
         candidates = _COMPARE_SPLIT.split(text_value)
     elif re.search(r"\b(?:better|bolji|bolje|which)\b.*\b(?:or|ili)\b", folded):
         candidates = _COMPARE_SPLIT.split(text_value)
-    elif (re.search(r"\b(?:or|ili)\b", folded) and text_value.strip().endswith("?")
+    elif (re.search(r"\b(?:or|ili)\b", folded)
           and not re.search(r"[0-9]", folded) and len(folded.split()) <= 8
           and not _attribute(folded, _FUELS)[1] and not _attribute(folded, _GEARBOXES)[1]):
         candidates = _COMPARE_SPLIT.split(text_value)  # "Octavia ili Passat za porodicu?"
+        if not text_value.strip().endswith("?"):
+            # no question mark: only a clear "make model ili make model" pair, never "golf ili nesto"
+            if len(candidates) != 2 or any(len(_search_text(chunk).split()) < 2 for chunk in candidates):
+                candidates = []
     labels = []
     for chunk in candidates:
         label = _search_text(chunk)
@@ -615,13 +707,13 @@ def is_correction(text_value):
 _TITLES = (
     {"trends": "Observed asking-price changes · last ", "trends_unit": "days",
      "budget": "Recently observed at or below ", "find": "Observed listings", "upto": "up to ", "from": "from ",
-     "family": "for a family", "old": "incl. older", "suggest": "Data-based shortlist",
+     "family": "for a family", "old": "incl. older", "lowkm": "low mileage", "suggest": "Data-based shortlist",
      "liquidity": "⏱ Fastest to disappear from our search", "new": "incl. new", "deals": "🏷 Good deals",
      "fuel": {"diesel": "diesel", "petrol": "petrol", "hybrid": "hybrid", "electric": "electric", "lpg": "LPG"},
      "gearbox": {"automatic": "automatic", "manual": "manual"}},
     {"trends": "Zabilježene promjene tražene cijene · zadnjih ", "trends_unit": "dana",
      "budget": "Nedavno viđeno do ", "find": "Viđeni oglasi", "upto": "do ", "from": "od ",
-     "family": "za porodicu", "old": "i stariji", "suggest": "Uža lista na osnovu podataka",
+     "family": "za porodicu", "old": "i stariji", "lowkm": "malo kilometara", "suggest": "Uža lista na osnovu podataka",
      "liquidity": "⏱ Najbrže nestaju iz naše pretrage", "new": "i novi", "deals": "🏷 Dobre prilike",
      "fuel": {"diesel": "dizel", "petrol": "benzin", "hybrid": "hibrid", "electric": "električni", "lpg": "LPG"},
      "gearbox": {"automatic": "automatik", "manual": "manuelni"}},
@@ -633,7 +725,7 @@ def _title_filters(body, titles):
     """Filters from the ' · '-separated pieces after an answer's title."""
     values = {"search": "", "budget": None, "year_min": None, "mileage_max": None, "family": False,
               "include_old": False, "price_min": None, "year_max": None, "fuel": "", "transmission": "",
-              "new_ok": False}
+              "new_ok": False, "mileage_min": None, "low_km": False}
     upto, since = titles["upto"], titles["from"]
     fuels = {label: value for value, label in titles["fuel"].items()}
     gearboxes = {label: value for value, label in titles["gearbox"].items()}
@@ -642,6 +734,7 @@ def _title_filters(body, titles):
         if not piece:
             continue
         price_span = re.fullmatch(rf"([0-9.]+){_DASH}([0-9.]+) KM", piece)
+        km_span = re.fullmatch(rf"([0-9.]+){_DASH}([0-9.]+) km", piece)
         year_span = re.fullmatch(rf"((?:19|20)[0-9]{{2}}){_DASH}((?:19|20)[0-9]{{2}})", piece)
         one_year = re.fullmatch(r"(?:19|20)[0-9]{2}", piece)
         if piece == titles["family"]:
@@ -650,6 +743,11 @@ def _title_filters(body, titles):
             values["include_old"] = True
         elif piece == titles["new"]:
             values["new_ok"] = True
+        elif piece == titles["lowkm"]:
+            values["low_km"] = True
+        elif km_span:
+            values["mileage_min"] = _amount(km_span.group(1), None, MILEAGE_RANGE)
+            values["mileage_max"] = _amount(km_span.group(2), None, MILEAGE_RANGE)
         elif piece in fuels:
             values["fuel"] = fuels[piece]
         elif piece in gearboxes:
@@ -668,6 +766,8 @@ def _title_filters(body, titles):
             values["price_min"] = _amount(piece[len(since):-3], None, PRICE_RANGE)
         elif piece.startswith(upto) and piece.endswith(" km"):
             values["mileage_max"] = _amount(piece[len(upto):-3], None, MILEAGE_RANGE)
+        elif piece.startswith(since) and piece.endswith(" km"):
+            values["mileage_min"] = _amount(piece[len(since):-3], None, MILEAGE_RANGE)
         elif piece.startswith(since) and piece[len(since):].strip().isdigit():
             values["year_min"] = _amount(piece[len(since):], None, YEAR_RANGE)
         elif piece.startswith(upto) and piece[len(upto):].strip().isdigit():
@@ -833,6 +933,21 @@ _PRICE_CHECK = (
     r"\bkoliko (?:kosta|kostaju|vrijedi|vrijede)\b.*\b(?:19|20)[0-9]{2}\b|\bprosjecn\w*\b|"
     r"\b(?:vrijedi|isplati) li\b|\bpreskup\w*|\boverpriced\b")
 PRICE_CHECK_YEARS = 1  # compare with the same model year +- this many years
+# A price question without "koliko košta + year": "Audi A3 2016 cijena", "kolko je BMW 320 2014",
+# "what does a 2018 BMW 320d cost?". Only without a stated price, so "Golf do 15000 cijena" stays a search.
+_PRICE_ASK = (r"\bcijen\w*|\bkoli?ko\s+(?:je|kosta\w*|vrijed\w*|ide)\b|\bkoli?ko\b.*\bkosta\w*|"
+              r"\bwhat\s+(?:does|do|would|will|is|are)\b.*\b(?:cost|costs|go for|sell for|worth|price)\b|"
+              r"\bhow much\b|\bwhat(?:'s| is) (?:the )?(?:price|value)\b|\bprice of\b")
+
+# Topics the bot does not cover. Motorcycles and recipes are never car questions. Finance and paperwork
+# words are left alone when the message also has price / year / mileage bounds ("Golf 2015 do 9000 KM sa
+# registracijom" is still a car search).
+_OUT_OF_SCOPE_ALWAYS = (r"\b(?:motocikl\w*|motorcycle\w*|motorbike\w*|skuter\w*|scooter\w*|yamaha|ducati|kawasaki|"
+                        r"harley\w*|aprilia|vespa|piaggio|ktm|bicikl\w*|recept\w*|recipe\w*|cevap\w*|kuhat\w*|"
+                        r"skuhat\w*|kuhanj\w*|pizz\w*|burek\w*)\b")
+_OUT_OF_SCOPE_UNLESS_FILTERS = (r"\b(?:kredit\w*|lizing\w*|leasing|loans?|credit|financ\w*|regist\w*|"
+                                r"tehnick\w* pregled\w*|osiguranj\w*|insurance|porez\w*|taxes|tax|carin\w*|"
+                                r"prenos vlasnistva|ownership transfer|vlasnick\w* list\w*)\b")
 
 
 def _price_check(filters, folded):
@@ -928,6 +1043,12 @@ def parse_question(text_value, context=None, _restating=False):
     topic = small_talk_topic(folded)
     if topic:
         return Intent("chitchat", labels=(topic,))
+    if re.search(_OUT_OF_SCOPE_ALWAYS, folded):
+        return Intent("chitchat", labels=("scope",))
+    if re.search(_OUT_OF_SCOPE_UNLESS_FILTERS, folded):
+        bounded = _extract_filters(folded, original)[0]
+        if not (bounded.numeric() or bounded.attributes()):
+            return Intent("chitchat", labels=("scope",))
 
     if not _restating and _CORRECTION.search(folded):
         if context is not None and context.kind in CORRECTABLE:
@@ -956,9 +1077,12 @@ def parse_question(text_value, context=None, _restating=False):
         yearless = original[:match.start()] + " " * (match.end() - match.start()) + original[match.end():]
         labels = _compare_labels(yearless)
         if labels:  # "Octavia ili Passat 2016-2019?": both cohorts in the years the user gave
-            return Intent("compare", Filters(year_min=low, year_max=high), labels=labels)
+            return Intent("compare", Filters(year_min=low, year_max=high, family=wants_family(folded)),
+                          labels=labels)
     labels = _compare_labels(original)
     if labels:
+        if wants_family(folded):  # "Octavia vs Golf za porodicu": the answer adds a line about the family list
+            return Intent("compare", Filters(family=True), labels=labels)
         return Intent("compare", labels=labels)
 
     if re.search(_TRENDS, folded):
@@ -971,6 +1095,7 @@ def parse_question(text_value, context=None, _restating=False):
     unclear = _UNCLEAR[0]
     tokens = _search_tokens(rest)
     tokens, generation = generation_hint(tokens)
+    tokens = [repair_typo(token) for token in tokens]
     if not (generation or filters.year_min or filters.year_max):
         tokens, short_year = short_model_year(tokens, folded)
         if short_year:  # "golf 15": model year 2015
@@ -990,6 +1115,10 @@ def parse_question(text_value, context=None, _restating=False):
 
     if re.search(_PRICE_CHECK, folded) and not re.search(_LIQUID, folded):
         return _price_check(filters, folded)
+
+    if (re.search(_PRICE_ASK, folded) and filters.search and not filters.family
+            and not (filters.budget or filters.price_min) and not re.search(_LIQUID, folded)):
+        return _price_check(filters, folded)  # "Audi A3 2016 cijena": that model year +-1, not "from 2016"
 
     if unclear and filters.budget is None and filters.mileage_max is None:
         # one tap decides: price (KM) or mileage (km)

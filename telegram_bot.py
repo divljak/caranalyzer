@@ -461,7 +461,13 @@ def _compare_years(spans, user, spreads):
     return [(None, None)] * 2, "none", None
 
 
-def compare(engine, argument, lang=DEFAULT_LANGUAGE, year_min=None, year_max=None):
+def _family_models(searches):
+    """The searches (model names) that are on the short family list."""
+    return [search for search in searches
+            if any(re.search(rf"\b{re.escape(name)}\b", fold(search)) for name in FAMILY_MODELS)]
+
+
+def compare(engine, argument, lang=DEFAULT_LANGUAGE, year_min=None, year_max=None, family=False):
     """Compare two models' asking prices in the same model years. Returns (text, [(search, low, high)]).
 
     The years are the ones the user gave; otherwise a named generation's; otherwise the years both
@@ -517,6 +523,10 @@ def compare(engine, argument, lang=DEFAULT_LANGUAGE, year_min=None, year_max=Non
             parts = [f"{label} {_money(median, lang) if n >= COMPARE_BAND_MIN else '–'} ({n})"
                      for label, (n, median) in zip(labels, cells)]
             lines.append(t(lang, "compare_band_row", years=_years_text(start, end, lang), cells=" · ".join(parts)))
+    if family:  # "za porodicu": say which model is on the family list, and that size is not in the data
+        listed = _family_models(searches)
+        key = "compare_family_both" if len(listed) == 2 else "compare_family_some" if listed else "compare_family_none"
+        lines.extend(["", t(lang, key, names=", ".join(listed))])
     note = "compare_note" if how in {"generations", "none"} else "compare_note_years"
     lines.extend(["", t(lang, "fresh_line", when=_time(newest, lang)), t(lang, note)])
     return "\n".join(lines), [(search, low, high) for search, (low, high) in zip(searches, chosen)]
@@ -582,8 +592,12 @@ def _bound_parts(filters, lang=DEFAULT_LANGUAGE):
         parts.append(t(lang, "title_from", x=filters.year_min))
     elif filters.year_max:
         parts.append(t(lang, "title_upto", x=filters.year_max))
-    if filters.mileage_max:
+    if filters.mileage_min and filters.mileage_max:
+        parts.append(f"{_thousands(filters.mileage_min)}–{_thousands(filters.mileage_max)} km")
+    elif filters.mileage_max:
         parts.append(t(lang, "title_upto", x=f"{_thousands(filters.mileage_max)} km"))
+    elif filters.mileage_min:
+        parts.append(t(lang, "title_from", x=f"{_thousands(filters.mileage_min)} km"))
     return parts
 
 
@@ -601,6 +615,8 @@ def _attr_parts(filters, lang=DEFAULT_LANGUAGE):
         parts.append(titles["gearbox"][filters.transmission])
     if filters.new_ok:
         parts.append(titles["new"])
+    if filters.low_km:
+        parts.append(titles["lowkm"])
     return parts
 
 
@@ -706,6 +722,7 @@ _FIND_SQL = f"""
       AND (CAST(:year_min AS integer) IS NULL OR b.year>=CAST(:year_min AS integer))
       AND (CAST(:year_max AS integer) IS NULL OR b.year<=CAST(:year_max AS integer))
       AND (CAST(:mileage_max AS integer) IS NULL OR b.mileage<=CAST(:mileage_max AS integer))
+      AND (CAST(:mileage_min AS integer) IS NULL OR b.mileage>=CAST(:mileage_min AS integer))
       AND (:search='' OR b.folded LIKE :pattern ESCAPE '\\')
       AND (NOT CAST(:family AS boolean) OR b.folded ~ :family_re)
       AND {_ATTR_WHERE.format(p='b')}
@@ -737,6 +754,7 @@ _FIND_SQL = f"""
   FROM counted
   WHERE (keep OR CAST(:probe_new AS boolean)) AND (CAST(:include_old AS boolean) OR fresh OR CAST(:probe AS boolean))
   ORDER BY coalesce(suspect,false) ASC,
+    CASE WHEN CAST(:low_km AS boolean) AND mileage >= 1000 THEN mileage END ASC NULLS LAST,
     date(last_verified_at) DESC,
     year DESC NULLS LAST,
     mileage ASC NULLS LAST,last_verified_at DESC,listing_id
@@ -772,7 +790,8 @@ def _bound_params(filters):
     """SQL parameters for the price, year and mileage bounds (both ends of a range), fuel, gearbox and
     whether new cars stay in."""
     return {"budget": filters.budget, "price_min": filters.price_min, "year_min": filters.year_min,
-            "year_max": filters.year_max, "mileage_max": filters.mileage_max, "fuel": filters.fuel or "",
+            "year_max": filters.year_max, "mileage_max": filters.mileage_max,
+            "mileage_min": filters.mileage_min, "low_km": bool(filters.low_km), "fuel": filters.fuel or "",
             "transmission": filters.transmission or "", "new_ok": _new_ok(filters)}
 
 
@@ -815,7 +834,7 @@ def _model_labels(connection):
 
 
 SEARCH_TYPO_CUTOFF = 0.8
-SEARCH_SUGGEST_CUTOFF = 0.6
+SEARCH_SUGGEST_CUTOFF = 0.65  # "did you mean" only for near misses: 0.6 offered Scenic / Stonic for "nice"
 SEARCH_MAX_CANDIDATES = 3
 
 
@@ -862,6 +881,8 @@ def resolve_search(labels, search):
     by_count = {label: (display, n) for label, display, n in labels}
     scored = {}
     for word in fixed:
+        if word.isdigit() or len(word) < 4:
+            continue  # "5" is not a hint for BMW X5 / Audi S5
         for close in difflib.get_close_matches(word, vocabulary, n=3, cutoff=SEARCH_SUGGEST_CUTOFF):
             for label in folded_labels:
                 if close in _words(label):
@@ -919,7 +940,7 @@ def _nearest_real(connection, filters):
         steps.append((replace(filters, budget=None, price_min=None, include_old=True), "without_price"))
     if filters.year_min or filters.year_max:
         steps.append((replace(filters, budget=None, price_min=None, year_min=None, year_max=None,
-                              mileage_max=None, include_old=True), "model"))
+                              mileage_max=None, mileage_min=None, include_old=True), "model"))
     for relaxed, how in steps:
         params = {**_bound_params(relaxed), "search": relaxed.search or "", "pattern": _like_pattern(relaxed.search),
                   "family": bool(relaxed.family), "family_re": FAMILY_REGEX}
@@ -1066,7 +1087,7 @@ def find_page(engine, filters, offset=0, lang=DEFAULT_LANGUAGE):
             lines.append(esc(t(lang, "without_gearbox", n=without_gearbox, days=gearbox_days)))
     stats["without_gearbox"] = without_gearbox
     stats["without_gearbox_old"] = gearbox_days != FRESH_DAYS
-    if filters.year_min or filters.year_max or filters.mileage_max:
+    if filters.year_min or filters.year_max or filters.mileage_max or filters.mileage_min:
         lines.extend(["", esc(t(lang, "filters_note"))])
     if note:
         lines.extend(["", esc(note)])
@@ -1102,6 +1123,7 @@ _BOUNDS_WHERE = ("""(CAST(:budget AS integer) IS NULL OR {p}.price<=CAST(:budget
             AND (CAST(:year_min AS integer) IS NULL OR {p}.year>=CAST(:year_min AS integer))
             AND (CAST(:year_max AS integer) IS NULL OR {p}.year<=CAST(:year_max AS integer))
             AND (CAST(:mileage_max AS integer) IS NULL OR {p}.mileage<=CAST(:mileage_max AS integer))
+            AND (CAST(:mileage_min AS integer) IS NULL OR {p}.mileage>=CAST(:mileage_min AS integer))
             AND """ + _ATTR_WHERE + """
             AND (CAST(:new_ok AS boolean) OR NOT coalesce(""" + _NEW_LIKE.replace("{p}", "{{p}}").format() + """, false))""")
 
@@ -1470,7 +1492,10 @@ def _bounds_in_range(filters):
             and (filters.year_min is None or 1980 <= filters.year_min <= 2035)
             and (filters.year_max is None or 1980 <= filters.year_max <= 2035)
             and (filters.year_min is None or filters.year_max is None or filters.year_min <= filters.year_max)
-            and (filters.mileage_max is None or 1_000 <= filters.mileage_max <= 1_000_000))
+            and (filters.mileage_max is None or 1_000 <= filters.mileage_max <= 1_000_000)
+            and (filters.mileage_min is None or 1_000 <= filters.mileage_min <= 1_000_000)
+            and (filters.mileage_min is None or filters.mileage_max is None
+                 or filters.mileage_min <= filters.mileage_max))
 
 
 def _bound_fields(filters):
@@ -1478,6 +1503,8 @@ def _bound_fields(filters):
     buttons sent before ranges existed; anything else is written as 'low-high' (0 = open end)."""
     price = (f"{filters.price_min}-{filters.budget or 0}" if filters.price_min else f"{filters.budget or 0}")
     year = (f"{filters.year_min or 0}-{filters.year_max}" if filters.year_max else f"{filters.year_min or 0}")
+    if filters.mileage_min:  # a minimum is written as 'low-high' (0 = open end)
+        return f"{price}:{year}:{filters.mileage_min}-{filters.mileage_max or 0}"
     return f"{price}:{year}:{filters.mileage_max or 0}"
 
 
@@ -1486,31 +1513,34 @@ def _filters_from_fields(search, price, year, mileage, **flags):
     try:
         price_low, price_high, price_range = _parse_span(price)
         year_low, year_high, year_range = _parse_span(year)
-        mileage = int(mileage)
+        mileage_low, mileage, mileage_range = _parse_span(mileage)
+        if not mileage_range:
+            mileage_low = None
     except ValueError:
         return None
     price_min, budget = (price_low, price_high) if price_range else (None, price_high)
     if not year_range:  # a single year is the lower bound ("od 2018"), as on every older button
         year_high = None
     return Filters(clean_search(search), budget, year_low, mileage or None, price_min=price_min, year_max=year_high,
-                   **flags)
+                   mileage_min=mileage_low, **flags)
 
 
 FUEL_CODES = {"diesel": "d", "petrol": "b", "hybrid": "h", "electric": "e", "lpg": "g"}
 GEARBOX_CODES = {"automatic": "a", "manual": "m"}
-_FLAG_TAIL = r"(n?)([dbheg]?)([am]?)"
+_FLAG_TAIL = r"(n?)([dbheg]?)([am]?)(k?)"
 
 
 def _attr_flags(filters):
     """Button flag letters for "incl. new", fuel and gearbox (after the older o / p letters)."""
     return (("n" if filters.new_ok else "") + FUEL_CODES.get(filters.fuel, "")
-            + GEARBOX_CODES.get(filters.transmission, ""))
+            + GEARBOX_CODES.get(filters.transmission, "") + ("k" if filters.low_km else ""))
 
 
-def _attr_values(new, fuel, gearbox):
+def _attr_values(new, fuel, gearbox, low_km=""):
     fuels = {code: value for value, code in FUEL_CODES.items()}
     gearboxes = {code: value for value, code in GEARBOX_CODES.items()}
-    return {"new_ok": bool(new), "fuel": fuels.get(fuel, ""), "transmission": gearboxes.get(gearbox, "")}
+    return {"new_ok": bool(new), "fuel": fuels.get(fuel, ""), "transmission": gearboxes.get(gearbox, ""),
+            "low_km": bool(low_km)}
 
 
 def liquidity_callback(filters):
@@ -1526,7 +1556,7 @@ def parse_liquidity_callback(data):
     if len(parts) != 5 or not flags:
         return None
     filters = _filters_from_fields(parts[4], *parts[1:4], family=bool(flags.group(1)),
-                                   **_attr_values(*flags.group(2, 3, 4)))
+                                   **_attr_values(*flags.group(2, 3, 4, 5)))
     return filters if filters is not None and _bounds_in_range(filters) else None
 
 
@@ -1545,7 +1575,7 @@ def unit_choices(intent, lang):
 
 def chitchat_message(lang=DEFAULT_LANGUAGE, topic=""):
     """Small talk without Gemini: a short reply to what was said, then what the bot can do."""
-    if topic in {"greeting", "weather", "how", "about", "joke"}:
+    if topic in {"greeting", "weather", "how", "about", "joke", "scope"}:
         return t(lang, f"smalltalk_{topic}") + "\n\n" + t(lang, "smalltalk_hint")
     return t(lang, "chitchat")
 
@@ -1681,7 +1711,7 @@ def parse_refine_page(data):
     except ValueError:
         return None
     filters = _filters_from_fields(parts[-1], *parts[1:4], family=bool(flags.group(2)),
-                                   include_old=bool(flags.group(1)), **_attr_values(*flags.group(3, 4, 5)))
+                                   include_old=bool(flags.group(1)), **_attr_values(*flags.group(3, 4, 5, 6)))
     if filters is None:
         return None
     in_range = _bounds_in_range(filters) and 0 <= offset <= MAX_OFFSET
@@ -1816,7 +1846,7 @@ def _find_refinements(filters, page, lang):
     if base_km:
         lower = max(10_000, int(base_km * 0.7) // 10_000 * 10_000)
         data = refine_callback(replace(filters, mileage_max=lower))
-        if lower < base_km and data:
+        if lower < base_km and lower > (filters.mileage_min or 0) and data:
             row.append(_button(t(lang, "btn_lowkm", km=_thousands(lower)), data))
     if row:
         rows.append(row)
@@ -2027,7 +2057,8 @@ def _did_you_mean_choices(filters, candidates, lang):
 def _model_filters(model, filters):
     """A 🔎 model button keeps the question's price, year and mileage bounds (not family / older)."""
     return Filters(model, filters.budget, filters.year_min, filters.mileage_max, price_min=filters.price_min,
-                   year_max=filters.year_max, fuel=filters.fuel, transmission=filters.transmission)
+                   year_max=filters.year_max, fuel=filters.fuel, transmission=filters.transmission,
+                   mileage_min=filters.mileage_min, low_km=filters.low_km)
 
 
 def answer_intent(engine, intent, config, lang=DEFAULT_LANGUAGE):
@@ -2091,7 +2122,7 @@ def answer_intent(engine, intent, config, lang=DEFAULT_LANGUAGE):
         return text_value, (Choices((buttons,)) if buttons else False)
     if intent.kind == "compare":
         text_value, used = compare(engine, " | ".join(intent.labels), lang, intent.filters.year_min,
-                                   intent.filters.year_max)
+                                   intent.filters.year_max, family=intent.filters.family)
         buttons = tuple((f"🔎 {label[:24]}", refine_callback(Filters(search, year_min=low, year_max=high)))
                         for label, (search, low, high) in zip(intent.labels, used or [(l, None, None) for l in intent.labels]))
         return text_value, Choices((buttons,))
