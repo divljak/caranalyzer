@@ -110,6 +110,7 @@ class NeverBreaksTests(unittest.TestCase):
             self.assertLess(time.monotonic() - started, 1.0)
         self.assertTrue(worker.daemon)
         release.set()
+        worker.join(2)  # let it finish: its late "not logged" warning must not land in the next test's log capture
 
     def test_the_kill_switch(self):
         self.assertFalse(telegram_log.enabled({"TELEGRAM_INTERACTION_LOG": "off"}))

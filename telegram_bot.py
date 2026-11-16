@@ -33,8 +33,10 @@ from telegram_intent import (
     context_from_reply,
     is_correction,
     fold,
+    hint_patterns,
     looks_like_followup,
     parse_question,
+    split_trim,
 )
 from database.run_outcome import classify as run_outcome
 import telegram_llm
@@ -461,7 +463,13 @@ def _compare_years(spans, user, spreads):
     return [(None, None)] * 2, "none", None
 
 
-def compare(engine, argument, lang=DEFAULT_LANGUAGE, year_min=None, year_max=None):
+def _family_models(searches):
+    """The searches (model names) that are on the short family list."""
+    return [search for search in searches
+            if any(re.search(rf"\b{re.escape(name)}\b", fold(search)) for name in FAMILY_MODELS)]
+
+
+def compare(engine, argument, lang=DEFAULT_LANGUAGE, year_min=None, year_max=None, family=False):
     """Compare two models' asking prices in the same model years. Returns (text, [(search, low, high)]).
 
     The years are the ones the user gave; otherwise a named generation's; otherwise the years both
@@ -517,6 +525,10 @@ def compare(engine, argument, lang=DEFAULT_LANGUAGE, year_min=None, year_max=Non
             parts = [f"{label} {_money(median, lang) if n >= COMPARE_BAND_MIN else '–'} ({n})"
                      for label, (n, median) in zip(labels, cells)]
             lines.append(t(lang, "compare_band_row", years=_years_text(start, end, lang), cells=" · ".join(parts)))
+    if family:  # "za porodicu": say which model is on the family list, and that size is not in the data
+        listed = _family_models(searches)
+        key = "compare_family_both" if len(listed) == 2 else "compare_family_some" if listed else "compare_family_none"
+        lines.extend(["", t(lang, key, names=", ".join(listed))])
     note = "compare_note" if how in {"generations", "none"} else "compare_note_years"
     lines.extend(["", t(lang, "fresh_line", when=_time(newest, lang)), t(lang, note)])
     return "\n".join(lines), [(search, low, high) for search, (low, high) in zip(searches, chosen)]
@@ -530,11 +542,15 @@ def model_stats_message(engine, label, lang=DEFAULT_LANGUAGE):
     search, year_min, year_max = model_hint(label)
     with engine.begin() as connection:
         _statement_timeout(connection)
-        result = _cohort_stats(connection, search or label, year_min, year_max)
+        search, notes, unknown = _stats_search(connection, search or label, lang)
+        result = None if unknown else _cohort_stats(connection, search, year_min, year_max)
         note = _freshness_note(connection, lang)
     lines = [t(lang, "stats_title", label=label), ""]
-    if not result["sample_size"]:
+    lines.extend(notes)
+    if unknown or not result["sample_size"]:
         lines.append(t(lang, "no_match_90"))
+        if unknown:
+            lines.append(t(lang, "stats_unknown", term=unknown))
     else:
         lines.extend(_cohort_lines(t(lang, "stats_evidence"), result, lang))
         lines.append(t(lang, "fresh_line", when=_time(result["newest"], lang)))
@@ -582,8 +598,12 @@ def _bound_parts(filters, lang=DEFAULT_LANGUAGE):
         parts.append(t(lang, "title_from", x=filters.year_min))
     elif filters.year_max:
         parts.append(t(lang, "title_upto", x=filters.year_max))
-    if filters.mileage_max:
+    if filters.mileage_min and filters.mileage_max:
+        parts.append(f"{_thousands(filters.mileage_min)}–{_thousands(filters.mileage_max)} km")
+    elif filters.mileage_max:
         parts.append(t(lang, "title_upto", x=f"{_thousands(filters.mileage_max)} km"))
+    elif filters.mileage_min:
+        parts.append(t(lang, "title_from", x=f"{_thousands(filters.mileage_min)} km"))
     return parts
 
 
@@ -601,6 +621,8 @@ def _attr_parts(filters, lang=DEFAULT_LANGUAGE):
         parts.append(titles["gearbox"][filters.transmission])
     if filters.new_ok:
         parts.append(titles["new"])
+    if filters.low_km:
+        parts.append(titles["lowkm"])
     return parts
 
 
@@ -692,7 +714,10 @@ _ATTR_WHERE = ("""(CAST(:fuel AS text) = '' OR {p}.fuel_type = CAST(:fuel AS tex
 _FIND_SQL = f"""
   WITH base AS (
     SELECT c.listing_id,coalesce(l.make,c.make) AS make,coalesce(l.model,c.model) AS model,
-      c.year,c.price,{_KM} AS mileage,c.last_verified_at,{_LABEL_SQL} AS folded,c.fuel_type,c.transmission
+      c.year,c.price,{_KM} AS mileage,c.last_verified_at,{_LABEL_SQL} AS folded,c.fuel_type,c.transmission,
+      CASE WHEN cardinality(CAST(:hints AS text[])) > 0
+        THEN lower(concat_ws(' ', {_LABEL_SQL}, c.description)) ~* ALL (CAST(:hints AS text[]))
+        ELSE false END AS hint_hit
     FROM car_listings c
     LEFT JOIN dealer_vehicle_labels l USING(listing_id)
     WHERE c.source='olx.ba'
@@ -706,6 +731,7 @@ _FIND_SQL = f"""
       AND (CAST(:year_min AS integer) IS NULL OR b.year>=CAST(:year_min AS integer))
       AND (CAST(:year_max AS integer) IS NULL OR b.year<=CAST(:year_max AS integer))
       AND (CAST(:mileage_max AS integer) IS NULL OR b.mileage<=CAST(:mileage_max AS integer))
+      AND (CAST(:mileage_min AS integer) IS NULL OR b.mileage>=CAST(:mileage_min AS integer))
       AND (:search='' OR b.folded LIKE :pattern ESCAPE '\\')
       AND (NOT CAST(:family AS boolean) OR b.folded ~ :family_re)
       AND {_ATTR_WHERE.format(p='b')}
@@ -728,15 +754,18 @@ _FIND_SQL = f"""
   ), counted AS (
     SELECT *,count(*) FILTER (WHERE fresh AND keep) OVER () AS fresh_total,
       count(*) FILTER (WHERE keep) OVER () AS all_total,
-      count(*) FILTER (WHERE NOT keep) OVER () AS new_hidden
+      count(*) FILTER (WHERE NOT keep) OVER () AS new_hidden,
+      count(*) FILTER (WHERE hint_hit AND keep AND (fresh OR CAST(:include_old AS boolean))) OVER () AS hint_total
     FROM scored
   )
   SELECT listing_id,make,model,year,price,mileage,last_verified_at,fresh,coalesce(suspect,false) AS suspect,
-    fresh_total,all_total,new_hidden,
+    fresh_total,all_total,new_hidden,hint_hit,hint_total,
     CASE WHEN CAST(:include_old AS boolean) THEN all_total ELSE fresh_total END AS total
   FROM counted
   WHERE (keep OR CAST(:probe_new AS boolean)) AND (CAST(:include_old AS boolean) OR fresh OR CAST(:probe AS boolean))
   ORDER BY coalesce(suspect,false) ASC,
+    coalesce(hint_hit,false) DESC,
+    CASE WHEN CAST(:low_km AS boolean) AND mileage >= 1000 THEN mileage END ASC NULLS LAST,
     date(last_verified_at) DESC,
     year DESC NULLS LAST,
     mileage ASC NULLS LAST,last_verified_at DESC,listing_id
@@ -772,15 +801,18 @@ def _bound_params(filters):
     """SQL parameters for the price, year and mileage bounds (both ends of a range), fuel, gearbox and
     whether new cars stay in."""
     return {"budget": filters.budget, "price_min": filters.price_min, "year_min": filters.year_min,
-            "year_max": filters.year_max, "mileage_max": filters.mileage_max, "fuel": filters.fuel or "",
+            "year_max": filters.year_max, "mileage_max": filters.mileage_max,
+            "mileage_min": filters.mileage_min, "low_km": bool(filters.low_km), "fuel": filters.fuel or "",
             "transmission": filters.transmission or "", "new_ok": _new_ok(filters)}
 
 
-def _find_rows(connection, filters, offset, probe=False, probe_new=False):
+def _find_rows(connection, filters, offset, probe=False, probe_new=False, hints=()):
     """One page of matches. ``probe`` ignores the freshness cut to learn how many older ones exist;
-    ``probe_new`` also counts the new cars that are normally left out."""
+    ``probe_new`` also counts the new cars that are normally left out. ``hints`` (engine size, trim) put the
+    listings that mention them first; they never filter."""
     return _all(connection, _FIND_SQL, {
         **_bound_params(filters),
+        "hints": hint_patterns(hints),
         "probe_new": bool(probe_new),
         "search": filters.search,
         "pattern": _like_pattern(filters.search),
@@ -815,7 +847,7 @@ def _model_labels(connection):
 
 
 SEARCH_TYPO_CUTOFF = 0.8
-SEARCH_SUGGEST_CUTOFF = 0.6
+SEARCH_SUGGEST_CUTOFF = 0.65  # "did you mean" only for near misses: 0.6 offered Scenic / Stonic for "nice"
 SEARCH_MAX_CANDIDATES = 3
 
 
@@ -862,7 +894,10 @@ def resolve_search(labels, search):
     by_count = {label: (display, n) for label, display, n in labels}
     scored = {}
     for word in fixed:
-        for close in difflib.get_close_matches(word, vocabulary, n=3, cutoff=SEARCH_SUGGEST_CUTOFF):
+        if word.isdigit() or len(word) < 4:
+            continue  # "5" is not a hint for BMW X5 / Audi S5
+        for close in difflib.get_close_matches(word, [name for name in vocabulary if len(name) >= 4], n=3,
+                                               cutoff=SEARCH_SUGGEST_CUTOFF):
             for label in folded_labels:
                 if close in _words(label):
                     scored[label] = max(scored.get(label, 0), by_count[label][1])
@@ -870,6 +905,42 @@ def resolve_search(labels, search):
         scored[close] = max(scored.get(close, 0), by_count[close][1])
     ranked = sorted(scored, key=lambda label: (-scored[label], label))[:SEARCH_MAX_CANDIDATES]
     return None, [by_count[label][0] for label in ranked]
+
+
+def _assumed_detail(labels, term, resolved, lang):
+    """Why a dropped word cannot be searched: how the ads name the model that was found ("Tesla Model" for
+    "tesla 3"). Empty unless the search only lost a model number or letter: a stray word like "grad" is not a
+    model the ads could be naming."""
+    kept = _words(resolved)
+    dropped = [word for word in _words(term) if word not in kept]
+    if not dropped or any(word not in _words(term) for word in kept) or any(len(word) > 2 for word in dropped):
+        return ""
+    names = [display for folded, display, _ in sorted(labels, key=lambda row: -row[2]) if resolved in folded][:2]
+    if not names:
+        return ""
+    return t(lang, "assumed_detail", labels=" / ".join(names), dropped=" ".join(dropped))
+
+
+def _stats_search(connection, search, lang):
+    """The model search for a model-level figure (typical price, mileage): engine / trim hints are set aside
+    and an unknown name is repaired like a listing search. Returns (search, notes, unknown term or "")."""
+    model, hints = split_trim(search)
+    notes = []
+    if hints:
+        notes.append(t(lang, "stats_hints", hints=" ".join(hints), model=model))
+    if model and not _is_known_model(connection, model):
+        labels = _model_labels(connection)
+        resolved, candidates = resolve_search(labels, model)
+        if resolved is None:
+            if candidates:
+                notes.append(t(lang, "did_you_mean", names=_names_list(candidates, lang)))
+            return model, notes, model
+        notes.append(t(lang, "stats_assumed", term=model, model=resolved))
+        detail = _assumed_detail(labels, model, resolved, lang)
+        if detail:
+            notes.append(detail)
+        model = resolved
+    return model, notes, ""
 
 
 def _has_filters(filters):
@@ -919,7 +990,7 @@ def _nearest_real(connection, filters):
         steps.append((replace(filters, budget=None, price_min=None, include_old=True), "without_price"))
     if filters.year_min or filters.year_max:
         steps.append((replace(filters, budget=None, price_min=None, year_min=None, year_max=None,
-                              mileage_max=None, include_old=True), "model"))
+                              mileage_max=None, mileage_min=None, include_old=True), "model"))
     for relaxed, how in steps:
         params = {**_bound_params(relaxed), "search": relaxed.search or "", "pattern": _like_pattern(relaxed.search),
                   "family": bool(relaxed.family), "family_re": FAMILY_REGEX}
@@ -968,47 +1039,58 @@ def find_page(engine, filters, offset=0, lang=DEFAULT_LANGUAGE):
     listed and ``stats["unrecognised"]`` / ``stats["candidates"]`` say what to ask instead.
     """
     offset = max(0, min(int(offset), MAX_OFFSET))
-    assumed = unknown = ""
+    assumed = unknown = detail = ""
+    hint_total = 0
+    model_search, hints = split_trim(filters.search)  # "audi a6 3.0 quattro": the hints rank, never filter
+    if hints:
+        filters = replace(filters, search=model_search)
+
+    def shown(used):  # what the title and the buttons say: the user's own words, hints included
+        return replace(used, search=" ".join([used.search, *hints]).strip()) if hints else used
     older_hidden = new_hidden = without_gearbox = 0
     gearbox_days = FRESH_DAYS
     nearest = None
     with engine.begin() as connection:
         _statement_timeout(connection)
         if offset == 0 and filters.search and not _is_known_model(connection, filters.search):
-            resolved, candidates = resolve_search(_model_labels(connection), filters.search)
+            labels = _model_labels(connection)
+            resolved, candidates = resolve_search(labels, filters.search)
             if resolved is None and candidates:
-                return _unrecognised_page(filters, candidates, lang)
+                return _unrecognised_page(shown(filters), candidates, lang)
             if resolved is None:
                 unknown = filters.search  # no close name either: the plain "no match" answer, with a hint
             else:
-                assumed, filters = filters.search, replace(filters, search=resolved)
-        matches = _find_rows(connection, filters, offset)
+                assumed, detail = filters.search, _assumed_detail(labels, filters.search, resolved, lang)
+                filters = replace(filters, search=resolved)
+        matches = _find_rows(connection, filters, offset, hints=hints)
         if matches:
             older_hidden = 0 if filters.include_old else int(matches[0]["all_total"] - matches[0]["fresh_total"])
             new_hidden = int(matches[0]["new_hidden"] or 0)
         elif offset == 0:
-            probe = _find_rows(connection, filters, 0, probe=True, probe_new=True)
+            probe = _find_rows(connection, filters, 0, probe=True, probe_new=True, hints=hints)
             if probe:
                 new_hidden = int(probe[0]["new_hidden"] or 0)
                 older_hidden = 0 if filters.include_old else int(probe[0]["all_total"])
             if not older_hidden and not unknown and not filters.transmission:
                 nearest = _nearest_real(connection, filters)  # "Tesla 2024 do 10k": say it doesn't exist
             if filters.transmission:  # the gearbox is rarely recorded: say what dropping it would find
-                wider = _find_rows(connection, replace(filters, transmission=""), 0, probe=True)
+                wider = _find_rows(connection, replace(filters, transmission=""), 0, probe=True, hints=hints)
                 if wider:
                     fresh_only = not filters.include_old and int(wider[0]["fresh_total"]) > 0
                     without_gearbox = int(wider[0]["fresh_total" if fresh_only else "all_total"])
                     gearbox_days = FRESH_DAYS if fresh_only else 90
         note = _freshness_note(connection, lang)
-    lines = [f"<b>{esc(_filter_title(filters, lang))}</b>"]
+    lines = [f"<b>{esc(_filter_title(shown(filters), lang))}</b>"]
     if assumed:
         lines.append(esc(t(lang, "search_assumed", term=assumed, model=filters.search)))
+        if detail:
+            lines.append(esc(detail))
     if filters.family:
         lines.append(f"<i>{esc(t(lang, 'family_note'))}</i>")
     total = 0
     older = 0
     suspects = 0
-    stats = {"filters": filters, "older_hidden": older_hidden, "assumed": filters.search if assumed else "",
+    stats = {"filters": shown(filters), "older_hidden": older_hidden, "assumed": filters.search if assumed else "",
              "unknown": unknown}
     if not matches:
         if offset:
@@ -1026,10 +1108,15 @@ def find_page(engine, filters, offset=0, lang=DEFAULT_LANGUAGE):
             lines.append(esc(t(lang, "search_unknown_hint", term=unknown)))
     else:
         total = int(matches[0]["total"])
+        hint_total = int(matches[0]["hint_total"] or 0)
         first, last = offset + 1, offset + len(matches)
         span = f"{first}" if first == last else f"{first}–{last}"
         key = "find_showing_all" if filters.include_old else "find_showing"
         lines.append(esc(t(lang, key, span=span, total=total, days=FRESH_DAYS)))
+        if hints:
+            words = " ".join(hints)
+            lines.append(esc(t(lang, "hint_found", hints=words, n=hint_total, total=total) if hint_total
+                             else t(lang, "hint_none", hints=words, model=filters.search)))
         years = [item["year"] for item in matches if item["year"]]
         kms = [int(item["mileage"]) for item in matches if item["mileage"] is not None]
         stats.update({"min_year": min(years) if years else None, "max_km": max(kms) if kms else None,
@@ -1066,7 +1153,7 @@ def find_page(engine, filters, offset=0, lang=DEFAULT_LANGUAGE):
             lines.append(esc(t(lang, "without_gearbox", n=without_gearbox, days=gearbox_days)))
     stats["without_gearbox"] = without_gearbox
     stats["without_gearbox_old"] = gearbox_days != FRESH_DAYS
-    if filters.year_min or filters.year_max or filters.mileage_max:
+    if filters.year_min or filters.year_max or filters.mileage_max or filters.mileage_min:
         lines.extend(["", esc(t(lang, "filters_note"))])
     if note:
         lines.extend(["", esc(note)])
@@ -1074,10 +1161,14 @@ def find_page(engine, filters, offset=0, lang=DEFAULT_LANGUAGE):
     return (NoMatch if unknown else Html)("\n".join(lines)), total, stats
 
 
+def _names_list(candidates, lang):
+    return ", ".join(candidates[:-1]) + (t(lang, "or_word") if len(candidates) > 1 else "") + candidates[-1]
+
+
 def _unrecognised_page(filters, candidates, lang):
     """The answer for a search that matches no make or model: say so, ask "did you mean ...?", list nothing."""
     term = filters.search
-    names = ", ".join(candidates[:-1]) + (t(lang, "or_word") if len(candidates) > 1 else "") + candidates[-1]
+    names = _names_list(candidates, lang)
     lines = [f"<b>{esc(_filter_title(replace(filters, search=''), lang))}</b>",
              esc(t(lang, "search_unknown", term=term)), esc(t(lang, "did_you_mean", names=names))]
     stats = {"filters": filters, "unrecognised": term, "candidates": tuple(candidates)}
@@ -1102,6 +1193,7 @@ _BOUNDS_WHERE = ("""(CAST(:budget AS integer) IS NULL OR {p}.price<=CAST(:budget
             AND (CAST(:year_min AS integer) IS NULL OR {p}.year>=CAST(:year_min AS integer))
             AND (CAST(:year_max AS integer) IS NULL OR {p}.year<=CAST(:year_max AS integer))
             AND (CAST(:mileage_max AS integer) IS NULL OR {p}.mileage<=CAST(:mileage_max AS integer))
+            AND (CAST(:mileage_min AS integer) IS NULL OR {p}.mileage>=CAST(:mileage_min AS integer))
             AND """ + _ATTR_WHERE + """
             AND (CAST(:new_ok AS boolean) OR NOT coalesce(""" + _NEW_LIKE.replace("{p}", "{{p}}").format() + """, false))""")
 
@@ -1302,11 +1394,13 @@ def price_check_message(engine, intent, lang=DEFAULT_LANGUAGE):
     and where the stated price falls. Conditions are relaxed one at a time when too few listings match,
     and the answer says which. The stated price is never used as a cap."""
     f = intent.filters
-    pattern = _like_pattern(f.search)
     result, used, relaxed = None, None, []
     with engine.begin() as connection:
         _statement_timeout(connection)
-        for params, step in _price_check_steps(intent):
+        search, notes, unknown = _stats_search(connection, f.search, lang)
+        pattern = _like_pattern(search)
+        f = replace(f, search=search)
+        for params, step in ([] if unknown else _price_check_steps(intent)):
             row = _one(connection, _PRICE_CHECK_SQL, {**params, "pattern": pattern})
             if step:
                 relaxed.append(step)
@@ -1322,11 +1416,16 @@ def price_check_message(engine, intent, lang=DEFAULT_LANGUAGE):
     parts = [t(lang, "pc_title"), f.search] + _attr_parts(shown, lang)
     if shown.year_min and shown.year_max:
         parts.append(f"{shown.year_min}–{shown.year_max}")
+    elif shown.year_min:  # a generation or "od 2018" keeps its open end
+        parts.append(t(lang, "title_from", x=shown.year_min))
     if intent.mileage and used and used["km_low"] is not None:
         parts.append(t(lang, "pc_km_band", low=_thousands(used["km_low"]), high=_thousands(used["km_high"])))
     lines = [" · ".join(str(part) for part in parts), ""]
+    lines.extend(notes)
     if not n:
         lines.append(t(lang, "pc_none"))
+        if unknown:
+            lines.append(t(lang, "stats_unknown", term=unknown))
     else:
         lines.append(t(lang, "pc_sample", n=n))
         lines.append(t(lang, "pc_median", median=_money(result["median"], lang)))
@@ -1351,6 +1450,80 @@ def price_check_message(engine, intent, lang=DEFAULT_LANGUAGE):
     if note:
         lines.extend(["", note])
     lines.extend(["", t(lang, "pc_note")])
+    return "\n".join(lines)
+
+
+MILEAGE_MIN_KM = 1_000  # a recorded mileage under this is a placeholder on a used car, not a real reading
+_MILEAGE_STATS_SQL = f"""
+  SELECT count(*) AS n,
+    percentile_cont(.25) WITHIN GROUP (ORDER BY c.mileage) AS p25,
+    percentile_cont(.5) WITHIN GROUP (ORDER BY c.mileage) AS median,
+    percentile_cont(.75) WITHIN GROUP (ORDER BY c.mileage) AS p75,
+    min(c.mileage) AS minimum, max(c.mileage) AS maximum
+  FROM car_listings c LEFT JOIN dealer_vehicle_labels l USING(listing_id)
+  WHERE {_RECENT_WHERE}
+    AND {_LABEL_SQL} LIKE :pattern ESCAPE '\\'
+    AND (CAST(:year_min AS integer) IS NULL OR c.year>=CAST(:year_min AS integer))
+    AND (CAST(:year_max AS integer) IS NULL OR c.year<=CAST(:year_max AS integer))
+    AND c.mileage BETWEEN {MILEAGE_MIN_KM} AND {MAX_PLAUSIBLE_KM}
+    AND {_ATTR_WHERE.format(p='c')}
+    AND NOT coalesce({_NEW_LIKE.format(p='c')}, false)
+    AND NOT coalesce({_KM_SUSPECT.format(p='c')}, false)
+"""
+
+
+def mileage_stats_message(engine, intent, lang=DEFAULT_LANGUAGE):
+    """"How many km does a 2012 E class usually have": median and middle half of the recorded mileage of the same
+    model (year +-1 when one year was named, same fuel / gearbox), with the same relaxations as a price check."""
+    f = intent.filters
+    result, used, relaxed = None, None, []
+    with engine.begin() as connection:
+        _statement_timeout(connection)
+        search, notes, unknown = _stats_search(connection, f.search, lang)
+        pattern = _like_pattern(search)
+        f = replace(f, search=search)
+        for params, step in ([] if unknown else _price_check_steps(replace(intent, mileage=None))):
+            row = _one(connection, _MILEAGE_STATS_SQL, {**{k: v for k, v in params.items() if not k.startswith("km_")},
+                                                         "pattern": pattern})
+            if step:
+                relaxed.append(step)
+            if result is None or int(row["n"]) > int(result["n"]):
+                result, used = row, params
+            if int(row["n"]) >= PRICE_CHECK_MIN:
+                result, used = row, params
+                break
+        note = _freshness_note(connection, lang)
+    n = int(result["n"]) if result else 0
+    shown = replace(f, year_min=used["year_min"], year_max=used["year_max"], fuel=used["fuel"],
+                    transmission=used["transmission"]) if used else f
+    parts = [t(lang, "ms_title"), f.search] + _attr_parts(shown, lang)
+    if shown.year_min and shown.year_max:
+        parts.append(f"{shown.year_min}–{shown.year_max}")
+    elif shown.year_min:
+        parts.append(t(lang, "title_from", x=shown.year_min))
+    lines = [" · ".join(str(part) for part in parts), ""]
+    lines.extend(notes)
+    if not n:
+        lines.append(t(lang, "ms_none"))
+        if unknown:
+            lines.append(t(lang, "stats_unknown", term=unknown))
+    else:
+        lines.append(t(lang, "ms_sample", n=n))
+        lines.append(t(lang, "ms_median", median=_thousands(round(result["median"]))))
+        lines.append(t(lang, "ms_middle", low=_thousands(round(result["p25"])), high=_thousands(round(result["p75"]))))
+        lines.append(t(lang, "ms_range", low=_thousands(result["minimum"]), high=_thousands(result["maximum"])))
+        if n < PRICE_CHECK_MIN:
+            lines.extend(["", t(lang, "pc_thin", n=n)])
+    for step in relaxed if n else []:
+        if step == "relaxed_gearbox" and not used["transmission"]:
+            lines.append(t(lang, "pc_relaxed_gearbox"))
+        elif step == "relaxed_fuel" and not used["fuel"]:
+            lines.append(t(lang, "pc_relaxed_fuel"))
+        elif step == "relaxed_year" and intent.year and used["year_min"] == intent.year - 2:
+            lines.append(t(lang, "pc_relaxed_year"))
+    if note:
+        lines.extend(["", note])
+    lines.extend(["", t(lang, "ms_note")])
     return "\n".join(lines)
 
 
@@ -1379,6 +1552,8 @@ LIQUIDITY_LIMIT = 6
 LIQUIDITY_MIN_DAYS = 1
 LIQUIDITY_CHURN_GONE_SHARE = 0.85
 LIQUIDITY_CHURN_SAME_DAY_SHARE = 0.5
+LIQUIDITY_PROXY_DAYS = 14  # when the disappearances cannot rank: the most listed models seen this recently
+LIQUIDITY_PROXY_LIMIT = 5
 
 
 def _liquidity_title(filters, lang):
@@ -1395,7 +1570,11 @@ def _liquidity_title(filters, lang):
 def liquidity_message(engine, filters, lang=DEFAULT_LANGUAGE, with_models=False):
     """How long ads stay on OLX before they leave our search: median days between first and last sighting
     of ads that are no longer seen. Time on OLX only, never presented as a sale. Suppressed when the
-    numbers mostly reflect collector churn (see LIQUIDITY_CHURN_*)."""
+    numbers mostly reflect collector churn (see LIQUIDITY_CHURN_*). Then (or when no model has enough
+    disappeared ads) the answer offers a proxy instead of a dead end: the most listed models for the same filters."""
+    model_search, hints = split_trim(filters.search)
+    if hints:
+        filters = replace(filters, search=model_search)
     params = {**_bound_params(filters), "search": filters.search, "pattern": _like_pattern(filters.search),
               "family": bool(filters.family), "family_re": FAMILY_REGEX}
     seen_sql = f"""
@@ -1431,8 +1610,21 @@ def liquidity_message(engine, filters, lang=DEFAULT_LANGUAGE, with_models=False)
           GROUP BY label HAVING count(*) FILTER (WHERE gone AND days_listed >= :min_days) >= {LIQUIDITY_MIN_GONE}
           ORDER BY median_days ASC, gone_n DESC, label LIMIT {LIQUIDITY_LIMIT}
         """, {**params, "min_days": LIQUIDITY_MIN_DAYS})
+        proxy = [] if rows else _all(connection, f"""
+          SELECT {_BASE_LABEL} AS label, count(*) AS n, percentile_cont(.5) WITHIN GROUP (ORDER BY c.price) AS median
+          FROM car_listings c LEFT JOIN dealer_vehicle_labels l USING(listing_id)
+          WHERE {_RECENT_WHERE} AND {_BOUNDS_WHERE.format(p='c')}
+            AND c.last_verified_at >= (now() AT TIME ZONE 'UTC') - interval '{LIQUIDITY_PROXY_DAYS} days'
+            AND NOT coalesce({_KM_SUSPECT.format(p='c')}, false)
+            AND (:search='' OR {_LABEL_SQL} LIKE :pattern ESCAPE '\\')
+            AND (NOT CAST(:family AS boolean) OR {_LABEL_SQL} ~ :family_re)
+          GROUP BY 1 HAVING {_BASE_LABEL} <> ''
+          ORDER BY n DESC, label LIMIT {LIQUIDITY_PROXY_LIMIT}
+        """, params)
         note = _freshness_note(connection, lang)
     lines = [f"<b>{esc(_liquidity_title(filters, lang))}</b>"]
+    if hints:
+        lines.append(esc(t(lang, "stats_hints", hints=" ".join(hints), model=model_search)))
     if filters.family:
         lines.append(f"<i>{esc(t(lang, 'family_note'))}</i>")
     if churn:
@@ -1447,11 +1639,17 @@ def liquidity_message(engine, filters, lang=DEFAULT_LANGUAGE, with_models=False)
                                            d=int(row["median_days"]), gone=row["gone_n"], seen=row["seen_n"]))
     else:
         lines.append(esc(t(lang, "liquidity_none", n=LIQUIDITY_MIN_GONE)))
+    if proxy:
+        lines.extend(["", esc(t(lang, "liquidity_proxy", days=LIQUIDITY_PROXY_DAYS)), ""])
+        for index, row in enumerate(proxy, 1):
+            lines.append(f"{index}. " + esc(t(lang, "liquidity_proxy_row", label=row["label"], n=row["n"],
+                                              median=_money(row["median"], lang))))
     if note:
         lines.extend(["", esc(note)])
     lines.extend(["", f"<i>{esc(t(lang, 'liquidity_caveat'))}</i>"])
     text_value = Html("\n".join(lines))
-    return (text_value, [row["label"] for row in rows]) if with_models else text_value
+    models = [row["label"] for row in (rows or proxy)]
+    return (text_value, models) if with_models else text_value
 
 
 def _parse_span(value):
@@ -1470,7 +1668,10 @@ def _bounds_in_range(filters):
             and (filters.year_min is None or 1980 <= filters.year_min <= 2035)
             and (filters.year_max is None or 1980 <= filters.year_max <= 2035)
             and (filters.year_min is None or filters.year_max is None or filters.year_min <= filters.year_max)
-            and (filters.mileage_max is None or 1_000 <= filters.mileage_max <= 1_000_000))
+            and (filters.mileage_max is None or 1_000 <= filters.mileage_max <= 1_000_000)
+            and (filters.mileage_min is None or 1_000 <= filters.mileage_min <= 1_000_000)
+            and (filters.mileage_min is None or filters.mileage_max is None
+                 or filters.mileage_min <= filters.mileage_max))
 
 
 def _bound_fields(filters):
@@ -1478,6 +1679,8 @@ def _bound_fields(filters):
     buttons sent before ranges existed; anything else is written as 'low-high' (0 = open end)."""
     price = (f"{filters.price_min}-{filters.budget or 0}" if filters.price_min else f"{filters.budget or 0}")
     year = (f"{filters.year_min or 0}-{filters.year_max}" if filters.year_max else f"{filters.year_min or 0}")
+    if filters.mileage_min:  # a minimum is written as 'low-high' (0 = open end)
+        return f"{price}:{year}:{filters.mileage_min}-{filters.mileage_max or 0}"
     return f"{price}:{year}:{filters.mileage_max or 0}"
 
 
@@ -1486,31 +1689,34 @@ def _filters_from_fields(search, price, year, mileage, **flags):
     try:
         price_low, price_high, price_range = _parse_span(price)
         year_low, year_high, year_range = _parse_span(year)
-        mileage = int(mileage)
+        mileage_low, mileage, mileage_range = _parse_span(mileage)
+        if not mileage_range:
+            mileage_low = None
     except ValueError:
         return None
     price_min, budget = (price_low, price_high) if price_range else (None, price_high)
     if not year_range:  # a single year is the lower bound ("od 2018"), as on every older button
         year_high = None
     return Filters(clean_search(search), budget, year_low, mileage or None, price_min=price_min, year_max=year_high,
-                   **flags)
+                   mileage_min=mileage_low, **flags)
 
 
 FUEL_CODES = {"diesel": "d", "petrol": "b", "hybrid": "h", "electric": "e", "lpg": "g"}
 GEARBOX_CODES = {"automatic": "a", "manual": "m"}
-_FLAG_TAIL = r"(n?)([dbheg]?)([am]?)"
+_FLAG_TAIL = r"(n?)([dbheg]?)([am]?)(k?)"
 
 
 def _attr_flags(filters):
     """Button flag letters for "incl. new", fuel and gearbox (after the older o / p letters)."""
     return (("n" if filters.new_ok else "") + FUEL_CODES.get(filters.fuel, "")
-            + GEARBOX_CODES.get(filters.transmission, ""))
+            + GEARBOX_CODES.get(filters.transmission, "") + ("k" if filters.low_km else ""))
 
 
-def _attr_values(new, fuel, gearbox):
+def _attr_values(new, fuel, gearbox, low_km=""):
     fuels = {code: value for value, code in FUEL_CODES.items()}
     gearboxes = {code: value for value, code in GEARBOX_CODES.items()}
-    return {"new_ok": bool(new), "fuel": fuels.get(fuel, ""), "transmission": gearboxes.get(gearbox, "")}
+    return {"new_ok": bool(new), "fuel": fuels.get(fuel, ""), "transmission": gearboxes.get(gearbox, ""),
+            "low_km": bool(low_km)}
 
 
 def liquidity_callback(filters):
@@ -1526,7 +1732,7 @@ def parse_liquidity_callback(data):
     if len(parts) != 5 or not flags:
         return None
     filters = _filters_from_fields(parts[4], *parts[1:4], family=bool(flags.group(1)),
-                                   **_attr_values(*flags.group(2, 3, 4)))
+                                   **_attr_values(*flags.group(2, 3, 4, 5)))
     return filters if filters is not None and _bounds_in_range(filters) else None
 
 
@@ -1545,14 +1751,20 @@ def unit_choices(intent, lang):
 
 def chitchat_message(lang=DEFAULT_LANGUAGE, topic=""):
     """Small talk without Gemini: a short reply to what was said, then what the bot can do."""
-    if topic in {"greeting", "weather", "how", "about", "joke"}:
+    if topic in {"greeting", "weather", "how", "about", "joke", "scope"}:
         return t(lang, f"smalltalk_{topic}") + "\n\n" + t(lang, "smalltalk_hint")
     return t(lang, "chitchat")
 
 
-def clarify_message(note="", question="", lang=DEFAULT_LANGUAGE):
+def clarify_message(note="", question="", lang=DEFAULT_LANGUAGE, labels=()):
     if question:
         return question + "\n\n" + t(lang, "clarify_suffix")
+    if "more" in labels:
+        return t(lang, "clarify_more")
+    if "vague" in labels:
+        return t(lang, "clarify_vague")
+    if note == "mileage_stats":
+        return t(lang, "clarify_mileage_stats")
     if note == "currency":
         return t(lang, "clarify_currency")
     if note == "correction":
@@ -1681,7 +1893,7 @@ def parse_refine_page(data):
     except ValueError:
         return None
     filters = _filters_from_fields(parts[-1], *parts[1:4], family=bool(flags.group(2)),
-                                   include_old=bool(flags.group(1)), **_attr_values(*flags.group(3, 4, 5)))
+                                   include_old=bool(flags.group(1)), **_attr_values(*flags.group(3, 4, 5, 6)))
     if filters is None:
         return None
     in_range = _bounds_in_range(filters) and 0 <= offset <= MAX_OFFSET
@@ -1816,7 +2028,7 @@ def _find_refinements(filters, page, lang):
     if base_km:
         lower = max(10_000, int(base_km * 0.7) // 10_000 * 10_000)
         data = refine_callback(replace(filters, mileage_max=lower))
-        if lower < base_km and data:
+        if lower < base_km and lower > (filters.mileage_min or 0) and data:
             row.append(_button(t(lang, "btn_lowkm", km=_thousands(lower)), data))
     if row:
         rows.append(row)
@@ -1905,6 +2117,14 @@ def _remember_scope(key, intent):
     if len(_SCOPES) >= SCOPE_MAX_ENTRIES:
         _SCOPES.pop(min(_SCOPES, key=lambda k: _SCOPES[k][1]), None)
     _SCOPES[key] = (intent, now)
+
+
+def _with_page(intent, markup):
+    """The intent to remember: a find also records how many matches its page had, so "pokaži još" knows when
+    the last page was shown."""
+    if intent.kind == "find" and isinstance(markup, Page):
+        return replace(intent, page_total=markup.total)
+    return intent
 
 
 def _recall_scope(key):
@@ -2027,7 +2247,8 @@ def _did_you_mean_choices(filters, candidates, lang):
 def _model_filters(model, filters):
     """A 🔎 model button keeps the question's price, year and mileage bounds (not family / older)."""
     return Filters(model, filters.budget, filters.year_min, filters.mileage_max, price_min=filters.price_min,
-                   year_max=filters.year_max, fuel=filters.fuel, transmission=filters.transmission)
+                   year_max=filters.year_max, fuel=filters.fuel, transmission=filters.transmission,
+                   mileage_min=filters.mileage_min, low_km=filters.low_km)
 
 
 def answer_intent(engine, intent, config, lang=DEFAULT_LANGUAGE):
@@ -2045,6 +2266,8 @@ def answer_intent(engine, intent, config, lang=DEFAULT_LANGUAGE):
     if intent.kind == "find":
         offset = max(0, min(intent.offset, MAX_OFFSET))
         text_value, total, stats = find_page(engine, intent.filters, offset, lang)
+        if "registration" in intent.labels:  # "Golf sa registracijom": searched as a Golf, said so
+            text_value = type(text_value)(f"{text_value}\n\n<i>{esc(t(lang, 'registration_note'))}</i>")
         if stats.get("unrecognised") or stats.get("unknown"):
             return text_value, _did_you_mean_choices(stats["filters"], stats.get("candidates", ()), lang)
         if stats.get("assumed"):
@@ -2073,6 +2296,17 @@ def answer_intent(engine, intent, config, lang=DEFAULT_LANGUAGE):
                            transmission=f.transmission)
         return (price_check_message(engine, intent, lang),
                 Choices((((t(lang, "btn_show_listings"), refine_callback(listings)),),)))
+    if intent.kind == "mileage_stats":
+        f = intent.filters
+        listings = Filters(f.search, year_min=f.year_min, year_max=f.year_max, fuel=f.fuel,
+                           transmission=f.transmission)
+        return (mileage_stats_message(engine, intent, lang),
+                Choices((((t(lang, "btn_show_listings"), refine_callback(listings)),),)))
+    if intent.kind == "no_more":
+        f = intent.filters
+        rows = [] if f.include_old else [((t(lang, "btn_include_old_plain"),
+                                           refine_callback(replace(f, include_old=True))),)]
+        return t(lang, "no_more_last"), (Choices(tuple(rows)) if rows else example_choices(lang))
     if intent.kind == "model_stats":
         label = intent.filters.search
         rows = ((t(lang, "btn_show_listings"), refine_callback(Filters(label))),)
@@ -2091,7 +2325,7 @@ def answer_intent(engine, intent, config, lang=DEFAULT_LANGUAGE):
         return text_value, (Choices((buttons,)) if buttons else False)
     if intent.kind == "compare":
         text_value, used = compare(engine, " | ".join(intent.labels), lang, intent.filters.year_min,
-                                   intent.filters.year_max)
+                                   intent.filters.year_max, family=intent.filters.family)
         buttons = tuple((f"🔎 {label[:24]}", refine_callback(Filters(search, year_min=low, year_max=high)))
                         for label, (search, low, high) in zip(intent.labels, used or [(l, None, None) for l in intent.labels]))
         return text_value, Choices((buttons,))
@@ -2114,11 +2348,15 @@ def answer_intent(engine, intent, config, lang=DEFAULT_LANGUAGE):
         elif intent.kind == "chitchat":
             text_value = chitchat_message(lang, intent.labels[0] if intent.labels else "")
         elif intent.kind == "clarify":
-            text_value = clarify_message(intent.note, intent.question, lang)
+            text_value = clarify_message(intent.note, intent.question, lang, intent.labels)
         else:
             text_value = unsupported_message(intent.note, lang)
         if intent.kind == "clarify" and intent.note == "price_check" and not intent.reply:
             return t(lang, "clarify_price_check"), False
+        if intent.kind == "clarify" and "more" in intent.labels and not intent.reply:
+            return text_value, example_choices(lang)
+        if intent.kind == "clarify" and intent.note == "mileage_stats" and not intent.reply:
+            return text_value, False
         if intent.kind == "clarify" and intent.note not in {"currency", "correction", "price_check"}:
             return text_value, budget_choices(lang)
         if intent.kind == "clarify" and intent.note == "correction":
@@ -2133,7 +2371,7 @@ def answer_intent(engine, intent, config, lang=DEFAULT_LANGUAGE):
 
 
 _DEFAULT_LLM = object()
-DB_KINDS = {"find", "model_stats", "price_check", "compare", "trends", "status", "latest", "suggest", "liquidity",
+DB_KINDS = {"find", "model_stats", "price_check", "mileage_stats", "compare", "trends", "status", "latest", "suggest", "liquidity",
             "deals"}
 
 # Best-effort memory of the last few chat turns in a private chat (see SCOPE_* above): the
@@ -2600,7 +2838,7 @@ def _process_update(update, engine, config, call, llm, phraser, started):
         elif intent is not None:
             response, markup = answer_intent(engine, intent, config, lang=lang)
             if private or free_text is not None:
-                _remember_scope(scope_key, intent)
+                _remember_scope(scope_key, _with_page(intent, markup))
             if (free_text is not None and phraser is not None and intent.kind in DB_KINDS
                     and not isinstance(response, NoMatch)):  # "did you mean ...?" is sent as written
                 facts = html_to_text(response) if isinstance(response, Html) else response
@@ -2627,6 +2865,7 @@ def _process_update(update, engine, config, call, llm, phraser, started):
                         # the listings are not on screen, so the first button should show page one
                         markup = Page(markup.filters, 0, markup.min_year, markup.max_km,
                                       older_hidden=markup.older_hidden, total=markup.total)
+                        _remember_scope(scope_key, replace(intent, offset=-PAGE_SIZE, page_total=markup.total))
             elif free_text is not None and intent.reply:
                 chat_text = intent.reply
         else:
@@ -2683,6 +2922,8 @@ def _needs_interpreter(intent, text_value):
     A search-only message ("golf", "hvala ti", "bok") is ambiguous, so Gemini picks between
     a search and small talk. Without Gemini the parser's reading is used as before.
     """
+    if intent.note == "more":
+        return False  # "pokaži još" is the next page of the last search, whatever Gemini would make of it
     if intent.kind in {"ignore", "clarify", "chitchat", "unsupported"}:
         return not intent.note
     return intent.kind == "find" and not intent.filters.numeric()
