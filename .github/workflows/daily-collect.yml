@@ -156,3 +156,19 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
           compression-level: 0
+
+  alert-on-failure:
+    name: Alert Telegram on failure
+    needs: collect
+    # Real runs only: a failed verify run is a test, not an outage.
+    if: failure() && inputs.mode != 'verify'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Send the alert (secrets TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python3 scripts/collection_alert.py failure --run-url "$RUN_URL" --reason "The collect job failed (see the run log and diagnostics artifact)."

@@ -1,0 +1,37 @@
+name: Collection health check
+
+# Safety net for the daily collection. Runs once a day after the VPS trigger (08:15 Sarajevo) and
+# the 09:40 UTC fallback should both be done, and alerts Telegram if no real (non-verify) daily
+# collection succeeded in the last 26 hours. One scheduled run per day = at most one alert a day.
+# Needs the GitHub secrets TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID (same values the bot uses).
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Print the alert instead of sending it
+        type: boolean
+        default: true
+  schedule:
+    # 10:30 UTC = 11:30 CET / 12:30 CEST; the fallback run has finished (~15 min) well before.
+    - cron: "30 10 * * *"
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Python tests
+        run: python3 -m unittest tests.test_collection_alert
+      - name: Alert if no recent successful collection
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DRY: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '--dry-run' || '' }}
+        run: python3 scripts/collection_alert.py stale $DRY

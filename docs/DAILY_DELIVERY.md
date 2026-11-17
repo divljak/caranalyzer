@@ -174,3 +174,12 @@ coverage, confirmed sales, demand or selling-speed evidence.
 Implementation follows [Supabase connection guidance](https://supabase.com/docs/guides/database/connecting-to-postgres),
 [PostgreSQL upserts](https://www.postgresql.org/docs/current/sql-insert.html) and
 [transaction/advisory locks](https://www.postgresql.org/docs/current/explicit-locking.html).
+
+## Failure alerts
+
+Two Telegram alerts cover the GitHub-run collection (the old VPS health timer is gone):
+
+- `alert-on-failure` job in `daily-collect.yml`: sends when the `collect` job fails (real runs only, not `verify`), with a link to the run.
+- `collection-health.yml`: daily at 10:30 UTC (after the 09:40 UTC fallback). Alerts if no real daily run succeeded in the last 26 h, so a trigger that never fired is caught too. At most one scheduled alert a day; a day where the fallback also fails can produce a failure alert plus this one.
+
+Both use `scripts/collection_alert.py` and the GitHub repository secrets `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` (same values as the bot; the first id is used if several are listed). Dry run locally: `python3 scripts/collection_alert.py failure --run-url URL --dry-run`; in GitHub, run "Collection health check" manually (dry run is the default). Tests: `python3 -m unittest tests.test_collection_alert`.
