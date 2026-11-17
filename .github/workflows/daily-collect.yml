@@ -134,7 +134,8 @@ jobs:
           print(f"| exit_code | {d.get('exit_code')} |\n| failure_class | {d.get('failure_class')} |")
           for f in c.get("failures") or []:
               keep = {k: f.get(k) for k in ("phase", "page", "attempt", "exception", "navigation_ms", "dom_ms",
-                                            "document_status", "ready_state", "title", "final_url", "parser_reason")}
+                                            "document_status", "ready_state", "title", "final_url", "parser_reason",
+                                            "dom_fingerprint")}
               print(f"\nFailure: `{json.dumps(keep, ensure_ascii=False)}`")
           EOF
 

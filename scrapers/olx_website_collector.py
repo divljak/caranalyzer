@@ -398,6 +398,32 @@ class WebsiteBrowser:
         except Exception as exc:
             return {'page_state_error': type(exc).__name__}
 
+    FINGERPRINT_SCRIPT = (
+        "const t = document.body ? document.body.innerText : '';"
+        "const h = document.querySelector('h1,h2');"
+        "return {body_text_length: t.length, element_count: document.getElementsByTagName('*').length,"
+        " article_links: document.querySelectorAll('a[href*=\"/artikal/\"]').length,"
+        " card_headings: document.querySelectorAll('h1.main-heading').length,"
+        " nuxt_data: !!document.getElementById('__NUXT_DATA__'),"
+        " results_title: !!document.getElementById('search-results-title'),"
+        " iframes: document.getElementsByTagName('iframe').length,"
+        " first_heading: h ? h.innerText.replace(/\\s+/g, ' ').trim().slice(0, 80) : ''};")
+
+    def dom_fingerprint(self):
+        """Counts and flags that tell a block/interstitial page from a slow or restyled one.
+        Reads the already-loaded DOM only (no visit); no body text beyond one 80-char heading."""
+        try:
+            raw = self.driver.execute_script(self.FINGERPRINT_SCRIPT)
+            if not isinstance(raw, dict):
+                return {}
+            out = {k: raw.get(k) for k in ('body_text_length', 'element_count', 'article_links', 'card_headings', 'iframes')
+                   if isinstance(raw.get(k), int)}
+            out.update({k: raw[k] for k in ('nuxt_data', 'results_title') if isinstance(raw.get(k), bool)})
+            out['first_heading'] = str(raw.get('first_heading', ''))[:80]
+            return {'dom_fingerprint': out}
+        except Exception as exc:
+            return {'dom_fingerprint_error': type(exc).__name__}
+
     def close(self):
         # Cleanup must also run when setup or quit fails. It must not hide the
         # refusal/timeout that the collector needs to record for this visit.
@@ -485,7 +511,8 @@ class WebsiteBrowser:
                     'script_retries': script_retries,
                     'elapsed_ms': round((time.monotonic() - started) * 1000),
                     'document_status': getattr(self, 'document_status', None),
-                    'last_dom': last_dom, 'parser_reason': parser_reason, **self.page_state()}
+                    'last_dom': last_dom, 'parser_reason': parser_reason, **self.page_state(),
+                    **self.dom_fingerprint()}
         try:
             try:
                 self.driver.get(url)
