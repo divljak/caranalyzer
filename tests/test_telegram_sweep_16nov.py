@@ -244,10 +244,12 @@ class PriceIntentTests(unittest.TestCase):
         intent, filters = parsed("is a 2016 A4 at 17.500 a good deal?")
         self.assertEqual(("price_check", 17500), (intent.kind, intent.price))
 
-    def test_plain_year_searches_are_unchanged(self):  # rows 4, 5
-        for message, search in (("Renault Clio 2019", "renault clio"), ("Opel Astra 2012 do 9000 KM", "opel astra")):
+    def test_a_plain_year_is_that_model_year_only(self):  # rows 4, 5 (Ogi, 17 Nov: "Golf 2015" is exactly 2015)
+        for message, search, year in (("Renault Clio 2019", "renault clio", 2019),
+                                      ("Opel Astra 2012 do 9000 KM", "opel astra", 2012)):
             intent, filters = parsed(message)
-            self.assertEqual(("find", search, None), (intent.kind, filters.search, filters.year_max), message)
+            self.assertEqual(("find", search, year, year), (intent.kind, filters.search, filters.year_min,
+                                                            filters.year_max), message)
 
 
 # ---- 5. out of scope ------------------------------------------------------------------------------
@@ -548,10 +550,11 @@ class SweepAnswerTests(unittest.TestCase):
                 self.assertIn("2017–2019", reply, message)
 
     def test_the_typo_pasat_finds_the_passats(self):  # row 21
-        self.seed([("pa1", "Volkswagen", "Passat", 2016, 17000, 180000), ("pa2", "Volkswagen", "Passat", 2018, 21000, 120000)])
+        self.seed([("pa1", "Volkswagen", "Passat", 2015, 17000, 180000), ("pa2", "Volkswagen", "Passat", 2015, 21000, 120000),
+                   ("pa3", "Volkswagen", "Passat", 2018, 21000, 120000)])  # a plain year is that year only
         reply, _ = self.answer("pasat 2015 dizl")
         self.assertEqual({"pa1", "pa2"}, self.ids(reply))
-        self.assertTrue(reply.startswith("Viđeni oglasi · passat · dizel · od 2015\n"), reply)
+        self.assertTrue(reply.startswith("Viđeni oglasi · passat · dizel · 2015\n"), reply)
 
     def test_compare_for_a_family_names_the_family_list(self):  # rows 9, 10, 12
         octavia = [(f"co{y}", "Škoda", "Octavia", y, 1000 * (y - 2000), 150000) for y in range(2012, 2020)]

@@ -241,6 +241,9 @@ _RANGE_SEP = r"\s*(?P<sep>-|–|—|do|to|until|i|and)\s*"
 _YEAR_SPAN = re.compile(
     _RANGE_FROM + r"\b(?P<a>(?:19|20)[0-9]{2})" + _RANGE_SEP + r"(?P<b>(?:19|20)[0-9]{2})\b"
     r"(?!\s*(?:k(?![a-z])|km|bam|kam|marak\w*|hiljad\w*|tisuc\w*|thousand|eur\w*|[.,]?000))")
+# "do 2018", "prije 2018", "before 2018", "starije od 2018": the newest model year, not a price
+_YEAR_CEILING = (r"(?:\bdo|\bprije|\bpre|\bbefore|\buntil|\bup to|\bstarij\w*\s+od|\bolder than)\s*"
+                 r"((?:19|20)[0-9]{2})\b(?!\s*(?:k(?![a-z])|km|bam|kam|marak\w*|hiljad\w*|tisuc\w*|thousand|eur\w*|[.,]?000))")
 _THOUSANDS = r"k(?![a-z0-9])|h?iljad\w*|tisuc\w*|thousand"
 # "preko 40k", "iznad 30.000 KM", "over 20k": a lower price bound only.
 _NOT_LESS = (r"(?:ne|nikako|no|not|never)\s+(?:manje|ispod|less|under|below|fewer)(?:\s+(?:than|od))?")
@@ -346,20 +349,28 @@ def _extract_filters(folded, original, km_is_price=False):
     if span:
         consume(span[0])
         year, year_max = span[1], span[2]
-    for pattern in (() if span else (
-        r"(?:from|since|after|newer than|od|iza|nakon|novije od)\s*((?:19|20)[0-9]{2})\b",
-        r"\b((?:19|20)[0-9]{2})\s*(?:\+|or newer|or later|and newer|ili novije|i novije)",
-        r"\b((?:19|20)[0-9]{2})\b",
+    # A lone year ("Golf 2015") is that model year only; "od 2015", "2015+", "novije od 2015" are a lower bound
+    # and "do 2018", "prije 2018" an upper one. (pattern, bound) where bound is "min", "max" or "exact".
+    for pattern, bound in (() if span else (
+        (r"(?:from|since|after|newer than|od|iza|nakon|novije od)\s*((?:19|20)[0-9]{2})\b", "min"),
+        (r"\b((?:19|20)[0-9]{2})\s*(?:\+|or newer|or later|and newer|ili novije|i novije)", "min"),
+        (_YEAR_CEILING, "max"),
+        (r"\b((?:19|20)[0-9]{2})\b(?!\s*(?:k(?![a-z])|km|bam|kam|marak\w*|hiljad\w*|tisuc\w*|thousand|eur\w*))",
+         "exact"),
     )):
         match = re.search(pattern, folded)
         if match:
             candidate = int(match.group(1))
             if YEAR_RANGE[0] <= candidate <= YEAR_RANGE[1]:
-                year = candidate
+                if bound == "max":
+                    year_max = candidate
+                else:
+                    year = candidate
+                    year_max = candidate if bound == "exact" else None
                 consume(match)
                 break
 
-    if year is None:
+    if year is None and year_max is None:
         # "staro do 10 godina", "ne starije od 8 godina", "do 10 godina staro", "up to 10 years old"
         for pattern in (
             r"\b(?:star\w*|mladj?\w*|old)\s+(?:do|od|max|up to|under|less than|than)?\s*([0-9]{1,2})\s*(?:god\w*|years?)\b",
@@ -954,6 +965,7 @@ DEAL_DEFAULT_DAYS = 14  # same window as the shortlist's "priced well below simi
 _YEAR_SINGLE = (
     (r"(?:from|since|after|newer than|od|iza|nakon|novije od)\s*((?:19|20)[0-9]{2})\b", False),
     (r"\b((?:19|20)[0-9]{2})\s*(?:\+|or newer|or later|and newer|ili novije|i novije)", False),
+    (_YEAR_CEILING, "max"),
     (r"\b((?:19|20)[0-9]{2})\b", True),
 )
 
@@ -968,20 +980,24 @@ def _stated_years(folded):
         match = re.search(pattern, folded)
         if match and YEAR_RANGE[0] <= int(match.group(1)) <= YEAR_RANGE[1]:
             year = int(match.group(1))
+            if exact == "max":
+                return match, None, year
             return match, year, (year if exact else None)
     return None
 
 
-SHORT_YEAR_MAX = 30  # "golf 15" is 2015; "golf 31" or higher is not read as a year
+SHORT_NUMBER_MAX = 30  # "golf 20" could be 2020; "golf 31" or higher is never offered as a year
 
 
-def short_model_year(tokens, folded):
-    """("golf", "15") -> (["golf"], 2015): a two-digit number (00-30) right after a model word is a
-    model year when it is not one of that model's generations. Not when a unit, "k" or "godina" follows
-    ("golf 15k", "golf 15 godina"). Returns (tokens, None) when there is no such pair."""
+def short_model_number(tokens, folded):
+    """("golf", "20") -> (["golf"], 20): a bare two-digit number (00-30) right after a model word that is
+    not one of that model's generations and has no unit ("golf 20k", "golf 20 godina", "golf 200 KS").
+    It is ambiguous (year 2020, price 20.000 KM, mileage), so the caller asks; it is never guessed.
+    A leading zero ("passat 08") can only be a year and is returned as (tokens, 2008, True).
+    Returns (tokens, None, False) when there is no such pair."""
     for index in range(1, len(tokens)):
         word, number = tokens[index - 1], tokens[index]
-        if not re.fullmatch(r"[0-9]{2}", number) or int(number) > SHORT_YEAR_MAX:
+        if not re.fullmatch(r"[0-9]{2}", number) or int(number) > SHORT_NUMBER_MAX:
             continue
         if not re.search(r"[a-z]", fold(word)) or fold(word) in _STOPWORDS:
             continue
@@ -989,10 +1005,12 @@ def short_model_year(tokens, folded):
         if model and number in GENERATIONS[model]:
             continue
         after = (r"(?![0-9]|\s*(?:k(?![a-z])|km|kn|bam|kam|maraka|hiljad\w*|iljad\w*|tisuc\w*|thousand|"
-                 r"god\w*|years?|eur\w*|[.,]?[0-9]|%))")
+                 r"god\w*|years?|eur\w*|kw|ks|ps|hp|cc|ccm|[.,]?[0-9]|%))")
         if re.search(rf"\b{re.escape(fold(word))}\s+{number}{after}", folded):
-            return tokens[:index] + tokens[index + 1:], 2000 + int(number)
-    return tokens, None
+            if number.startswith("0"):
+                return tokens[:index] + tokens[index + 1:], 2000 + int(number), True
+            return tokens[:index] + tokens[index + 1:], int(number), False
+    return tokens, None, False
 
 
 # "pokaži još", "još", "more", "next page": the next page of the last search.
@@ -1072,7 +1090,7 @@ def _price_check(filters, folded, bare_year=True):
     price = filters.budget or filters.price_min
     year = None
     year_min, year_max = filters.year_min, filters.year_max
-    if year_min and not year_max and bare_year:
+    if year_min and bare_year and year_min == (year_max or year_min):
         year = year_min
         year_min, year_max = year - PRICE_CHECK_YEARS, year + PRICE_CHECK_YEARS
     comparison = Filters(search=filters.search, year_min=year_min, year_max=year_max, fuel=filters.fuel,
@@ -1089,7 +1107,7 @@ def _mileage_check(filters, bare_year=True):
     """A "typical mileage" Intent for a model (and its year +-1, like a price check); asks for the model if missing."""
     year = None
     year_min, year_max = filters.year_min, filters.year_max
-    if year_min and not year_max and bare_year:
+    if year_min and bare_year and year_min == (year_max or year_min):
         year = year_min
         year_min, year_max = year - PRICE_CHECK_YEARS, year + PRICE_CHECK_YEARS
     comparison = Filters(search=filters.search, year_min=year_min, year_max=year_max, fuel=filters.fuel,
@@ -1254,9 +1272,13 @@ def _parse_question(text_value, context=None, _restating=False):
     tokens, generation = generation_hint(tokens)
     tokens = [repair_typo(token, tokens[i - 1] if i else "") for i, token in enumerate(tokens)]
     if not (generation or filters.year_min or filters.year_max):
-        tokens, short_year = short_model_year(tokens, folded)
-        if short_year:  # "golf 15": model year 2015
-            filters = replace(filters, year_min=short_year, year_max=short_year)
+        tokens, short_number, is_year = short_model_number(tokens, folded)
+        if short_number and is_year:  # "passat 08": only a year can start with 0
+            filters = replace(filters, year_min=short_number, year_max=short_number)
+        elif short_number:  # "golf 20": a year, a price or a mileage? Ask, never guess.
+            named = tokens if any(not token.isdigit() for token in tokens) else []
+            return Intent("clarify", replace(filters, search=_model_search(rest, named)), note="short_number",
+                          offset=short_number)
     named = tokens if any(not token.isdigit() for token in tokens) else []
     filters = replace(filters, search=_model_search(rest, named))
     if generation and not (filters.year_min or filters.year_max):

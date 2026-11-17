@@ -113,7 +113,7 @@ class RangeParsingTests(unittest.TestCase):
 
     def test_single_bounds_and_mixed_units_are_read_as_before(self):
         self.assertEqual(Filters("golf", 15000), parse_question("golf do 15000 KM").filters)
-        self.assertEqual(Filters("bmw 320d", 25000, 2015), parse_question("bmw 320d 2015 25000").filters)
+        self.assertEqual(Filters("bmw 320d", 25000, 2015, year_max=2015), parse_question("bmw 320d 2015 25000").filters)
         self.assertEqual(Filters("passat", 12000, mileage_max=200000),
                          parse_question("passat do 12000 KM do 200000 km").filters)
 

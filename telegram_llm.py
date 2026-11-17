@@ -96,6 +96,8 @@ question words like "normalna", "prosječno", "cheapest", "fair", and never fuel
 and any of budget_km (max price in KM), price_min_km (min price in KM), year_min, year_max, mileage_max (km), mileage_min (km). \
 A range sets both ends: "od 50 - 60k" or "između 50 i 60 hiljada" is price_min_km 50000 and budget_km \
 60000; "godište 2022 - 2024" is year_min 2022 and year_max 2024. Never drop either end of a range. \
+A lone four-digit year ("Golf 2015") is that year only: year_min and year_max both 2015; only "od / from / since 2015", "2015+" or "novije od 2015" is year_min alone, and "do 2018" is year_max alone. \
+A bare two-digit number after a model ("golf 20") is ambiguous: never turn it into a year, a price or a mileage. \
 "preko / iznad / više od / over / above 40k" is price_min_km 40000 with NO budget_km, but \
 "preko / više od 200.000 km" or "300 hiljada kilometara" is mileage: mileage_min 200000 (or mileage_max for "do / manje od"). Set fuel (diesel, \
 petrol, hybrid, electric, lpg) for "dizel", "benzin", "hibrid", "električni", "plin/LPG", and transmission \

@@ -73,16 +73,18 @@ class PendingParserBugTests(unittest.TestCase):
             self.assertEqual(150_000, filters.mileage_max, message)  # "preko" after a negation is still a ceiling
 
 
-# ---- Ogi's three pending calls are untouched ------------------------------------------------------
+# ---- Ogi's calls: Golf 2015 is exact (17 Nov 2026); compare thresholds are untouched --------------
 
-class PendingDecisionsAreUntouchedTests(unittest.TestCase):
-    def test_golf_2015_is_still_from_2015(self):
+class PendingDecisionsTests(unittest.TestCase):
+    def test_golf_2015_is_exactly_2015(self):
         _, filters = parsed("Golf 2015")
-        self.assertEqual(("golf", 2015, None), (filters.search, filters.year_min, filters.year_max))
+        self.assertEqual(("golf", 2015, 2015), (filters.search, filters.year_min, filters.year_max))
 
-    def test_golf_20_is_still_model_year_2020(self):
-        _, filters = parsed("golf 20")
-        self.assertEqual(("golf", 2020, 2020), (filters.search, filters.year_min, filters.year_max))
+    def test_golf_20_is_asked_about_not_guessed(self):
+        intent = parse_question("golf 20")
+        self.assertEqual(("clarify", "short_number", 20), (intent.kind, intent.note, intent.offset))
+        self.assertEqual(("golf", None, None), (intent.filters.search, intent.filters.year_min,
+                                                intent.filters.year_max))
 
     def test_compare_thresholds_are_unchanged(self):
         self.assertEqual((.1, .9), telegram_bot.COMPARE_SPREAD)
