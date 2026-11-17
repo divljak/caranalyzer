@@ -55,24 +55,30 @@ def button_labels(markup):
     return [label for row in markup.rows for label, _ in row]
 
 
-# ---- E9: "golf 15" is a Golf from 2015 ------------------------------------------------------------
+# ---- E9: a short number after a model is asked about, never guessed (Ogi, 17 Nov 2026) -------------
 
 class ShortModelYearTests(unittest.TestCase):
-    def test_golf_15_is_model_year_2015(self):  # E9
+    def test_golf_15_asks_what_the_number_means(self):  # E9, superseded: "golf 15" is no longer guessed as 2015
         intent = parse_question("golf 15")
-        self.assertEqual(("find", "golf", 2015, 2015), (intent.kind, intent.filters.search,
-                                                        intent.filters.year_min, intent.filters.year_max))
+        self.assertEqual(("clarify", "short_number", 15, "golf"),
+                         (intent.kind, intent.note, intent.offset, intent.filters.search))
+        self.assertIsNone(intent.filters.year_min)
 
     def test_it_needs_no_gemini(self):
         self.assertFalse(telegram_bot._needs_interpreter(parse_question("golf 15"), "golf 15"))
 
-    def test_other_two_digit_years(self):
-        for message, search, year in (("passat 08", "passat", 2008), ("audi a4 17 dizel", "audi a4", 2017),
-                                      ("Octavia 19", "octavia", 2019), ("golf 00", "golf", 2000)):
+    def test_a_leading_zero_can_only_be_a_year(self):
+        for message, search, year in (("passat 08", "passat", 2008), ("golf 00", "golf", 2000)):
             f = parse_question(message).filters
             self.assertEqual((search, year, year), (f.search, f.year_min, f.year_max), message)
 
-    def test_generations_amounts_and_stated_years_are_not_years(self):
+    def test_other_short_numbers_are_asked_about_too(self):
+        for message, search, n in (("audi a4 17 dizel", "audi a4", 17), ("Octavia 19", "octavia", 19)):
+            intent = parse_question(message)
+            self.assertEqual(("clarify", "short_number", n, search),
+                             (intent.kind, intent.note, intent.offset, intent.filters.search), message)
+
+    def test_generations_amounts_and_stated_years_are_not_short_numbers(self):
         self.assertEqual((2012, 2020), (parse_question("golf 7").filters.year_min,
                                         parse_question("golf 7").filters.year_max))
         self.assertEqual(("passat", 2014), (parse_question("passat b8").filters.search,
@@ -81,9 +87,10 @@ class ShortModelYearTests(unittest.TestCase):
         self.assertEqual((15000, None), (f.budget, f.year_min))
         f = parse_question("golf 15 2017").filters  # a full year wins
         self.assertEqual(2017, f.year_min)
-        for message in ("golf 31", "golf 15 godina", "golf 15 hiljada"):
-            self.assertNotEqual(2015, parse_question(message).filters.year_min, message)
-            self.assertNotEqual(2031, parse_question(message).filters.year_min, message)
+        for message in ("golf 31", "golf 15 godina", "golf 15 hiljada", "golf 20 kw"):
+            intent = parse_question(message)
+            self.assertNotEqual("short_number", intent.note, message)
+            self.assertNotIn(intent.filters.year_min, (2015, 2020, 2031), message)
 
     def test_the_title_shows_one_year_and_reads_back(self):
         f = Filters("golf", year_min=2015, year_max=2015)
@@ -250,14 +257,20 @@ class WeakCasesDatabaseTests(unittest.TestCase):
     def ids(self, reply):
         return set(re.findall(r"artikal/__qa_w_(\w+)", reply))
 
-    # E9
-    def test_golf_15_lists_only_2015_golfs(self):
+    # E9 (Ogi, 17 Nov 2026): "golf 2015" lists only 2015 golfs; "golf 15" asks first
+    def test_golf_2015_lists_only_2015_golfs(self):
         self.seed([("g15", "Volkswagen", "Golf", 2015, 15000, 180000), ("g17", "Volkswagen", "Golf", 2017, 19000,
                                                                          140000)])
-        reply, _ = self.answer("golf 15")
+        reply, _ = self.answer("golf 2015")
         self.assertTrue(reply.startswith("Viđeni oglasi · golf · 2015\n"), reply)
         self.assertEqual({"g15"}, self.ids(reply))
         self.assertNotIn("Nisam prepoznao", reply)
+
+    def test_golf_15_asks_instead_of_listing(self):
+        self.seed([("g15", "Volkswagen", "Golf", 2015, 15000, 180000)])
+        reply, _ = self.answer("golf 15")
+        self.assertTrue(reply.startswith("Šta znači 15: godište (2015), cijena (15.000 KM) ili nešto drugo?"), reply)
+        self.assertEqual(set(), self.ids(reply))
 
     # E3
     def test_an_unrealistic_request_says_so_and_gives_the_cheapest_real_match(self):
@@ -266,14 +279,14 @@ class WeakCasesDatabaseTests(unittest.TestCase):
                   + [("tjunk", "Tesla", "Model 3", 2024, 15000, 15000)])  # a placeholder price, over the cap
         reply, markup = self.answer("Tesla 2024 do 10k")  # E3
         self.assertIn("Nema odgovarajućih oglasa u zadnjih 90 dana.", reply)
-        self.assertIn("Ništa poput „tesla · do 10.000 KM · od 2024“ ne postoji u našim podacima.", reply)
-        self.assertIn("Najjeftiniji stvarni oglas (tesla · od 2024, bilo koja cijena) je Tesla Model 3", reply)
+        self.assertIn("Ništa poput „tesla · do 10.000 KM · 2024“ ne postoji u našim podacima.", reply)
+        self.assertIn("Najjeftiniji stvarni oglas (tesla · 2024, bilo koja cijena) je Tesla Model 3", reply)
         self.assertIn("__qa_w_t0", reply)
         self.assertIn("za 58.000 KM", reply)
         self.assertNotIn("__qa_w_tjunk", reply)
-        self.assertIn("Tipična tražena cijena (tesla · od 2024, bilo koja cijena): medijan 62.500 KM (6 oglasa", reply)
-        self.assertEqual("🔎 tesla · od 2024, sve cijene", markup.rows[0][0][0])
-        self.assertEqual(Filters("tesla", year_min=2024), telegram_bot.parse_refine_callback(markup.rows[0][0][1]))
+        self.assertIn("Tipična tražena cijena (tesla · 2024, bilo koja cijena): medijan 62.500 KM (6 oglasa", reply)
+        self.assertEqual("🔎 tesla · 2024, sve cijene", markup.rows[0][0][0])
+        self.assertEqual(Filters("tesla", year_min=2024, year_max=2024), telegram_bot.parse_refine_callback(markup.rows[0][0][1]))
 
     def test_without_that_model_year_it_falls_back_to_the_model(self):
         self.seed([("t19", "Tesla", "Model S", 2019, 60000, 90000), ("t20", "Tesla", "Model 3", 2020, 52000, 80000)])

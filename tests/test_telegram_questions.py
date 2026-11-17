@@ -74,7 +74,7 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(Filters("škoda octavia", 20000, 2016, 150000), intent.filters)
         self.assertEqual(Filters("golf", 15000), parse_question("golf under 15000 KM").filters)
         self.assertEqual(Filters("golf", 12000), parse_question("ima li golf do 12.000 KM").filters)
-        self.assertEqual(Filters("bmw 320d", 25000, 2015), parse_question("bmw 320d 2015 25000").filters)
+        self.assertEqual(Filters("bmw 320d", 25000, 2015, year_max=2015), parse_question("bmw 320d 2015 25000").filters)
         self.assertEqual(Filters("octavia", 25000), parse_question("octavia 25 000 KM").filters)
 
     def test_open_advice_asks_for_a_budget_instead_of_inventing_a_pick(self):

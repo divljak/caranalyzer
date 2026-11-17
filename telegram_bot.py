@@ -29,6 +29,7 @@ from telegram_intent import (
     strip_mentions,
     TITLE_BUDGET,
     TITLE_FIND,
+    YEAR_RANGE,
     clean_search,
     context_from_reply,
     is_correction,
@@ -1020,6 +1021,41 @@ def _nearest_lines(filters, nearest, lang):
     return lines
 
 
+_NEAREST_YEARS_SQL = (_FIND_SQL[:_FIND_SQL.index("  ), model_years AS (")] + f"""
+  )
+  SELECT max(m.year) FILTER (WHERE m.year < CAST(:target AS integer)) AS older,
+    min(m.year) FILTER (WHERE m.year > CAST(:target AS integer)) AS newer
+  FROM matched m
+  WHERE (CAST(:new_ok AS boolean) OR NOT coalesce({_NEW_LIKE.format(p='m')}, false))
+    AND (CAST(:include_old AS boolean)
+         OR m.last_verified_at >= (now() AT TIME ZONE 'UTC') - interval '{FRESH_DAYS} days')
+""")
+YEAR_STEP_SPAN = 3  # the older / newer buttons search this many model years, starting at the nearest one with cars
+
+
+def _nearest_years(connection, filters):
+    """(older, newer): the closest model years below and above ``filters``' single year that have cars for
+    the rest of the search (None when there are none). Used when "Golf 1995" finds nothing."""
+    target = filters.year_min
+    params = {**_bound_params(filters), "year_min": None, "year_max": None,
+              "hints": hint_patterns(()), "search": filters.search, "pattern": _like_pattern(filters.search),
+              "family": bool(filters.family), "family_re": FAMILY_REGEX, "include_old": bool(filters.include_old),
+              "target": target}
+    row = _one(connection, _NEAREST_YEARS_SQL, params)
+    return (row["older"], row["newer"]) if row else (None, None)
+
+
+def _year_choice_ranges(older, newer):
+    """The year ranges the older / newer buttons search, clamped to the years the bot accepts."""
+    low, high = YEAR_RANGE
+    ranges = {}
+    if older:
+        ranges["older"] = (max(low, older - YEAR_STEP_SPAN + 1), older)
+    if newer:
+        ranges["newer"] = (newer, min(high, newer + YEAR_STEP_SPAN - 1))
+    return ranges
+
+
 class NoMatch(Html):
     """A find answer that names no listings because the model was not recognised. It is sent as is
     (never rephrased by Gemini, which could hide that nothing was searched)."""
@@ -1050,6 +1086,7 @@ def find_page(engine, filters, offset=0, lang=DEFAULT_LANGUAGE):
     older_hidden = new_hidden = without_gearbox = 0
     gearbox_days = FRESH_DAYS
     nearest = None
+    year_choice = {}
     with engine.begin() as connection:
         _statement_timeout(connection)
         if offset == 0 and filters.search and not _is_known_model(connection, filters.search):
@@ -1071,7 +1108,10 @@ def find_page(engine, filters, offset=0, lang=DEFAULT_LANGUAGE):
             if probe:
                 new_hidden = int(probe[0]["new_hidden"] or 0)
                 older_hidden = 0 if filters.include_old else int(probe[0]["all_total"])
-            if not older_hidden and not unknown and not filters.transmission:
+            exact_year = bool(filters.year_min and filters.year_min == filters.year_max)
+            if exact_year and not older_hidden and not unknown:
+                year_choice = _year_choice_ranges(*_nearest_years(connection, filters))
+            if not older_hidden and not unknown and not filters.transmission and not year_choice:
                 nearest = _nearest_real(connection, filters)  # "Tesla 2024 do 10k": say it doesn't exist
             if filters.transmission:  # the gearbox is rarely recorded: say what dropping it would find
                 wider = _find_rows(connection, replace(filters, transmission=""), 0, probe=True, hints=hints)
@@ -1102,6 +1142,10 @@ def find_page(engine, filters, offset=0, lang=DEFAULT_LANGUAGE):
             lines.extend(_nearest_lines(filters, nearest, lang))
             stats["nearest"] = replace(nearest[0], include_old=False)
             stats["nearest_how"] = nearest[1]
+        elif year_choice:  # "Golf 1995": none in that year; offer the nearest older / newer years
+            lines.append(esc(t(lang, "no_match_year", what=_describe(shown(filters), lang), year=filters.year_min)))
+            lines.append(esc(t(lang, "year_ask")))
+            stats["year_choice"] = year_choice
         else:
             lines.append(esc(t(lang, "no_match_90")))
         if unknown:
@@ -1749,6 +1793,20 @@ def unit_choices(intent, lang):
     return Choices(tuple(rows))
 
 
+def short_number_choices(intent, lang):
+    """One-tap answer to "what does 20 mean: year 2020, price 20.000 KM or mileage 20.000 km?". Only the readings
+    the message has not already filled (a price when it has a budget, ...) are offered."""
+    n, f = intent.offset, intent.filters
+    amount = n * 1000
+    row = [(t(lang, "btn_short_year", year=2000 + n), refine_callback(replace(f, year_min=2000 + n, year_max=2000 + n)))]
+    if 1_000 <= amount <= 1_000_000 and not (f.budget or f.price_min):
+        row.append((t(lang, "btn_short_price", amount=_thousands(amount)), refine_callback(replace(f, budget=amount))))
+    if 1_000 <= amount <= 1_000_000 and not (f.mileage_max or f.mileage_min):
+        row.append((t(lang, "btn_short_km", amount=_thousands(amount)),
+                    refine_callback(replace(f, mileage_max=amount))))
+    return Choices((tuple(row),))
+
+
 def chitchat_message(lang=DEFAULT_LANGUAGE, topic=""):
     """Small talk without Gemini: a short reply to what was said, then what the bot can do."""
     if topic in {"greeting", "weather", "how", "about", "joke", "scope"}:
@@ -2277,6 +2335,16 @@ def answer_intent(engine, intent, config, lang=DEFAULT_LANGUAGE):
             label = (t(lang, "btn_unreal", what=_describe(nearest, lang)) if stats["nearest_how"] == "without_price"
                      else f"🔎 {_describe(nearest, lang)}")
             return text_value, Choices((((label[:60], refine_callback(nearest)),),))
+        if stats.get("year_choice"):  # nothing in that exact year: older or newer?
+            base = stats["filters"]
+            row = []
+            for way, (low, high) in stats["year_choice"].items():
+                data = refine_callback(replace(base, year_min=low, year_max=high))
+                if data:
+                    span = str(low) if low == high else f"{low}–{high}"
+                    row.append((t(lang, f"btn_year_{way}", years=span), data))
+            if row:
+                return text_value, Choices((tuple(row),))
         following = offset + PAGE_SIZE
         if stats.get("without_gearbox"):
             data = refine_callback(replace(stats["filters"], transmission="",
@@ -2341,6 +2409,9 @@ def answer_intent(engine, intent, config, lang=DEFAULT_LANGUAGE):
     if intent.kind in {"save_car", "remove_car", "shortlist"}:
         return _shortlist_answer(engine, intent, lang)
     if intent.kind in {"chitchat", "clarify", "unsupported"}:
+        if intent.kind == "clarify" and intent.note == "short_number":
+            return (t(lang, "clarify_short_number", n=intent.offset, year=2000 + intent.offset,
+                      price=_thousands(intent.offset * 1000)), short_number_choices(intent, lang))
         if intent.kind == "clarify" and intent.note == "km_unit":
             return t(lang, "clarify_km_unit", amount=_thousands(intent.offset)), unit_choices(intent, lang)
         if intent.reply:
