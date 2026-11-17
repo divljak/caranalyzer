@@ -84,6 +84,30 @@ class NavigationTests(unittest.TestCase):
             browser.read(detail_page()['url'], 'detail')
         browser.driver.get.assert_called_once()
 
+    def test_dom_timeout_records_title_and_fingerprint_without_extra_visit(self):
+        fingerprint = {'body_text_length': 120, 'element_count': 300, 'article_links': 0, 'card_headings': 0,
+                       'iframes': 1, 'nuxt_data': False, 'results_title': False,
+                       'first_heading': 'x' * 200, 'body': 'must not be copied'}
+        state = {'final_url': 'https://olx.ba/pretraga', 'title': 'Just a moment', 'ready_state': 'complete'}
+        browser = self.browser([search_page()])
+        browser.driver.execute_async_script.side_effect = [TimeoutException()] * 3
+        browser.driver.execute_script.side_effect = [state, fingerprint]
+        with self.assertRaises(WebsiteDOMTimeout) as caught:
+            browser.read(search_page()['url'], 'search')
+        diagnostic = caught.exception.diagnostics
+        self.assertEqual('Just a moment', diagnostic['title'])
+        self.assertEqual(80, len(diagnostic['dom_fingerprint']['first_heading']))
+        self.assertEqual(0, diagnostic['dom_fingerprint']['card_headings'])
+        self.assertNotIn('body', diagnostic['dom_fingerprint'])
+        browser.driver.get.assert_called_once()
+
+    def test_fingerprint_failure_never_hides_the_timeout(self):
+        browser = self.browser([TimeoutException()] * 3)
+        browser.driver.execute_script.side_effect = WebDriverException('gone')
+        with self.assertRaises(WebsiteDOMTimeout) as caught:
+            browser.read(search_page()['url'], 'search')
+        self.assertEqual('WebDriverException', caught.exception.diagnostics['dom_fingerprint_error'])
+
     def test_incomplete_dom_at_deadline_is_failure_not_unavailable(self):
         partial = detail_page()
         partial['prices'] = []
