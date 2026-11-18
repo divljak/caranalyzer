@@ -1,4 +1,5 @@
 """Reproduce renderer/DOM failures without visiting OLX or writing evidence."""
+from itertools import repeat
 import json
 import unittest
 from unittest.mock import Mock, patch
@@ -307,3 +308,80 @@ class BrowserBudgetTests(unittest.TestCase):
         browser.driver.get.assert_called_once()
         with self.assertRaises(SourcePaused):
             self.store.reserve('detail', self.clock, 1, 20, 15)
+
+
+class SearchHydrationWaitTests(unittest.TestCase):
+    """17 Nov 2026: page 1 had 50 cards and pagination but never showed the result count
+    within 20 s. Extra patience is spent on the same loaded page only; no second visit."""
+
+    def browser(self, pages, total=1):
+        browser = WebsiteBrowser()
+        browser.driver = Mock()
+        browser.driver.get_log.return_value = []
+        browser.driver.execute_async_script.side_effect = pages
+        browser.driver.execute_script.return_value = {}
+        # One poll at the base deadline, then a short hydration window (real WebDriverWait timing).
+        browser.DOM_TIMEOUT, browser.SEARCH_HYDRATION_TIMEOUT = 0, total
+        return browser
+
+    @staticmethod
+    def half_hydrated():
+        from tests.test_pik_layout import pik_search_page
+        page = pik_search_page()
+        page['result_heading'] = ''  # cards + pagination rendered, count heading not yet
+        return page
+
+    def test_cards_without_count_get_more_time_on_the_same_visit(self):
+        from tests.test_pik_layout import pik_search_page
+        browser = self.browser([self.half_hydrated(), self.half_hydrated(), pik_search_page()])
+        page = browser.read(search_page()['url'], 'search')
+        self.assertEqual('47.810 oglasa', page['result_heading'])
+        self.assertTrue(page['browser']['hydration_wait'])
+        self.assertEqual(3, browser.driver.execute_async_script.call_count)
+        browser.driver.get.assert_called_once()
+
+    def test_page_that_never_hydrates_still_fails_and_is_never_saved(self):
+        browser = self.browser(repeat(self.half_hydrated()))
+        with self.assertRaises(WebsiteDOMTimeout) as caught:
+            browser.read(search_page()['url'], 'search')
+        diagnostic = caught.exception.diagnostics
+        self.assertTrue(diagnostic['hydration_wait'])
+        self.assertEqual((2, True, False, 2), (diagnostic['last_dom']['cards'], diagnostic['last_dom']['pagination_present'],
+                                               diagnostic['last_dom']['result_heading_present'],
+                                               diagnostic['last_dom']['priced_cards']))
+        self.assertGreater(browser.driver.execute_async_script.call_count, 1)
+        browser.driver.get.assert_called_once()
+
+    def test_page_without_cards_fails_at_the_normal_deadline(self):
+        empty = self.half_hydrated()
+        empty['cards'] = []
+        browser = self.browser(repeat(empty), total=45)
+        with self.assertRaises(WebsiteDOMTimeout) as caught:
+            browser.read(search_page()['url'], 'search')
+        self.assertFalse(caught.exception.diagnostics['hydration_wait'])
+        self.assertEqual(1, browser.driver.execute_async_script.call_count)
+
+    def test_detail_pages_keep_the_normal_deadline(self):
+        partial = detail_page()
+        partial['prices'] = []
+        browser = self.browser(repeat(partial), total=45)
+        with self.assertRaises(WebsiteDOMTimeout) as caught:
+            browser.read(partial['url'], 'detail')
+        self.assertFalse(caught.exception.diagnostics['hydration_wait'])
+        self.assertEqual(1, browser.driver.execute_async_script.call_count)
+
+    def test_refusal_during_the_hydration_wait_stops_at_once(self):
+        browser = self.browser(repeat(self.half_hydrated()), total=45)
+        logs = iter([[], [], [], [response(429, url=search_page()['url'])]])
+        browser.driver.get_log.side_effect = lambda _: next(logs, [])
+        with self.assertRaises(WebsiteBlocked):
+            browser.read(search_page()['url'], 'search')
+        browser.driver.get.assert_called_once()
+
+    def test_captcha_dom_during_the_hydration_wait_stops_at_once(self):
+        blocked = self.half_hydrated()
+        blocked['blocked'] = True
+        browser = self.browser([self.half_hydrated(), blocked], total=45)
+        with self.assertRaises(WebsiteBlocked):
+            browser.read(search_page()['url'], 'search')
+        self.assertEqual(2, browser.driver.execute_async_script.call_count)

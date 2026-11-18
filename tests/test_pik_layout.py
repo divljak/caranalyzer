@@ -158,6 +158,39 @@ class PageOneRetryTests(unittest.TestCase):
             stored = json.loads(s.query(WebsiteRun).one().report)
             self.assertEqual('WebsiteDOMTimeout', stored['failures'][0]['exception'])
 
+    def test_page_one_retry_is_delayed_on_a_closed_tab_and_counted_once(self):
+        # 17 Nov 2026 shape: both reads half-hydrated. The retry waits 3 min after closing the
+        # stalled tab; the run makes at most one extra page load and keeps 15 s+ spacing.
+        events = []
+        test, failures = self, [self.dom_timeout(), self.dom_timeout()]
+
+        class Browser:
+            def read(self, url, kind):
+                events.append(('read', test.clock))
+                raise failures.pop(0)
+
+            def restart(self):
+                events.append(('restart', test.clock))
+
+        report = sync(self.db, self.store, Browser(), search_pages=3, detail_checks=0,
+                      now=self.now, sleep=self.sleep)
+        self.assertEqual(['read', 'restart', 'read'], [e[0] for e in events])
+        self.assertEqual(events[0][1], events[1][1])  # the stalled tab is closed at once
+        self.assertGreaterEqual((events[2][1] - events[1][1]).total_seconds(), 180)
+        self.assertEqual((2, 1, 'failed'), (report['search_attempted'], report['search_retries'], report['status']))
+        self.assertEqual(180, report['failures'][0]['retry_delay_s'])
+        self.assertNotIn('retry_delay_s', report['failures'][1])
+        with self.sessions() as s:
+            self.assertEqual(2, s.get(WebsiteBudget, 1).search_visits)
+
+    def test_retry_delay_never_follows_a_refusal(self):
+        report, browser = self.run_sync([WebsiteBlocked('Website access was refused')])
+        self.assertEqual(0, browser.restarts)
+        # No time is spent waiting: a refusal pauses the source for 24 h instead.
+        self.assertEqual(datetime(2026, 11, 15, 7, 15), self.clock)
+        self.assertEqual(('paused', 'source_refusal'), (report['status'], report['stopped_reason']))
+        self.assertNotIn('retry_delay_s', report['failures'][0])
+
     def test_navigation_timeout_from_the_driver_is_also_retried(self):
         report, browser = self.run_sync([TimeoutException('renderer timeout')])
         self.assertEqual((1, 1, 'completed'), (browser.restarts, report['search_retries'], report['status']))

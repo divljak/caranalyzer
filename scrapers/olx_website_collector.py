@@ -1,4 +1,4 @@
-"""Read rendered website pages only. No direct OLX API calls; the only retry is one bounded page-1 retry in the caller."""
+"""Read rendered website pages only. No direct OLX API calls; the only retry is one bounded, delayed page-1 retry in the caller."""
 from datetime import datetime
 import json
 import logging
@@ -350,6 +350,11 @@ def parse_detail(page, expected_id):
 
 class WebsiteBrowser:
     DOM_TIMEOUT = 20
+    # A search page that already shows result cards but has not finished hydrating
+    # (e.g. 17 Nov 2026: 50 cards + pagination, no "N oglasa" count after 20 s) keeps
+    # being polled on the SAME loaded page up to this total. No reload, no new visit;
+    # the readiness contract and the 403/429/captcha checks on every poll are unchanged.
+    SEARCH_HYDRATION_TIMEOUT = 45
     SCRIPT_TIMEOUT = 5
     MAX_SCRIPT_RETRIES = 2
 
@@ -447,7 +452,7 @@ class WebsiteBrowser:
         expected_id = listing_id(url) if kind == 'detail' else None
         started = time.monotonic()
         navigation_ms = dom_ms = None
-        navigation_timeout, script_retries = False, 0
+        navigation_timeout, script_retries, hydration_wait = False, 0, False
         previous_status = None
         last_dom, parser_reason = {}, None
         self.driver.get_log('performance')  # Discard stale navigation diagnostics.
@@ -475,6 +480,9 @@ class WebsiteBrowser:
                         'on_request': bool(page.get('on_request'))}
             if kind == 'search':
                 heading = result_count_match(page.get('result_heading', ''))
+                # price_values/title_present above are detail-page fields; these are the search ones.
+                last_dom.update(result_heading_present=bool(heading),
+                                priced_cards=sum(bool(c.get('price')) for c in page.get('cards', [])))
                 if not heading:
                     return False
                 requested = int(parse_qs(urlsplit(url).query).get('page', ['1'])[0])
@@ -508,7 +516,7 @@ class WebsiteBrowser:
             # browser ended up. No page body, seller text or contact data.
             return {'stage': kind, 'url': url, 'navigation_timeout': navigation_timeout,
                     'navigation_ms': navigation_ms, 'dom_ms': dom_ms,
-                    'script_retries': script_retries,
+                    'script_retries': script_retries, 'hydration_wait': hydration_wait,
                     'elapsed_ms': round((time.monotonic() - started) * 1000),
                     'document_status': getattr(self, 'document_status', None),
                     'last_dom': last_dom, 'parser_reason': parser_reason, **self.page_state(),
@@ -525,7 +533,16 @@ class WebsiteBrowser:
             self.check_responses()
             dom_started = time.monotonic()
             try:
-                page = WebDriverWait(self.driver, self.DOM_TIMEOUT).until(ready)
+                try:
+                    page = WebDriverWait(self.driver, self.DOM_TIMEOUT).until(ready)
+                except TimeoutException:
+                    extra = self.SEARCH_HYDRATION_TIMEOUT - self.DOM_TIMEOUT
+                    # Only a search page whose cards have rendered is worth more patience;
+                    # an empty/interstitial page fails at the normal deadline.
+                    if kind != 'search' or not last_dom.get('cards') or extra <= 0:
+                        raise
+                    hydration_wait = True
+                    page = WebDriverWait(self.driver, extra).until(ready)
             except TimeoutException:
                 raise WebsiteDOMTimeout('Reserved visit did not produce a verified DOM') from None
             finally:
@@ -553,7 +570,7 @@ class WebsiteBrowser:
         if page['blocked']:
             raise WebsiteBlocked('Website access was refused')
         page['browser'] = {'navigation_timeout': navigation_timeout, 'script_retries': script_retries,
-                           'navigation_ms': navigation_ms, 'dom_ms': dom_ms,
+                           'hydration_wait': hydration_wait, 'navigation_ms': navigation_ms, 'dom_ms': dom_ms,
                            'elapsed_ms': round((time.monotonic() - started) * 1000)}
         return page
 
