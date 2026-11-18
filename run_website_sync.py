@@ -23,11 +23,21 @@ def utcnow():
 
 
 def sync(db, store, browser, *, search_pages=3, detail_checks=20, delay=15, brand=None, model=None,
-         now=utcnow, sleep=time.sleep, session_prefix=''):
-    """Browser/clock injection lets tests verify the entire run without visiting OLX."""
+         now=utcnow, sleep=time.sleep, session_prefix='', page_order='reverse'):
+    """Browser/clock injection lets tests verify the entire run without visiting OLX.
+
+    The date-sorted feed moves down while pages are read, so reading page 1 first
+    shows the same ads again on page 2/3. For the unfiltered market scope the
+    pages are therefore read deepest first (N..1): ads only move down, so an ad
+    read on a deeper page cannot reappear on a shallower one, and page 1 (the
+    freshest evidence) is read last. Filtered scopes can be a single short page
+    whose size is unknown before reading, so they keep page order 1..N.
+    """
     query = search_url(1, brand, model)
+    reverse = page_order == 'reverse' and not (brand or model)
     report = dict(status='running', search_attempted=0, detail_attempted=0, discovery_complete=0,
                   details_completed=0, observations=0, new_listings=0, errors=0,
+                  page_order='reverse' if reverse else 'forward',
                   scope=query, coverage='bounded_newest_sample', source_total=None, page_stats=[],
                   known_overlap=0, rejected=0, stopped_reason=None, sale_inference=False,
                   repeated_across_pages=0, seller_types={},
@@ -64,10 +74,12 @@ def sync(db, store, browser, *, search_pages=3, detail_checks=20, delay=15, bran
         try:
             return visit(url, 'search', page_number)
         except (WebsiteDOMTimeout, WebDriverException) as exc:
-            # One bounded retry, page 1 only, on navigation/DOM timeout or a
+            # One bounded retry, page 1 or the run's first read, on navigation/DOM timeout or a
             # renderer failure. Refusals (403/429/challenge) are WebsiteBlocked
             # and never reach this branch.
-            if page_number != 1 or report['search_retries']:
+            # The run's very first search read counts as the cold-browser read even when page order is
+            # reversed (then it is the deepest page); page 1 stays eligible when it is read last.
+            if report['search_retries'] or not (page_number == 1 or report['search_attempted'] == 1):
                 raise
             report['failures'].append(failure(exc))
             report['search_retries'] += 1
@@ -82,7 +94,8 @@ def sync(db, store, browser, *, search_pages=3, detail_checks=20, delay=15, bran
         remaining_details = max(0, detail_checks - budget['detail_used'])
         if remaining_search and not (budget['pause_until'] and budget['pause_until'] > started.isoformat() + 'Z'):
             baseline = store.discovery_baseline(query, started)
-        for page_number in range(1, remaining_search + 1):
+        order = range(remaining_search, 0, -1) if reverse else range(1, remaining_search + 1)
+        for page_number in order:
             page = parse_search(read_search(page_number), page_number, query)
             ids = {item['listing_id'] for item in page['listings']}
             fingerprint = tuple(sorted(ids))
@@ -115,8 +128,9 @@ def sync(db, store, browser, *, search_pages=3, detail_checks=20, delay=15, bran
                 saved_page['ids'].append(item['listing_id'])
                 store.note_listed(item['listing_id'], observed_at)
             validated_pages += 1
+            # Reverse order reads the deepest page first, so a partial 'seen' set can never prove the end.
             terminal_page = page['source_total'] == 0 or (
-                page['last_page'] == page_number and len(seen) >= page['source_total'])
+                not reverse and page['last_page'] == page_number and len(seen) >= page['source_total'])
             if terminal_page:
                 break
             if page['last_page'] == page_number and page_number < remaining_search:

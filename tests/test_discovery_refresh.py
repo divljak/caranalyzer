@@ -25,6 +25,14 @@ class WindowTests(unittest.TestCase):
                                 self.baseline() if baseline is True else baseline,
                                 complete=complete, terminal=terminal, rejected=rejected, started_at=NOW)
 
+    def test_pages_read_deepest_first_are_assessed_in_page_order(self):
+        pages = [{'page': 3, 'ids': [str(n) for n in range(5)]}, {'page': 2, 'ids': [str(n) for n in range(5, 10)]},
+                 {'page': 1, 'ids': ['100', '101', '102', '103', '104']}]
+        result = discovery_window(pages, self.baseline(), complete=True, terminal=False, rejected=0, started_at=NOW)
+        self.assertEqual([1, 2, 3], [p['page'] for p in result['pages']])
+        # Pages 3 and 2 are adjacent and both overlap the prior window; page 1 breaks the pair only if it did not.
+        self.assertTrue(result['overlap_signal'])
+
     def test_one_familiar_ad_and_old_database_overlap_are_not_a_boundary(self):
         result = self.assess([['0','100','101','102','103'], ['104','105','106','107','108']])
         self.assertEqual('possible_gap', result['status'])

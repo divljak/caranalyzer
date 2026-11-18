@@ -131,7 +131,7 @@ class PageOneRetryTests(unittest.TestCase):
 
         browser = Browser()
         report = sync(self.db, self.store, browser, search_pages=search_pages, detail_checks=0,
-                      now=self.now, sleep=self.sleep)
+                      now=self.now, sleep=self.sleep, page_order='forward')
         return report, browser
 
     @staticmethod
@@ -198,7 +198,8 @@ class PageOneRetryTests(unittest.TestCase):
                 self.restarts += 1
 
         browser = Page2Fails()
-        report = sync(self.db, self.store, browser, search_pages=3, detail_checks=0, now=self.now, sleep=self.sleep)
+        report = sync(self.db, self.store, browser, search_pages=3, detail_checks=0, now=self.now, sleep=self.sleep,
+                      page_order='forward')
         self.assertEqual((0, 2, 'partial'), (browser.restarts, len(browser.calls), report['status']))
         self.assertEqual(2, report['failures'][0]['page'])
 

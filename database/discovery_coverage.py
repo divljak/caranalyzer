@@ -14,7 +14,8 @@ def discovery_window(pages, baseline, *, complete, terminal, rejected, started_a
     prior = set((baseline or {}).get('ids', []))
     previous = None
     page_metrics, ids, substantial_overlap_pages = [], set(), []
-    for page in pages:
+    # Pages may be read deepest-first; overlap adjacency and metrics are by page number.
+    for page in sorted(pages, key=lambda p: p['page']):
         current = set(page['ids'])
         overlap = current & prior
         strong = len(current) >= 5 and len(overlap) / len(current) >= .8
@@ -62,7 +63,8 @@ def request_efficiency(report, pages):
     return {'search_visits': searches, 'detail_visits': details,
             'saved_discovery_observations': discovery,
             # The same ad on two pages is stored once; this counts the card slots such repeats used up
-            # (date-sorted pages shift while they are read, and promoted ads can recur).
+            # (date-sorted pages shift while they are read, and promoted ads can recur;
+            # deepest-first reading leaves mostly bumped ads, which move up).
             'cross_page_repeats': cards - discovery,
             'saved_direct_observations': report['observations'] - discovery,
             'new_database_ids': report['new_listings'],
