@@ -36,7 +36,6 @@ from telegram_bot import (
 MAX_DIGEST_CHARS = 4000  # Telegram allows 4096; HTML tags count here, so this is conservative
 DIGEST_CUTS = 1
 DIGEST_STANDOUTS = 2
-HOT_WINDOW_HOURS = 24
 STALE_CLEAN_DAYS = 14
 PRICE_WINDOW_DAYS = 7
 SEND_HOUR = 9
@@ -136,7 +135,8 @@ SEEN_SQL = """
   ORDER BY r.first_seen_at DESC,discount_pct DESC,r.listing_id
   LIMIT 2
 """
-# "Najviše novih": the brand with the most ads our collector saw for the first time in the last 24 hours.
+# "Najviše novih": the brand with the most ads our collector saw for the first time in the latest run
+# window (the same window as SEEN_SQL and the status line).
 # The collector does not record when an ad leaves search, so disappearance is not measured here.
 HOT_SQL = """
   SELECT coalesce(nullif(trim(coalesce(l.make,c.make)),''),'Nepoznato') AS make,
@@ -146,7 +146,7 @@ HOT_SQL = """
   LEFT JOIN dealer_vehicle_labels l USING(listing_id)
   WHERE c.source='olx.ba'
     AND c.collection_method IN ('olx_api','olx_website')
-    AND c.first_seen_at>=:since AND c.first_seen_at<=:as_of
+    AND c.first_seen_at BETWEEN :started AND :finished
   GROUP BY 1
   ORDER BY n DESC,make
   LIMIT 1
@@ -503,7 +503,7 @@ def render_digest(evidence, tz=SARAJEVO):
 
     hot = evidence.get("hot")
     if hot and hot.get("make"):
-        parts.append(_row(esc(f"🔥 Najviše novih ({HOT_WINDOW_HOURS} h): {hot['make']} ({int(hot.get('n') or 0)} "
+        parts.append(_row(esc(f"🔥 Najviše novih: {hot['make']} ({int(hot.get('n') or 0)} "
                               f"od {int(hot.get('total') or 0)})"), optional=True))
 
     parts.append(_row("<i>" + esc("Tražene cijene, ne prodajne. Novo = prvi put viđeno kod nas, "
@@ -521,13 +521,12 @@ def load_digest_evidence(engine, now):
         latest = connection.execute(text(SNAPSHOT_SQL)).scalar()
         prices = _one(connection, PRICE_SQL, {"cutoff": cutoff, "as_of": as_of}) or {}
         cuts = _all(connection, CUTS_SQL, {"cutoff": cutoff, "as_of": as_of, "limit": DIGEST_CUTS})
-        hot = _one(connection, HOT_SQL, {"since": as_of - timedelta(hours=HOT_WINDOW_HOURS), "as_of": as_of})
         seen = []
+        hot = None
         if run and run.get("started_at") and run.get("finished_at"):
-            seen = _all(connection, SEEN_SQL, {
-                "started": run["started_at"],
-                "finished": run["finished_at"],
-            })
+            window = {"started": run["started_at"], "finished": run["finished_at"]}
+            seen = _all(connection, SEEN_SQL, window)
+            hot = _one(connection, HOT_SQL, window)
     return {
         "generated_at": as_of,
         "run": run,

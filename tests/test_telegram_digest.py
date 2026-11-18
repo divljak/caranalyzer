@@ -137,7 +137,7 @@ class DigestRendererTests(unittest.TestCase):
             '🆕 <a href="https://olx.ba/artikal/2001">Audi A4 2015</a>: <b>22.000 KM</b> · '
             "18% ispod medijana 26.800 KM za 6 sličnih · 160.000 km", lines[3])
         self.assertIn("16% ispod medijana 19.500 KM za 5 sličnih · 120.000 km", lines[4])
-        self.assertEqual("🔥 Najviše novih (24 h): Volkswagen (23 od 110)", lines[5])
+        self.assertEqual("🔥 Najviše novih: Volkswagen (23 od 110)", lines[5])
         self.assertEqual(7, len(lines))
         self.assertTrue(lines[6].startswith("<i>Tražene cijene, ne prodajne."))
         self.assertIn("ne datum objave", lines[6])
@@ -234,11 +234,43 @@ class DigestRendererTests(unittest.TestCase):
 
     def test_hot_query_counts_new_ads_per_brand_only(self):
         sql = " ".join(HOT_SQL.split()).lower()
-        self.assertIn("first_seen_at>=:since", sql)
+        self.assertIn("c.first_seen_at between :started and :finished", sql)
         self.assertNotIn("missing", sql)
         self.assertNotIn("is_active", sql)
 
-    def test_load_evidence_runs_hot_query_with_a_24h_window(self):
+    def test_load_evidence_runs_hot_query_for_the_latest_run_window(self):
+        calls = []
+        started, finished = utc("2026-11-05T07:10:00"), utc("2026-11-05T07:55:00")
+
+        class Conn:
+            def execute(self, statement, params=None):
+                calls.append((str(statement), params))
+                class Rows(list):
+                    def first(self):
+                        if "started_at" in str(statement) and "website_collection_runs" in str(statement):
+                            return {"started_at": started, "finished_at": finished, "status": "ok",
+                                    "new_listings": 63}
+                        return None
+
+                return Mock(scalar=Mock(return_value=None), mappings=Mock(return_value=Rows()))
+
+        class Engine:
+            def begin(self):
+                outer = Mock()
+                outer.__enter__ = Mock(return_value=Conn())
+                outer.__exit__ = Mock(return_value=False)
+                return outer
+
+        result = load_digest_evidence(Engine(), utc("2026-11-05T08:45:00"))
+        hot_calls = [params for sql, params in calls if "sum(count(*)) over ()" in sql.lower()]
+        self.assertEqual(1, len(hot_calls))
+        self.assertEqual(started, hot_calls[0]["started"])
+        self.assertEqual(finished, hot_calls[0]["finished"])
+        self.assertNotIn("since", hot_calls[0])
+        self.assertIsNone(result["hot"])
+        self.assertTrue(any("statement_timeout" in sql for sql, _ in calls))
+
+    def test_hot_query_is_skipped_without_a_finished_run(self):
         calls = []
 
         class Conn:
@@ -258,11 +290,9 @@ class DigestRendererTests(unittest.TestCase):
                 return outer
 
         result = load_digest_evidence(Engine(), utc("2026-11-05T08:45:00"))
-        hot_calls = [params for sql, params in calls if "first_seen_at>=:since" in sql]
-        self.assertEqual(1, len(hot_calls))
-        self.assertEqual(utc("2026-11-04T08:45:00"), hot_calls[0]["since"])
+        self.assertFalse(any("sum(count(*)) over ()" in sql.lower() for sql, _ in calls))
         self.assertIsNone(result["hot"])
-        self.assertTrue(any("statement_timeout" in sql for sql, _ in calls))
+        self.assertEqual([], result["first_seen"])
 
 
 class DigestDeliveryTests(unittest.TestCase):
