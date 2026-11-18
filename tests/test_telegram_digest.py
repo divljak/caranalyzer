@@ -18,6 +18,8 @@ from telegram_digest import (
     SEEN_SQL,
     DigestConfig,
     FileLedger,
+    HOT_SQL,
+    load_digest_evidence,
     MemoryLedger,
     cron_authorized,
     handle_digest,
@@ -83,6 +85,7 @@ def evidence(**overrides):
                 "observed_at": utc("2026-11-03T09:00:00"),
             },
         ],
+        "hot": {"make": "Volkswagen", "n": 23, "total": 110},
         "first_seen": [
             {
                 "listing_id": "2001",
@@ -120,34 +123,37 @@ def visible(html_text):
 
 
 class DigestRendererTests(unittest.TestCase):
-    def test_partial_stale_digest_is_friendly_html_and_honest(self):
+    def test_partial_stale_digest_is_compact_and_honest(self):
         text = render_digest(evidence(), SARAJEVO)
         self.assertIsInstance(text, Html)
-        self.assertLessEqual(len(text), 4096)
         lines = text.split("\n")
         self.assertEqual("🚗 <b>Garaža · četvrtak 5. nov</b>", lines[0])
-        self.assertEqual("⚠️ Djelimičan prolaz kolektora · 47 novih oglasa · 5 grešaka", lines[1])
-        self.assertIn("⚠️ Zadnji potpuno čist prolaz: 1. okt, 19:31", text)
-        self.assertIn("📉 <b>Padovi cijena (7 dana): 3</b>", text)
-        self.assertIn('• <a href="https://olx.ba/artikal/1001">Volkswagen Golf 2016</a>: '
-                      "<b>18.500 KM</b> <s>19.200</s> (−4%)", text)
-        self.assertIn("• …još 1", text)
-        self.assertNotIn("https://olx.ba/artikal/1001\n", visible(text))  # no raw URLs on screen
+        self.assertEqual("⚠️ Djelimičan prolaz kolektora · 47 novih oglasa · 5 grešaka"
+                         " · cijene orijentaciono (zadnji čist prolaz 1. okt, 19:31)", lines[1])
+        self.assertEqual(
+            '📉 Najveći pad (7 dana): <a href="https://olx.ba/artikal/1001">Volkswagen Golf 2016</a> '
+            "−700 KM → <b>18.500 KM</b> <s>19.200</s> (−4%)", lines[2])
+        self.assertEqual(
+            '🆕 <a href="https://olx.ba/artikal/2001">Audi A4 2015</a>: <b>22.000 KM</b> · '
+            "18% ispod medijana 26.800 KM za 6 sličnih · 160.000 km", lines[3])
+        self.assertIn("16% ispod medijana 19.500 KM za 5 sličnih · 120.000 km", lines[4])
+        self.assertEqual("🔥 Najviše novih (24 h): Volkswagen (23 od 110)", lines[5])
+        self.assertEqual(7, len(lines))
+        self.assertTrue(lines[6].startswith("<i>Tražene cijene, ne prodajne."))
+        self.assertIn("ne datum objave", lines[6])
+        for gone in ("Detalji kolektora", "<blockquote", "…još", "Padovi cijena", "Najzanimljivije"):
+            self.assertNotIn(gone, text)
         self.assertNotIn("olx.ba", visible(text))
-        self.assertIn("🆕 <b>Najzanimljivije novo</b>", text)
-        self.assertIn('<a href="https://olx.ba/artikal/2001">Audi A4 2015</a>: <b>22.000 KM</b>', text)
-        self.assertIn("18% ispod medijana 26.800 KM za 6 sličnih", text)
-        self.assertIn("<blockquote expandable>🔧 Detalji kolektora", text)
-        self.assertTrue(text.endswith("</blockquote>"))
-        details = text[text.index("<blockquote"):]
-        for fact in ("110 zapažanja", "47 prvi put viđeno kod nas", "Posjete: 4 pretrage", "214 oglasa"):
-            self.assertIn(fact, details)
-        self.assertIn("<i>Tražene cijene, ne prodajne.", text)
-        self.assertIn("Nestanak iz pretrage nije prodaja", text)
-        self.assertIn("ne datum objave", text)
         lowered = visible(text).lower()
         for banned in ("sold", "prodat", "newly posted", "novo objav", "deal", "preporuku", "najbolj"):
             self.assertNotIn(banned, lowered)
+
+    def test_only_the_single_biggest_drop_and_two_standouts_are_shown(self):
+        extra = dict(evidence()["first_seen"][0], listing_id="2003")
+        text = render_digest(evidence(first_seen=evidence()["first_seen"] + [extra]), SARAJEVO)
+        self.assertEqual(1, text.count("📉"))
+        self.assertEqual(2, text.count("🆕"))
+        self.assertNotIn("Škoda", text)
 
     def test_clean_run_is_one_green_line_and_hides_the_stale_warning(self):
         text = render_digest(evidence(
@@ -165,8 +171,7 @@ class DigestRendererTests(unittest.TestCase):
             },
         ), SARAJEVO)
         self.assertEqual("✅ Sve radi · 76 novih oglasa · 0 grešaka", text.split("\n")[1])
-        self.assertNotIn("⚠️", text)  # a warning sign appears only when something is wrong
-        self.assertNotIn("Zadnji potpuno čist prolaz:", text.split("<blockquote")[0])
+        self.assertNotIn("⚠️", text)
 
     def test_a_run_limited_only_by_the_page_budget_reads_as_healthy(self):
         run = dict(evidence()["run"], status="partial", errors=0,
@@ -174,22 +179,29 @@ class DigestRendererTests(unittest.TestCase):
         text = render_digest(evidence(run=run, clean_at=utc("2026-11-04T17:31:22")), SARAJEVO)
         self.assertEqual("✅ Sve radi · 47 novih oglasa · 0 grešaka · dnevni budžet stranica iskorišten",
                          text.split("\n")[1])
-        self.assertIn("(dnevni budžet stranica iskorišten)", text)
         self.assertNotIn("⚠️", text)
 
-    def test_no_interesting_section_without_grounded_standouts(self):
-        text = render_digest(evidence(first_seen=[]), SARAJEVO)
-        self.assertNotIn("Najzanimljivije", text)
+    def test_missing_standouts_and_hot_are_omitted(self):
+        text = render_digest(evidence(first_seen=[], hot=None), SARAJEVO)
+        self.assertNotIn("🆕", text)
+        self.assertNotIn("🔥", text)
+        self.assertIn("📉 Najveći pad", text)
+        self.assertEqual(4, len(text.split("\n")))
 
-    def test_names_are_escaped_and_long_digests_stay_under_the_limit(self):
+    def test_no_drop_gets_a_short_line(self):
+        text = render_digest(evidence(notable_cuts=[], price_drops=0), SARAJEVO)
+        self.assertIn("📉 Nema padova cijena (7 dana)", text)
+
+    def test_names_are_escaped_and_the_message_stays_short(self):
         cut = {"listing_id": "9<9", "make": "A&B <script>", "model": "M\"x", "year": 2020,
                "asking_price": 1000, "previous_price": 2000, "observed_at": utc("2026-11-04T09:00:00")}
-        text = render_digest(evidence(notable_cuts=[cut] * 400, price_drops=400), SARAJEVO)
-        self.assertLessEqual(len(text), 4000)
+        text = render_digest(evidence(notable_cuts=[cut] * 400, price_drops=400,
+                                      hot={"make": "<b>X</b>", "n": 3, "total": 9}), SARAJEVO)
+        self.assertLessEqual(len(text), 1500)
         self.assertNotIn("<script>", text)
         self.assertIn("A&amp;B &lt;script&gt; M&quot;x 2020", text)
         self.assertIn('href="https://olx.ba/artikal/9%3C9"', text)
-        self.assertTrue(text.endswith("</blockquote>"))  # optional rows were dropped, not the tail
+        self.assertIn("&lt;b&gt;X&lt;/b&gt; (3 od 9)", text)
 
     def test_empty_digest_states_that_nothing_was_observed(self):
         text = render_digest({
@@ -204,16 +216,53 @@ class DigestRendererTests(unittest.TestCase):
             "first_seen": [],
         }, SARAJEVO)
         self.assertIn("⚠️ Nema završenog prolaza kolektora", text)
-        self.assertIn("Nema zabilježenih padova", text)
-        self.assertIn("nema zapisa", text)
+        self.assertIn("Nema padova cijena", text)
         self.assertNotIn("sold", text.lower())
 
     def test_queries_do_not_infer_sales_or_publish_dates(self):
-        blob = "\n".join((RUN_SQL, CLEAN_SQL, CUTS_SQL, SEEN_SQL)).lower()
+        blob = "\n".join((RUN_SQL, CLEAN_SQL, CUTS_SQL, SEEN_SQL, HOT_SQL)).lower()
         self.assertIn("first_seen_at", blob)
         self.assertIn("asking_price<t.previous_price", blob.replace(" ", ""))
         for banned in ("sold", "published_date", "posted_date"):
             self.assertNotIn(banned, blob)
+
+    def test_standout_query_orders_newest_first_and_limits_to_two(self):
+        sql = " ".join(SEEN_SQL.split())
+        self.assertIn("ORDER BY r.first_seen_at DESC,discount_pct DESC", sql)
+        self.assertTrue(sql.endswith("LIMIT 2"))
+        self.assertIn("r.price<=0.85*k.med_price", sql)
+
+    def test_hot_query_counts_new_ads_per_brand_only(self):
+        sql = " ".join(HOT_SQL.split()).lower()
+        self.assertIn("first_seen_at>=:since", sql)
+        self.assertNotIn("missing", sql)
+        self.assertNotIn("is_active", sql)
+
+    def test_load_evidence_runs_hot_query_with_a_24h_window(self):
+        calls = []
+
+        class Conn:
+            def execute(self, statement, params=None):
+                calls.append((str(statement), params))
+                class Rows(list):
+                    def first(self):
+                        return None
+
+                return Mock(scalar=Mock(return_value=None), mappings=Mock(return_value=Rows()))
+
+        class Engine:
+            def begin(self):
+                outer = Mock()
+                outer.__enter__ = Mock(return_value=Conn())
+                outer.__exit__ = Mock(return_value=False)
+                return outer
+
+        result = load_digest_evidence(Engine(), utc("2026-11-05T08:45:00"))
+        hot_calls = [params for sql, params in calls if "first_seen_at>=:since" in sql]
+        self.assertEqual(1, len(hot_calls))
+        self.assertEqual(utc("2026-11-04T08:45:00"), hot_calls[0]["since"])
+        self.assertIsNone(result["hot"])
+        self.assertTrue(any("statement_timeout" in sql for sql, _ in calls))
 
 
 class DigestDeliveryTests(unittest.TestCase):
@@ -310,11 +359,7 @@ class DigestDeliveryTests(unittest.TestCase):
         self.assertEqual("HTML", payload["parse_mode"])
         self.assertTrue(payload["disable_web_page_preview"])
         self.assertEqual({"is_disabled": True}, payload["link_preview_options"])
-        rows = [[button["text"] for button in row] for row in payload["reply_markup"]["inline_keyboard"]]
-        self.assertEqual([["📉 Svi padovi", "🆕 Novi oglasi"], ["🔍 Pretraga"], ["Market", "Compare", "Following"]],
-                         rows)
-        data = [button.get("callback_data") for row in payload["reply_markup"]["inline_keyboard"][:2] for button in row]
-        self.assertEqual(["drops", "latest", "search"], data)
+        self.assertNotIn("reply_markup", payload)
 
     def test_failed_send_can_be_retried(self):
         ledger = MemoryLedger()
