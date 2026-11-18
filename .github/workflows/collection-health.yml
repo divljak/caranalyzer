@@ -1,8 +1,9 @@
 name: Collection health check
 
-# Safety net for the daily collection. Runs once a day after the VPS trigger (08:15 Sarajevo) and
-# the 09:40 UTC fallback should both be done, and alerts Telegram if no real (non-verify) daily
-# collection succeeded in the last 26 hours. One scheduled run per day = at most one alert a day.
+# Safety net for the twice-daily collection. Two scheduled checks a day, one per slot: 10:30 UTC (after the
+# 08:15 Sarajevo trigger and the 09:40 UTC fallback) needs a real (non-verify) morning run today (UTC);
+# 23:15 UTC (after the ~20:15 trigger and the 21:40 UTC fallback) needs an evening run today. A manual
+# dispatch keeps the old rule: a real run succeeded in the last 26 hours. At most one alert per check.
 # Needs the GitHub secrets TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID (same values the bot uses).
 
 on:
@@ -15,6 +16,8 @@ on:
   schedule:
     # 10:30 UTC = 11:30 CET / 12:30 CEST; the fallback run has finished (~15 min) well before.
     - cron: "30 10 * * *"
+    # 23:15 UTC: the evening fallback (21:40 UTC, ~15 min) has finished well before.
+    - cron: "15 23 * * *"
 
 permissions:
   contents: read
@@ -27,11 +30,12 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Python tests
-        run: python3 -m unittest tests.test_collection_alert
+        run: python3 -m unittest tests.test_collection_alert tests.test_collection_slot
       - name: Alert if no recent successful collection
         env:
           GH_TOKEN: ${{ github.token }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           DRY: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '--dry-run' || '' }}
-        run: python3 scripts/collection_alert.py stale $DRY
+          SLOT: ${{ github.event_name == 'schedule' && (github.event.schedule == '15 23 * * *' && '--slot evening' || '--slot morning') || '' }}
+        run: python3 scripts/collection_alert.py stale $SLOT $DRY

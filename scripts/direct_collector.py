@@ -11,6 +11,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from database.collection_budget import MIN_SPACING_SECONDS, config_from_env, normalize_slot, plan_run
 from database.collector_connection import LockedSession, private_engine, verify_connection
 from database.run_outcome import exit_code
 from scripts.backup_supabase import backup
@@ -85,7 +86,13 @@ def main(argv=None):
     parser.add_argument('--backup-credentials', type=Path, required=True)
     parser.add_argument('--state-dir', type=Path, required=True)
     parser.add_argument('--verify-only', action='store_true')
+    parser.add_argument('--slot', default=os.environ.get('COLLECTOR_SLOT', 'auto'),
+                        help='morning | evening | auto: how the day\'s detail budget is split (see database/collection_budget.py)')
     args = parser.parse_args(argv)
+    try:
+        slot, cfg = normalize_slot(args.slot), config_from_env()
+    except ValueError as exc:
+        parser.error(str(exc))
     os.environ['CAR_ANALYZER_COLLECTOR'] = 'supabase'
     os.environ['COLLECTOR_CREDENTIAL_FILE'] = str(args.credentials)
     # Errors are reduced to classes below; neither URLs nor SQL parameters are logged.
@@ -111,14 +118,17 @@ def main(argv=None):
                 expire_interrupted(c)
                 budget = store.budget(utcnow())
                 paused = budget['pause_until'] and budget['pause_until'] > utcnow().isoformat() + 'Z'
-                exhausted = budget['search_used'] >= 3 and budget['detail_used'] >= 20
+                plan = plan_run(slot, budget, cfg)
+                result['budget_plan'] = plan
                 # Log honest skipped attempts without launching a browser or spending budgets.
-                if paused or exhausted:
+                if paused or plan['exhausted']:
                     report = sync(db_manager, store, None, session_prefix='direct-')
                 else:
                     with WebsiteBrowser() as browser:
-                        report = sync(db_manager, store, browser, search_pages=3, detail_checks=20,
-                                      delay=15, session_prefix='direct-')
+                        report = sync(db_manager, store, browser, search_pages=plan['search_pages'],
+                                      detail_checks=plan['detail_checks'], search_day_cap=plan['search_day_cap'],
+                                      detail_day_cap=plan['detail_day_cap'], delay=MIN_SPACING_SECONDS,
+                                      session_prefix='direct-')
                 result['collection'] = report
                 status = exit_code(report)  # 0 also for a run limited only by the page budget
                 with c.begin():

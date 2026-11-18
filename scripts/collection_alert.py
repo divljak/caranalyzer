@@ -17,6 +17,9 @@ import sys
 import urllib.parse
 import urllib.request
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root, so this runs as a script too
+from scripts.collection_slot import SLOTS, window_start  # noqa: E402
+
 WORKFLOW = 'daily-collect.yml'
 REQUIRED = ('TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID')
 
@@ -29,10 +32,13 @@ def is_verify(run):
     return 'verify only' in (run.get('displayTitle') or '')
 
 
-def evaluate_runs(runs, now, max_age=timedelta(hours=26)):
-    """Return None when a real (non-verify) collection succeeded in the window, else an alert dict."""
+def evaluate_runs(runs, now, max_age=timedelta(hours=26), slot=None):
+    """Return None when a real (non-verify) collection succeeded in the window, else an alert dict.
+
+    With ``slot`` (morning | evening) the window is that slot's part of today (UTC) instead of the last
+    ``max_age`` hours, so a good morning run cannot hide a missing evening run (see collection_slot.py)."""
     real = [r for r in runs if not is_verify(r)]
-    cutoff = now - max_age
+    cutoff = now - max_age if slot is None else window_start(slot, now)
     if any(r.get('conclusion') == 'success' and parse_time(r['createdAt']) >= cutoff for r in real):
         return None
     recent = sorted((r for r in real if parse_time(r['createdAt']) >= cutoff),
@@ -44,9 +50,11 @@ def evaluate_runs(runs, now, max_age=timedelta(hours=26)):
     return {'reason': f'last run did not succeed ({state})', 'url': last.get('url')}
 
 
-def build_message(kind, reason, url, hours=26):
+def build_message(kind, reason, url, hours=26, slot=None):
     if kind == 'failure':
         head = 'Car Analyzer: daily collection FAILED'
+    elif slot:
+        head = f'Car Analyzer: no successful {slot} collection today (UTC)'
     else:
         head = f'Car Analyzer: no successful daily collection in the last {hours}h'
     lines = [head, reason]
@@ -82,18 +90,19 @@ def main(argv=None, environ=None, now=None, runs_loader=gh_runs, sender=send):
     p.add_argument('--run-url')
     p.add_argument('--reason', default='a step failed; open the run for the log')
     p.add_argument('--max-age-hours', type=int, default=26)
+    p.add_argument('--slot', choices=SLOTS, help='stale: judge only this slot of today (UTC) instead of the last N hours')
     p.add_argument('--dry-run', action='store_true')
     args = p.parse_args(argv)
     now = now or datetime.now(timezone.utc)
     if args.kind == 'failure':
         reason, url = args.reason, args.run_url
     else:
-        verdict = evaluate_runs(runs_loader(), now, timedelta(hours=args.max_age_hours))
+        verdict = evaluate_runs(runs_loader(), now, timedelta(hours=args.max_age_hours), args.slot)
         if verdict is None:
             print('Healthy: a daily collection succeeded in the window; no alert.')
             return 0
         reason, url = verdict['reason'], verdict['url']
-    text = build_message(args.kind, reason, url, args.max_age_hours)
+    text = build_message(args.kind, reason, url, args.max_age_hours, args.slot if args.kind == 'stale' else None)
     if args.dry_run:
         print('DRY RUN, not sent. Message:\n' + text)
         return 0

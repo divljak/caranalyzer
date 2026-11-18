@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from sqlalchemy import Column, Date, DateTime, ForeignKey, Integer, String, Text, func, text
 from sqlalchemy.orm import sessionmaker
 
+from database.collection_budget import HARD_MAX_DETAIL_PER_DAY, HARD_MAX_SEARCH_PER_DAY, MIN_SPACING_SECONDS
 from database.models import Base, CarListing, ListingSnapshot
 
 
@@ -113,16 +114,21 @@ class WebsiteStore:
     def reserve(self, kind, now, search_limit, detail_limit, min_spacing, retry_allowance=0):
         """Count attempts BEFORE navigation; failed visits and reruns consume budget.
 
+        search_limit / detail_limit are absolute ceilings on today's (UTC) visit counts, not per-run
+        amounts: the caller adds what the day has already used (see database/collection_budget.py).
+
         retry_allowance=1 is only for the single bounded page-1 retry: it lets that
         retry be counted without costing the run its last discovery page.
         """
         if kind not in {'search', 'detail'}:
             raise ValueError('Unknown visit type')
-        if not 0 <= search_limit <= 3 or not 0 <= detail_limit <= 50 or min_spacing < 15:
-            raise ValueError('Pilot ceilings are 3 search pages, 50 ad pages, and at least 15 seconds between visits')
+        if (not 0 <= search_limit <= HARD_MAX_SEARCH_PER_DAY or not 0 <= detail_limit <= HARD_MAX_DETAIL_PER_DAY
+                or min_spacing < MIN_SPACING_SECONDS):
+            raise ValueError(f'Ceilings are {HARD_MAX_SEARCH_PER_DAY} search pages, {HARD_MAX_DETAIL_PER_DAY} ad pages '
+                             f'a day, and at least {MIN_SPACING_SECONDS} seconds between visits')
         if retry_allowance not in (0, 1) or (retry_allowance and kind != 'search'):
             raise ValueError('Only one extra search visit is allowed, for the page-1 retry')
-        search_limit += retry_allowance
+        search_limit = min(search_limit + retry_allowance, HARD_MAX_SEARCH_PER_DAY)  # the hard ceiling includes the retry
         with self.sessions.begin() as session:
             row = session.query(WebsiteBudget).filter_by(id=1).with_for_update().first()
             if row is None:

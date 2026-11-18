@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
-# Ask GitHub Actions to run the daily collection (workflow_dispatch). This host does
-# not visit OLX and holds no database credentials; it holds only a fine-grained token
+# Ask GitHub Actions to run a daily collection (workflow_dispatch), twice a day: morning and evening slot.
+#   car-analyzer-dispatch [collect|verify] [auto|morning|evening]
+# auto (default) picks the slot from the Europe/Sarajevo clock: before 14:00 = morning (reason vps-timer),
+# from 14:00 = evening (reason vps-timer-evening). The workflow reads "evening" in the reason, so no new
+# workflow input is sent and the same script works against any version of daily-collect.yml.
+#
+# This host does not visit OLX and holds no database credentials; it holds only a fine-grained token
 # limited to Actions: read and write on divljak/caranalyzer.
 set -euo pipefail
 umask 077
@@ -9,15 +14,23 @@ REPO="${CAR_ANALYZER_REPO:-divljak/caranalyzer}"
 WORKFLOW="${CAR_ANALYZER_WORKFLOW:-daily-collect.yml}"
 REF="${CAR_ANALYZER_REF:-main}"
 MODE="${1:-collect}"                     # collect | verify
+SLOT="${2:-auto}"                        # auto | morning | evening
 TOKEN_FILE="${CAR_ANALYZER_DISPATCH_TOKEN_FILE:-/etc/car-analyzer/github-dispatch-token}"
 
 [[ "$MODE" == collect || "$MODE" == verify ]] || { echo "Mode must be collect or verify." >&2; exit 2; }
+[[ "$SLOT" == auto || "$SLOT" == morning || "$SLOT" == evening ]] || { echo "Slot must be auto, morning or evening." >&2; exit 2; }
+if [[ "$SLOT" == auto ]]; then
+  hour="$(TZ=Europe/Sarajevo date +%H)"
+  if (( 10#$hour >= 14 )); then SLOT=evening; else SLOT=morning; fi
+fi
+REASON=vps-timer
+[[ "$SLOT" == evening && "$MODE" == collect ]] && REASON=vps-timer-evening
 [[ -r "$TOKEN_FILE" ]] || { echo "Token file $TOKEN_FILE is missing; see docs/DAILY_COLLECTION.md." >&2; exit 2; }
 [[ "$(stat -c %a "$TOKEN_FILE")" == 600 ]] || { echo "Token file must be mode 600." >&2; exit 2; }
 token="$(tr -d '[:space:]' < "$TOKEN_FILE")"
 [[ -n "$token" ]] || { echo "Token file is empty." >&2; exit 2; }
 
-body="$(printf '{"ref":"%s","inputs":{"reason":"vps-timer","mode":"%s"}}' "$REF" "$MODE")"
+body="$(printf '{"ref":"%s","inputs":{"reason":"%s","mode":"%s"}}' "$REF" "$REASON" "$MODE")"
 url="https://api.github.com/repos/${REPO}/actions/workflows/${WORKFLOW}/dispatches"
 
 for attempt in 1 2 3; do
@@ -27,7 +40,7 @@ for attempt in 1 2 3; do
     --header 'Accept: application/vnd.github+json' --header 'X-GitHub-Api-Version: 2022-11-28' \
     --header 'User-Agent: car-analyzer-dispatch' --request POST --data "$body" "$url" || echo 000)"
   case "$status" in
-    204|200) echo "Dispatched ${WORKFLOW} on ${REF} (mode=${MODE}) at $(date -u +%FT%TZ)."; exit 0 ;;
+    204|200) echo "Dispatched ${WORKFLOW} on ${REF} (mode=${MODE}, reason=${REASON}) at $(date -u +%FT%TZ)."; exit 0 ;;
     401|403|404|422) echo "GitHub refused the dispatch (HTTP ${status}); check the token scope/expiry and workflow name." >&2; exit 1 ;;
   esac
   echo "Dispatch attempt ${attempt} failed (HTTP ${status}); retrying." >&2

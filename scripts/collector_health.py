@@ -19,7 +19,8 @@ UTC = timezone.utc
 # started by the VPS trigger, with a 09:40 UTC schedule as fallback. The old systemd timer is disabled.
 # "actions" judges the schedule only from run rows in Supabase; "vps-timer" is the old behaviour.
 SCHEDULES = ('actions', 'vps-timer')
-ACTIONS_DUE = (9, 40)  # the fallback cron; a run must have started that UTC day
+ACTIONS_DUE = (9, 40)  # morning fallback cron; a run must have started in the morning window (00:00-12:00 UTC)
+ACTIONS_DUE_EVENING = (21, 40)  # evening fallback cron; a run must have started in the evening window (12:00-24:00 UTC)
 ACTIONS_GRACE = timedelta(minutes=75)  # GitHub may start scheduled runs late
 ACTIONS_UNFINISHED = timedelta(minutes=60)
 RANK = {'ok': 0, 'warning': 1, 'critical': 2}
@@ -115,10 +116,14 @@ def evaluate(sample, now):
     service = sample['service']
     actions = sample.get('schedule', 'vps-timer') == 'actions'
     if actions:
-        today_due = now.replace(hour=ACTIONS_DUE[0], minute=ACTIONS_DUE[1], second=0, microsecond=0)
+        # Two slots a day: the latest slot whose fallback time has passed is the one judged.
+        def at(day_offset, hm):
+            return (now + timedelta(days=day_offset)).replace(hour=hm[0], minute=hm[1], second=0, microsecond=0)
+        due = max(d for d in (at(-1, ACTIONS_DUE_EVENING), at(0, ACTIONS_DUE), at(0, ACTIONS_DUE_EVENING)) if d <= now)
+        slot = 'evening' if due.hour >= 12 else 'morning'
     else:
         today_due = now.replace(hour=7, minute=17, second=0, microsecond=0)
-    due = today_due if now >= today_due else today_due - timedelta(days=1)
+        due = today_due if now >= today_due else today_due - timedelta(days=1)
     runs = db.get('runs', [])
     latest = runs[0] if runs else None
     terminal = next((r for r in runs if r.get('status') != 'running'), None)
@@ -131,10 +136,11 @@ def evaluate(sample, now):
     last_start = max(starts, default=None)
     active = service.get('ActiveState') in {'active', 'activating'} and not actions
     if actions:
-        day_start = due.replace(hour=0, minute=0)
-        if db.get('reachable') and now >= due + ACTIONS_GRACE and (last_start is None or last_start < day_start):
-            add('schedule_missed', 'critical', 'No collection run was recorded in Supabase for this UTC day, '
-                'including the 09:40 UTC GitHub Actions fallback and its grace period.',
+        slot_start = due.replace(hour=12 if slot == 'evening' else 0, minute=0)
+        if db.get('reachable') and now >= due + ACTIONS_GRACE and (last_start is None or last_start < slot_start):
+            fallback = '21:40' if slot == 'evening' else '09:40'
+            add('schedule_missed', 'critical', f'No {slot} collection run was recorded in Supabase for this UTC day, '
+                f'including the {fallback} UTC GitHub Actions fallback and its grace period.',
                 'Open the "Daily collection" workflow runs on GitHub (and the VPS trigger log); do not reset source budgets.')
     elif service.get('timer_active') != 'active' or service.get('timer_enabled') != 'enabled':
         add('schedule_disabled', 'critical', 'The daily collection timer is inactive or disabled.', 'Inspect car-analyzer-collector.timer; restore the existing 07:17 UTC schedule.')

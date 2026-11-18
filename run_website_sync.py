@@ -12,6 +12,7 @@ import uuid
 
 from database.db_manager import db_manager
 from database.models import create_tables
+from database.collection_budget import HARD_MAX_DETAIL_PER_DAY, HARD_MAX_SEARCH_PER_DAY
 from database.discovery_coverage import discovery_window, request_efficiency
 from database.run_outcome import exit_code
 from database.website_tracking import BudgetExhausted, SourcePaused, WebsiteStore, create_website_tables
@@ -23,8 +24,12 @@ def utcnow():
 
 
 def sync(db, store, browser, *, search_pages=3, detail_checks=20, delay=15, brand=None, model=None,
-         now=utcnow, sleep=time.sleep, session_prefix=''):
-    """Browser/clock injection lets tests verify the entire run without visiting OLX."""
+         now=utcnow, sleep=time.sleep, session_prefix='', search_day_cap=None, detail_day_cap=None):
+    """Browser/clock injection lets tests verify the entire run without visiting OLX.
+
+    search_pages / detail_checks are this RUN's budgets. search_day_cap / detail_day_cap bound the
+    whole UTC day across runs; left None they equal the per-run budgets (the original one-run-a-day
+    behaviour)."""
     query = search_url(1, brand, model)
     report = dict(status='running', search_attempted=0, detail_attempted=0, discovery_complete=0,
                   details_completed=0, observations=0, new_listings=0, errors=0,
@@ -41,6 +46,7 @@ def sync(db, store, browser, *, search_pages=3, detail_checks=20, delay=15, bran
     discovery_pages, baseline = [], None
 
     context = {}
+    ceilings = {}  # absolute day ceilings for this run, set once today's usage is known
 
     def visit(url, kind, page=None, attempt=1):
         context.update(phase=kind, url=url, page=page, attempt=attempt)
@@ -48,7 +54,7 @@ def sync(db, store, browser, *, search_pages=3, detail_checks=20, delay=15, bran
         # higher so pages 2-3 still fit; every visit is still counted, spaced
         # and subject to the persistent pause.
         extra = {'retry_allowance': 1} if kind == 'search' and report['search_retries'] else {}
-        wait = store.reserve(kind, now(), search_pages, detail_checks, delay, **extra)
+        wait = store.reserve(kind, now(), ceilings['search'], ceilings['detail'], delay, **extra)
         report[kind + '_attempted'] += 1
         if wait:
             sleep(wait)
@@ -78,8 +84,11 @@ def sync(db, store, browser, *, search_pages=3, detail_checks=20, delay=15, bran
 
     try:
         budget = store.budget(now())
-        remaining_search = max(0, search_pages - budget['search_used'])
-        remaining_details = max(0, detail_checks - budget['detail_used'])
+        search_day_cap = search_pages if search_day_cap is None else search_day_cap
+        detail_day_cap = detail_checks if detail_day_cap is None else detail_day_cap
+        remaining_search = max(0, min(search_pages, search_day_cap - budget['search_used']))
+        remaining_details = max(0, min(detail_checks, detail_day_cap - budget['detail_used']))
+        ceilings.update(search=budget['search_used'] + remaining_search, detail=budget['detail_used'] + remaining_details)
         if remaining_search and not (budget['pause_until'] and budget['pause_until'] > started.isoformat() + 'Z'):
             baseline = store.discovery_baseline(query, started)
         for page_number in range(1, remaining_search + 1):
@@ -195,8 +204,14 @@ def sync(db, store, browser, *, search_pages=3, detail_checks=20, delay=15, bran
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--search-pages', type=int, default=3, choices=range(0, 4))
-    parser.add_argument('--detail-checks', type=int, default=20, choices=range(0, 51))
+    parser.add_argument('--search-pages', type=int, default=3, choices=range(0, HARD_MAX_SEARCH_PER_DAY + 1),
+                        help='search pages for this run')
+    parser.add_argument('--detail-checks', type=int, default=20, choices=range(0, HARD_MAX_DETAIL_PER_DAY + 1),
+                        help='detail checks for this run')
+    parser.add_argument('--search-day-cap', type=int, default=None, choices=range(0, HARD_MAX_SEARCH_PER_DAY + 1),
+                        help='search pages per UTC day across runs (default: same as --search-pages)')
+    parser.add_argument('--detail-day-cap', type=int, default=None, choices=range(0, HARD_MAX_DETAIL_PER_DAY + 1),
+                        help='detail checks per UTC day across runs (default: same as --detail-checks)')
     parser.add_argument('--delay', type=float, default=15)
     parser.add_argument('--brand', type=int)
     parser.add_argument('--model', type=int)
@@ -231,12 +246,14 @@ def main():
         if budget['pause_until'] and budget['pause_until'] > utcnow().isoformat() + 'Z':
             print(json.dumps({'status': 'paused', **budget}))
             return 1
-        if budget['search_used'] >= args.search_pages and budget['detail_used'] >= args.detail_checks:
+        if (budget['search_used'] >= (args.search_day_cap if args.search_day_cap is not None else args.search_pages)
+                and budget['detail_used'] >= (args.detail_day_cap if args.detail_day_cap is not None else args.detail_checks)):
             print(json.dumps({'status': 'budget_exhausted', **budget}))
             return 1
         with WebsiteBrowser() as browser:
             report = sync(db_manager, store, browser, search_pages=args.search_pages,
-                          detail_checks=args.detail_checks, delay=args.delay, brand=args.brand, model=args.model)
+                          detail_checks=args.detail_checks, delay=args.delay, brand=args.brand, model=args.model,
+                          search_day_cap=args.search_day_cap, detail_day_cap=args.detail_day_cap)
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return exit_code(report)  # 0 also for a run limited only by the page budget
 

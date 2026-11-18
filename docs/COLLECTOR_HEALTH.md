@@ -5,8 +5,9 @@
 > `.github/workflows/daily-collect.yml` (started by the VPS trigger, with a 09:40 UTC fallback).
 > `scripts/collector_health.py` now defaults to `--schedule actions`:
 >
-> - the schedule is judged only from `website_collection_runs` in Supabase: `schedule_missed` (critical)
->   when no run started on the current UTC day by 09:40 UTC + 75 minutes; `run_unfinished` after 60 minutes;
+> - the schedule is judged only from `website_collection_runs` in Supabase, per slot (since 18 Nov 2026):
+>   `schedule_missed` (critical) when no run started in the morning window (00:00-12:00 UTC) by 09:40 UTC +
+>   75 minutes, or in the evening window (12:00-24:00 UTC) by 21:40 UTC + 75 minutes; `run_unfinished` after 60 minutes;
 > - the systemd timer/service, the local `latest-direct-attempt.json` and the local backup files are no
 >   longer judged (backups are now encrypted Actions artifacts), so the always-firing `schedule_disabled`,
 >   `pipeline_failed` and `backup_*` issues are gone;

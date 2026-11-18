@@ -1,8 +1,11 @@
 name: Daily collection
 
-# Primary trigger: the VPS calls workflow_dispatch each morning (~08:15 Europe/Sarajevo,
-# see deploy/trigger/). The schedule is only a fallback: it exits without visiting OLX
-# when today's (UTC) daily run has already succeeded.
+# Two runs a day, ~12 h apart (approved 18 Nov 2026). Primary trigger: the VPS calls workflow_dispatch
+# at ~08:15 (morning slot) and ~20:15 Europe/Sarajevo (evening slot, reason vps-timer-evening), see
+# deploy/trigger/. The schedules are only fallbacks: each exits without visiting OLX when a real run
+# already succeeded in ITS slot today (UTC day split at 12:00, see scripts/collection_slot.py), so a
+# good morning run never makes the evening fallback skip.
+# Budget per day: 6 search pages (3 per run), 20 detail checks (10 morning, evening gets the rest).
 on:
   workflow_dispatch:
     inputs:
@@ -19,12 +22,23 @@ on:
         options:
           - collect
           - verify
+      slot:
+        description: Run slot (auto = evening when the reason contains "evening", else morning)
+        required: false
+        default: auto
+        type: choice
+        options:
+          - auto
+          - morning
+          - evening
   schedule:
-    # 09:40 UTC = 10:40 CET / 11:40 CEST, after the VPS trigger should have run.
+    # 09:40 UTC = 10:40 CET / 11:40 CEST, after the morning VPS trigger should have run.
     - cron: "40 9 * * *"
+    # 21:40 UTC = 22:40 CET / 23:40 CEST, after the evening VPS trigger should have run.
+    - cron: "40 21 * * *"
 
 run-name: >-
-  Daily collection (${{ github.event_name == 'schedule' && 'schedule fallback' || inputs.reason || 'manual' }}${{ inputs.mode == 'verify' && ', verify only' || '' }})
+  Daily collection (${{ github.event_name == 'schedule' && (github.event.schedule == '40 21 * * *' && 'schedule fallback, evening' || 'schedule fallback') || inputs.reason || 'manual' }}${{ inputs.mode == 'verify' && ', verify only' || '' }})
 
 permissions:
   contents: read
@@ -39,34 +53,37 @@ jobs:
   collect:
     name: Collect from OLX into Supabase
     runs-on: ubuntu-24.04
-    # Build ~3 min + collection ~8 min (3 search pages, 20 details, 15 s spacing) + backups.
+    # Build ~3 min + collection ~8 min (3 search pages, up to ~10-20 details, 15 s spacing) + backups.
     timeout-minutes: 40
     steps:
-      - name: Skip if today's daily collection already succeeded
+      - name: Check out
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Work out the run slot
+        id: slot
+        env:
+          EVENT: ${{ github.event_name }}
+          REASON: ${{ inputs.reason }}
+          INPUT_SLOT: ${{ inputs.slot }}
+          SCHEDULE: ${{ github.event.schedule }}
+        run: |
+          slot="$(python3 scripts/collection_slot.py slot --event "$EVENT" --reason "$REASON" \
+            --input-slot "$INPUT_SLOT" --schedule "$SCHEDULE")"
+          echo "slot=${slot}" >> "$GITHUB_OUTPUT"
+          echo "Run slot: ${slot}"
+
+      - name: Skip if this slot's collection already succeeded today
         id: gate
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if [[ "${GITHUB_EVENT_NAME}" != "schedule" ]]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          today="$(date -u +%Y-%m-%d)"
-          done_today="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow daily-collect.yml \
-            --status success --created ">=${today}" --json databaseId --jq 'length')"
-          if [[ "${done_today}" -gt 0 ]]; then
-            echo "A daily collection already succeeded today (${today} UTC); fallback not needed."
-            echo "run=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Check out
-        if: steps.gate.outputs.run == 'true'
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+          # Only the schedule fallback can skip; a dispatch (VPS timer or manual) always runs.
+          run="$(python3 scripts/collection_slot.py gate --event "$GITHUB_EVENT_NAME" --slot "${{ steps.slot.outputs.slot }}")"
+          echo "run=${run}" >> "$GITHUB_OUTPUT"
 
       - name: Run wrapper unit tests
         if: steps.gate.outputs.run == 'true'
-        run: python3 -m unittest tests.test_github_collector_verification
+        run: python3 -m unittest tests.test_github_collector_verification tests.test_collection_budget tests.test_collection_slot
 
       - name: Build the pinned collector image
         if: steps.gate.outputs.run == 'true'
@@ -93,6 +110,7 @@ jobs:
           COLLECTOR_DB_PASSWORD: ${{ secrets.COLLECTOR_DB_PASSWORD }}
           BACKUP_DB_PASSWORD: ${{ secrets.BACKUP_DB_PASSWORD }}
           COLLECTOR_RUN_MODE: daily
+          COLLECTOR_SLOT: ${{ steps.slot.outputs.slot }}
           MODE: ${{ inputs.mode || 'collect' }}
         run: |
           sudo apt-get update

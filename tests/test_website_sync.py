@@ -90,7 +90,7 @@ class ParserTests(unittest.TestCase):
         self.assertEqual('listed',parse_detail(page,'79589391')['outcome'])
 
     def test_pilot_limits_cannot_be_bypassed_by_cli(self):
-        for args in [['--search-pages','4'],['--detail-checks','51'],['--delay','1'],['--model','1599']]:
+        for args in [['--search-pages','11'],['--search-day-cap','11'],['--detail-checks','51'],['--detail-day-cap','51'],['--delay','1'],['--model','1599']]:
             with self.assertRaises(SystemExit):
                 parse_args(args)
 
@@ -182,6 +182,60 @@ class StoreAndRunTests(unittest.TestCase):
         report=sync(self.db,self.store,browser,search_pages=search_pages,detail_checks=detail_checks,
                     now=self.now,sleep=self.sleep)
         return report,browser.calls
+
+    def run_slot(self,read,**kw):
+        class Browser:
+            calls=[]
+            def read(self,url,kind):
+                self.calls.append(kind)
+                return read(url,kind)
+        browser=Browser()
+        report=sync(self.db,self.store,browser,now=self.now,sleep=self.sleep,**kw)
+        return report,browser.calls
+
+    def test_two_runs_share_the_day_caps_and_a_failed_morning_run_leaves_the_evening_its_pages(self):
+        for lid in range(300,320):
+            self.seed(str(lid))
+        counter=iter(range(1,100))
+        def read(url,kind):
+            if kind=='search':
+                n=next(counter)
+                if n==1:
+                    raise WebsiteReadError('simulated morning failure')
+                return search_page(int(url.split('page=')[1].split('&')[0]),ids=(f'{n}0001',f'{n}0002'))
+            return detail_page(url.rsplit('/',1)[-1])
+        caps=dict(search_pages=3,search_day_cap=6,detail_day_cap=20)
+        morning,calls=self.run_slot(read,detail_checks=10,**caps)
+        self.assertEqual(('failed',1),(morning['status'],calls.count('search')))
+        evening,calls=self.run_slot(read,detail_checks=19,**caps)
+        self.assertEqual((3,19),(calls.count('search'),calls.count('detail')))
+        self.assertEqual({'search_used':4,'detail_used':19},{k:v for k,v in self.store.budget(self.clock).items() if k in ('search_used','detail_used')})
+
+    def test_day_caps_stop_a_third_run_and_a_run_never_exceeds_its_own_budget(self):
+        for lid in range(300,330):
+            self.seed(str(lid))
+        counter=iter(range(1,100))
+        def read(url,kind):
+            if kind=='search':
+                n=next(counter)
+                return search_page(int(url.split('page=')[1].split('&')[0]),ids=(f'{n}0001',f'{n}0002'))
+            return detail_page(url.rsplit('/',1)[-1])
+        caps=dict(search_pages=3,search_day_cap=6,detail_day_cap=20)
+        _,first=self.run_slot(read,detail_checks=10,**caps)
+        _,second=self.run_slot(read,detail_checks=10,**caps)
+        third,calls=self.run_slot(read,detail_checks=10,**caps)
+        self.assertEqual((3,10),(first.count('search'),first.count('detail')))
+        self.assertEqual((3,10),(second.count('search'),second.count('detail')))
+        self.assertEqual([],calls)
+        self.assertEqual('budget_exhausted',third['status'])
+
+    def test_without_day_caps_the_run_budget_is_the_day_budget_as_before(self):
+        def read(url,kind):
+            return search_page(1,ids=('900001',)) if kind=='search' else detail_page(url.rsplit('/',1)[-1])
+        _,first=self.run_slot(read,search_pages=1,detail_checks=1)
+        _,second=self.run_slot(read,search_pages=1,detail_checks=1)
+        self.assertEqual((1,1),(first.count('search'),first.count('detail')))
+        self.assertEqual([],second)
 
     def test_success_preserves_history_and_never_marks_unseen_ads_missing(self):
         self.seed('101')

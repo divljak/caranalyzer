@@ -5,7 +5,7 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/car-analyzer-dispatch collect
+ExecStart=/usr/local/bin/car-analyzer-dispatch collect auto
 TimeoutStartSec=5min
 # The script only needs to read its token and reach api.github.com.
 ProtectSystem=strict

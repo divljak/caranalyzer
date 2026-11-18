@@ -67,6 +67,27 @@ def encrypt_latest_backup(state_dir, output, recipient_file, *, environ, runner=
     return 0
 
 
+BUDGET_SETTINGS = ("COLLECTOR_SEARCH_PAGES_PER_RUN", "COLLECTOR_SEARCH_DAY_CAP",
+                   "COLLECTOR_DETAIL_DAY_CAP", "COLLECTOR_DETAIL_MORNING")
+
+
+def budget_settings(environ):
+    """COLLECTOR_SLOT and the budget integers to forward into the container; anything malformed is an error."""
+    out = {}
+    slot = (environ.get("COLLECTOR_SLOT") or "").strip().lower()
+    if slot:
+        if slot not in {"auto", "morning", "evening"}:
+            raise ConfigurationError("COLLECTOR_SLOT must be auto, morning or evening")
+        out["COLLECTOR_SLOT"] = slot
+    for name in BUDGET_SETTINGS:
+        value = (environ.get(name) or "").strip()
+        if value:
+            if not value.isdigit():
+                raise ConfigurationError(f"{name} must be a whole number")
+            out[name] = value
+    return out
+
+
 def collection_authorized(environ):
     """A real collection needs a confirmed manual shadow run or the daily workflow itself."""
     event = environ.get("GITHUB_EVENT_NAME")
@@ -126,12 +147,15 @@ def run_verification(image, environ=None, runner=subprocess.run, *, encrypted_ba
         for name in SECRET_NAMES:
             child_env.pop(name, None)
 
+        # Run slot and budget settings are plain integers/words, not secrets; validated before they reach the container.
+        budget_env = budget_settings(environ)
         command = [
             "docker", "run", "--rm", "--read-only", "--cap-drop=ALL",
             "--security-opt=no-new-privileges",
             "--user", f"{os.getuid()}:{os.getgid()}",
             # Chromium needs a writable HOME and room for its profile in /tmp.
             "--tmpfs", "/tmp:rw,noexec,nosuid,size=512m", "--env", "HOME=/tmp",
+            *[arg for name, value in budget_env.items() for arg in ("--env", f"{name}={value}")],
             "--mount", f"type=bind,src={secrets_dir},dst=/run/car-analyzer-secrets,readonly",
             "--mount", f"type=bind,src={state_dir},dst=/state",
             image,

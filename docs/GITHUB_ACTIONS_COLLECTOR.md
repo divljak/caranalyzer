@@ -116,6 +116,17 @@ database snapshots, or cancel DigitalOcean yet. Those steps require an approved
 backup replacement, an observed shadow run, and a deliberate single-scheduler
 cutover.
 
+## Twice-daily collection (Nov 2026)
+
+`daily-collect.yml` now serves two slots a day (morning, evening), each with its own VPS trigger and
+`schedule` fallback (09:40 and 21:40 UTC). The `slot` input (`auto`/`morning`/`evening`) or a reason
+containing `evening` selects the slot; the collector receives it as `COLLECTOR_SLOT`. The fallback skips only
+if a real run succeeded in that slot's window of the UTC day (split at 12:00), so a good morning run never
+makes the evening fallback skip. Per-day budget: 6 search pages (3 per run), 20 detail checks, 15 s spacing,
+24 h pause on 403/429/captcha unchanged; hard ceiling 10 search pages and 50 details a day. Details,
+settings and the VPS change are in `docs/TWICE_DAILY_COLLECTION.md`. The earlier "three-search/twenty-detail
+daily allowance" wording above describes the one-run-a-day setup.
+
 ## Budget-limited runs, seller type and repeated ads (Nov 2026)
 
 - **Budget-limited is not broken.** A run that stops only because the day's search-page budget was used

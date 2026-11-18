@@ -6,17 +6,18 @@ directly to Supabase (`ojmokmsjppkqwppmrzpv`) with the restricted
 database. It only sends one API call each morning.
 
 ```
-VPS  car-analyzer-dispatch.timer  08:15 Europe/Sarajevo
- └─ /usr/local/bin/car-analyzer-dispatch collect
+VPS  car-analyzer-dispatch.timer  08:15 (morning) and 20:15 (evening) Europe/Sarajevo
+ └─ /usr/local/bin/car-analyzer-dispatch collect auto   (evening run: reason vps-timer-evening)
      └─ POST /repos/divljak/caranalyzer/actions/workflows/daily-collect.yml/dispatches
 GitHub Actions  .github/workflows/daily-collect.yml  (ubuntu-24.04, ≤40 min)
  ├─ build Dockerfile.collector (pinned Debian Chromium + chromedriver)
  ├─ loopback test of the PIK markup in that Chromium (no network)
  ├─ scripts/github_collector_verification.py --collect
  │   └─ container: scripts/direct_collector.py → run_website_sync.sync()
- │       3 search pages + 20 detail checks, ≥15 s apart → Supabase
+ │       per run 3 search pages + 10-20 detail checks, ≥15 s apart → Supabase
  └─ artifacts: diagnostics (public, counts/timings only), encrypted recovery snapshot (age)
-Fallback  schedule 09:40 UTC: exits at once if today's daily run already succeeded
+Fallbacks schedule 09:40 UTC (morning) and 21:40 UTC (evening): each exits at once if a real run already
+          succeeded in its own slot today (see docs/TWICE_DAILY_COLLECTION.md)
 ```
 
 ## Secrets
@@ -40,10 +41,12 @@ gh workflow run daily-collect.yml -R divljak/caranalyzer -f mode=verify -f reaso
 sudo car-analyzer-dispatch verify     # tests the token + API without collecting
 ```
 
-The daily budget is persistent in Supabase (`website_collection_budget`, UTC day): 3
-search visits (+1 only for the page-1 retry) and 20 detail checks. A second run on
-the same UTC day uses only what is left. When nothing is left, it records a
-`budget_exhausted` run without starting Chromium.
+Since 18 Nov 2026 the collection runs **twice a day** (morning and evening slot). The budget is
+persistent in Supabase (`website_collection_budget`, UTC day): each run reads up to 3 search pages,
+the day stops at 6 (hard max 10, +1 only for each run's page-1 retry), and 20 detail checks a day
+(10 in the morning run, the evening run gets the rest). A later run on the same UTC day uses only what
+is left. When nothing is left, it records a `budget_exhausted` run without starting Chromium. Full
+rules, settings and the VPS change: `docs/TWICE_DAILY_COLLECTION.md`.
 
 ## Failure handling
 
@@ -71,7 +74,7 @@ units are kept. Remaining steps (see NEXT.md):
 ( umask 077; cat > /etc/car-analyzer/github-dispatch-token )   # paste the token, then Ctrl-D
 car-analyzer-dispatch verify                                    # end-to-end check, no OLX visits
 systemctl enable --now car-analyzer-dispatch.timer
-systemctl list-timers car-analyzer-dispatch.timer               # next: 07:15 UTC = 08:15 CET
+systemctl list-timers car-analyzer-dispatch.timer               # next: 07:15 UTC = 08:15 CET (and 19:15 UTC = 20:15 CET)
 ```
 
 From a fresh checkout, `deploy/trigger/install-dispatch-trigger.sh [--disable-old]`
