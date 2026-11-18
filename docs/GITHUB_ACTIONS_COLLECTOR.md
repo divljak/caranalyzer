@@ -133,6 +133,21 @@ cutover.
   `request_efficiency.cross_page_repeats`). A manual check on 14 Nov 2026 found 14 of 50 ads on page 2 repeating
   page 1, read a few seconds apart. Their `featured` level did not distinguish them, and their timestamps were the
   oldest on page 1. So the main cause is the date-sorted list moving while it is read (new and renewed ads push
-  older ones down), not promoted cards. The site ignores a larger `per_page`. Reading pages in reverse order, or a
-  more stable sort, would raise unique listings per budgeted visit. Both change what discovery coverage means, so
-  they are left for a decision rather than done here.
+  older ones down), not promoted cards. The site ignores a larger `per_page`.
+- **Search pages are read deepest first (3, 2, 1).** Fix for the repeats above, without extra OLX visits (still 3
+  search pages, 15 s apart). Ads only move down the date-sorted feed between reads, so an ad read on page 3 cannot
+  turn up on page 2 or 1 later; only a renewed ad moving up can still repeat. No other stable sort was adopted: the
+  only public sort parameters used are the existing `sort_by=date&order=desc`, and nothing else was verified to keep
+  freshness. Details:
+  - Page 1, the freshest evidence, is now read last. A failed page-1 read still stops the run and leaves
+    `discovery_complete=0` and `discovery_window.status=incomplete`, so it cannot be trusted as complete. The single
+    bounded retry applies to the run's first search read (the cold browser, now page 3) as well as to page 1.
+  - A budget-limited run reads the remaining pages deepest first and still ends on page 1 (e.g. 2, 1).
+  - Trade-off: an ad that slides from page 2 to page 3 between the two reads is now missed in that run (before it
+    was counted twice). The slots are no longer wasted, but the window can have a few holes at page boundaries.
+    Holes are mid-window ads, not the newest ones, and gap detection is unchanged (`discovery_window` sorts pages by
+    number, so adjacency and per-page metrics are the same).
+  - Only the unfiltered market scope is reversed. Brand/model scopes can be a single short page of unknown size, so
+    they keep 1..N. The run report has `page_order` (`reverse`/`forward`); `page_stats` and
+    `repeated_from_earlier_pages` follow read order. Compare `request_efficiency.cross_page_repeats` before and after
+    (14-28 of 150 slots before).

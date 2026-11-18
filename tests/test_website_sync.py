@@ -172,7 +172,7 @@ class StoreAndRunTests(unittest.TestCase):
         self.assertEqual('101',self.store.candidates(self.clock+timedelta(days=1),3)[0])
         self.assertNotIn('101',self.store.candidates(self.clock+timedelta(hours=1),3))
 
-    def run_browser(self,read,search_pages=1,detail_checks=1):
+    def run_browser(self,read,search_pages=1,detail_checks=1,**options):
         class Browser:
             calls=[]
             def read(self,url,kind):
@@ -180,7 +180,7 @@ class StoreAndRunTests(unittest.TestCase):
                 return read(url,kind)
         browser=Browser()
         report=sync(self.db,self.store,browser,search_pages=search_pages,detail_checks=detail_checks,
-                    now=self.now,sleep=self.sleep)
+                    now=self.now,sleep=self.sleep,**options)
         return report,browser.calls
 
     def test_success_preserves_history_and_never_marks_unseen_ads_missing(self):
@@ -209,7 +209,8 @@ class StoreAndRunTests(unittest.TestCase):
     def test_verified_terminal_page_can_complete_a_smaller_search(self):
         page = search_page(ids=('200001',), total=1)
         page.update(current_page=None, last_page=None)
-        report, calls = self.run_browser(lambda *_: page, search_pages=3, detail_checks=0)
+        report, calls = self.run_browser(lambda *_: page, search_pages=3, detail_checks=0,
+                                             page_order='forward')
         self.assertEqual((1, 1, 'completed'),
                          (len(calls), report['discovery_complete'], report['status']))
 
@@ -217,7 +218,8 @@ class StoreAndRunTests(unittest.TestCase):
         page = search_page(ids=('200001', '200002'), total=2)
         page.update(current_page=None, last_page=None)
         page['cards'][1]['price'] = 'unrecognized price'
-        report, calls = self.run_browser(lambda *_: page, search_pages=3, detail_checks=0)
+        report, calls = self.run_browser(lambda *_: page, search_pages=3, detail_checks=0,
+                                             page_order='forward')
         self.assertEqual((1, 1, 1, 'partial'),
                          (len(calls), report['observations'], report['rejected'], report['status']))
         with self.sessions() as session:
@@ -227,14 +229,16 @@ class StoreAndRunTests(unittest.TestCase):
     def test_contradictory_terminal_controls_cannot_shorten_requested_scope(self):
         page = search_page(ids=('200001',), total=47048)
         page['last_page'] = 1
-        report, calls = self.run_browser(lambda *_: page, search_pages=3, detail_checks=0)
+        report, calls = self.run_browser(lambda *_: page, search_pages=3, detail_checks=0,
+                                             page_order='forward')
         self.assertEqual((1, 0, 'partial'),
                          (len(calls), report['discovery_complete'], report['status']))
 
     def test_verified_empty_search_is_completed_without_new_price_freshness(self):
         page = search_page(ids=(), total=0)
         page.update(current_page=None, last_page=None)
-        report, calls = self.run_browser(lambda *_: page, search_pages=3, detail_checks=0)
+        report, calls = self.run_browser(lambda *_: page, search_pages=3, detail_checks=0,
+                                             page_order='forward')
         self.assertEqual((1, 1, 0, 'completed'),
                          (len(calls), report['discovery_complete'], report['observations'], report['status']))
         with self.sessions() as session:
@@ -301,7 +305,7 @@ class StoreAndRunTests(unittest.TestCase):
                 result['cards'][0]['dealer'] = True
                 return result
             return detail_page(url.rsplit('/', 1)[-1])
-        report, _ = self.run_browser(read, search_pages=2, detail_checks=0)
+        report, _ = self.run_browser(read, search_pages=2, detail_checks=0, page_order='forward')
         self.assertEqual(4, report['observations'])
         self.assertEqual(2, report['repeated_across_pages'])
         self.assertEqual([0, 2], [p['repeated_from_earlier_pages'] for p in report['page_stats']])
@@ -309,6 +313,70 @@ class StoreAndRunTests(unittest.TestCase):
         self.assertEqual({'dealer': 1, 'individual': 3}, report['seller_types'])  # repeats counted once
         with self.sessions() as s:
             self.assertEqual('dealer', s.query(CarListing).filter_by(listing_id='79589391').one().seller_type)
+
+    def test_pages_are_read_deepest_first_so_shifted_ads_are_not_read_twice(self):
+        # Between reads new ads push older ones down: 3 is read first, then 2, then 1.
+        feed = {3: ('c1', 'c2'), 2: ('b1', 'b2'), 1: ('a0', 'a1')}
+        def read(url, kind):
+            page = int(url.rsplit('page=', 1)[-1])
+            return search_page(page, ids=tuple(f'30{x[0:1] == "a" and 1 or 2}{x[1]}{page}' for x in feed[page]))
+        report, calls = self.run_browser(read, search_pages=3, detail_checks=0)
+        self.assertEqual([3, 2, 1], [int(u.rsplit('page=', 1)[-1]) for u, _ in calls])
+        self.assertEqual(('reverse', 6, 0, 1), (report['page_order'], report['observations'],
+                                                 report['repeated_across_pages'], report['discovery_complete']))
+
+    def test_filtered_scope_and_explicit_forward_keep_page_one_first(self):
+        for options in ({'page_order': 'forward'}, {'brand': 'volkswagen'}):
+            with self.subTest(options=options):
+                self.engine.dispose(); self.setUp()
+                calls = []
+                class B:
+                    def read(self, url, kind):
+                        calls.append(url)
+                        return search_page(int(url.rsplit('page=', 1)[-1]) if 'brand' not in url else 1, ids=('800001',))
+                report = sync(self.db, self.store, B(), search_pages=2, detail_checks=0, now=self.now,
+                              sleep=self.sleep, **options)
+                self.assertEqual('forward', report['page_order'])
+                self.assertTrue(calls[0].endswith('page=1') or 'page=1&' in calls[0])
+
+    def test_page_one_failing_last_still_makes_the_run_incomplete(self):
+        def read(url, kind):
+            if url.endswith('page=1'):
+                raise WebsiteReadError('Search filters changed during navigation')
+            page = int(url.rsplit('page=', 1)[-1])
+            return search_page(page, ids=(f'50000{page}',))
+        report, calls = self.run_browser(read, search_pages=3, detail_checks=0)
+        self.assertEqual(3, len(calls))
+        self.assertEqual(('partial', 0, 2), (report['status'], report['discovery_complete'], report['observations']))
+        self.assertEqual(1, report['failures'][-1]['page'])
+        self.assertNotEqual('overlap_observed', report['discovery_window']['status'])
+        self.assertEqual('incomplete', report['discovery_window']['status'])
+
+    def test_a_budget_limited_reverse_run_still_ends_on_page_one(self):
+        self.store.reserve('search', self.clock, 3, 0, 15)
+        def read(url, kind):
+            page = int(url.rsplit('page=', 1)[-1])
+            return search_page(page, ids=(f'60000{page}',))
+        report, calls = self.run_browser(read, search_pages=3, detail_checks=0)
+        self.assertEqual([2, 1], [int(u.rsplit('page=', 1)[-1]) for u, _ in calls])
+        self.assertEqual(0, report['discovery_complete'])
+        self.assertEqual('discovery_budget_incomplete', report['stopped_reason'])
+
+    def test_first_read_of_a_reversed_run_gets_the_single_cold_start_retry(self):
+        outcomes = [WebsiteReadError, None]
+        class Slow:
+            calls = []
+            def read(self, url, kind):
+                self.calls.append(url)
+                if len(self.calls) == 1:
+                    from scrapers.olx_website_collector import WebsiteDOMTimeout
+                    raise WebsiteDOMTimeout('cold')
+                page = int(url.rsplit('page=', 1)[-1])
+                return search_page(page, ids=(f'70000{page}',))
+        browser = Slow()
+        report = sync(self.db, self.store, browser, search_pages=3, detail_checks=0, now=self.now, sleep=self.sleep)
+        self.assertEqual((1, 'completed', 1), (report['search_retries'], report['status'], report['discovery_complete']))
+        self.assertEqual([3, 3, 2, 1], [int(u.rsplit('page=', 1)[-1]) for u in browser.calls])
 
     def test_a_run_limited_only_by_the_page_budget_exits_successfully(self):
         from database.run_outcome import classify, exit_code
