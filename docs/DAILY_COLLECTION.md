@@ -47,13 +47,30 @@ the same UTC day uses only what is left. When nothing is left, it records a
 
 ## Failure handling
 
-- **One bounded retry.** If page 1 times out (navigation or DOM) or the renderer fails,
-  Chromium is restarted once and page 1 is read again. A 403/429/challenge is never
-  retried: it pauses the source for 24 h. Neither is a parser rejection or a later page.
+- **Partially hydrated search page: wait, don't reload.** A search page has 20 s to
+  show its full contract: result cards, pagination and the "N oglasa" count. If the
+  cards are already on screen at 20 s and only the count (or pagination) is missing,
+  the collector keeps polling the **same loaded page** for up to 45 s in total
+  (`WebsiteBrowser.SEARCH_HYDRATION_TIMEOUT`). This makes no new request and spends no
+  budget. Every poll still checks for 403/429 and captcha text. A page without cards,
+  and every detail page, keep the 20 s deadline. A page that never shows its count is
+  still a `WebsiteDOMTimeout` and nothing from it is saved. (17 Nov 2026, run
+  44037259559: 50 cards and pagination, HTTP 200, no count after 20 s, twice.)
+- **One bounded, delayed retry.** If page 1 still times out (navigation or DOM) or the
+  renderer fails, Chromium is restarted at once (which closes the stalled OLX tab). The
+  collector then waits **3 minutes** (`PAGE1_RETRY_DELAY`) and reads page 1 once more.
+  That is at most one extra page load per run, still counted and spaced ≥15 s.
+  A 403/429/challenge is never retried: it pauses the source for 24 h. Neither is a
+  parser rejection or a later page. In the worst case the delay and waits add about
+  4 minutes to a run.
 - **Telemetry.** Each failure is in `website_collection_runs.report → failures[]`:
   phase, url, page, attempt, exception, navigation_ms, dom_ms, final_url, title,
-  ready_state, document_status, last_dom, parser_reason. The same data is in the
-  run's job summary and the `daily-collection-diagnostics-<run id>` artifact.
+  ready_state, document_status, last_dom, parser_reason, dom_fingerprint,
+  hydration_wait (the 45 s wait was used) and, on the attempt that was retried,
+  retry_delay_s. For search pages `last_dom` also has `result_heading_present` and
+  `priced_cards`. (`price_values` and `title_present` are detail-page fields and are
+  always 0/false on search pages.) The same data is in the run's job summary and the
+  `daily-collection-diagnostics-<run id>` artifact.
 - **OLX markup changes.** OLX relaunched as PIK on 10 Nov 2026 and every run failed
   until the parser learned the new markup. If `failures[].parser_reason` is
   `search_cards_or_pagination_not_verified` with `document_status: 200`, the layout

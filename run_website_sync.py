@@ -22,8 +22,16 @@ def utcnow():
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+# The single page-1 retry waits this long on an idle, fresh Chromium (no OLX tab open).
+# 17 Nov 2026: an immediate retry hit the same half-hydrated page and the day's budget
+# lost two visits; 16 Nov's retry worked. A pause gives a transient OLX-side stall time
+# to clear without adding a page load.
+PAGE1_RETRY_DELAY = 180
+
+
 def sync(db, store, browser, *, search_pages=3, detail_checks=20, delay=15, brand=None, model=None,
-         now=utcnow, sleep=time.sleep, session_prefix='', page_order='reverse'):
+         now=utcnow, sleep=time.sleep, session_prefix='', page_order='reverse',
+         retry_delay=PAGE1_RETRY_DELAY):
     """Browser/clock injection lets tests verify the entire run without visiting OLX.
 
     The date-sorted feed moves down while pages are read, so reading page 1 first
@@ -81,11 +89,13 @@ def sync(db, store, browser, *, search_pages=3, detail_checks=20, delay=15, bran
             # reversed (then it is the deepest page); page 1 stays eligible when it is read last.
             if report['search_retries'] or not (page_number == 1 or report['search_attempted'] == 1):
                 raise
-            report['failures'].append(failure(exc))
+            report['failures'].append({**failure(exc), 'retry_delay_s': retry_delay})
             report['search_retries'] += 1
+            # Restart first, so the stalled OLX tab is closed during the pause.
             restart = getattr(browser, 'restart', None)
             if restart:
                 restart()
+            sleep(retry_delay)
             return visit(url, 'search', page_number, attempt=2)
 
     try:
