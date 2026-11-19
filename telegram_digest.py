@@ -34,7 +34,8 @@ from telegram_bot import (
 
 
 MAX_DIGEST_CHARS = 4000  # Telegram allows 4096; HTML tags count here, so this is conservative
-DIGEST_CUTS = 5
+DIGEST_CUTS = 1
+DIGEST_STANDOUTS = 2
 STALE_CLEAN_DAYS = 14
 PRICE_WINDOW_DAYS = 7
 SEND_HOUR = 9
@@ -131,8 +132,24 @@ SEEN_SQL = """
     AND r.price<=0.85*k.med_price AND r.mileage<=k.med_km
     AND NOT (r.year >= CAST(extract(year FROM (now() AT TIME ZONE 'UTC')) AS integer) - 5
              AND r.mileage > 80000*greatest(CAST(extract(year FROM (now() AT TIME ZONE 'UTC')) AS integer)-r.year,1))
-  ORDER BY discount_pct DESC,r.first_seen_at DESC,r.listing_id
-  LIMIT 3
+  ORDER BY r.first_seen_at DESC,discount_pct DESC,r.listing_id
+  LIMIT 2
+"""
+# "Najviše novih": the brand with the most ads our collector saw for the first time in the latest run
+# window (the same window as SEEN_SQL and the status line).
+# The collector does not record when an ad leaves search, so disappearance is not measured here.
+HOT_SQL = """
+  SELECT coalesce(nullif(trim(coalesce(l.make,c.make)),''),'Nepoznato') AS make,
+    count(*) AS n,
+    sum(count(*)) OVER () AS total
+  FROM car_listings c
+  LEFT JOIN dealer_vehicle_labels l USING(listing_id)
+  WHERE c.source='olx.ba'
+    AND c.collection_method IN ('olx_api','olx_website')
+    AND c.first_seen_at BETWEEN :started AND :finished
+  GROUP BY 1
+  ORDER BY n DESC,make
+  LIMIT 1
 """
 
 
@@ -452,68 +469,45 @@ def _row(text, optional=False):
 
 
 def render_digest(evidence, tz=SARAJEVO):
-    """Bosnian morning digest in Telegram HTML. Never infers a sale or a publish date."""
+    """Compact Bosnian morning digest in Telegram HTML. Never infers a sale or a publish date."""
     flags = assess(evidence)
     now = _aware(evidence.get("generated_at")) or datetime.now(timezone.utc)
     local = now.astimezone(tz)
     run = evidence.get("run")
+    status = _status_line(run, flags)
+    if flags["trends_stale"] and run:
+        status += f" · cijene orijentaciono (zadnji čist prolaz {_stamp(evidence.get('clean_at'), tz)})"
     parts = [
         _row(f"🚗 <b>Garaža · {_WEEKDAYS[local.weekday()]} {local.day}. {_MONTHS[local.month - 1]}</b>"),
-        _row(esc(_status_line(run, flags))),
+        _row(esc(status)),
     ]
-    if flags["trends_stale"]:
-        parts.append(_row(esc(f"⚠️ Zadnji potpuno čist prolaz: {_stamp(evidence.get('clean_at'), tz)}, "
-                              "pa su brojke o cijenama orijentacione.")))
 
-    drops = int(evidence.get("price_drops") or 0)
     cuts = list(evidence.get("notable_cuts") or [])
-    parts.extend([_row(""), _row(f"📉 <b>Padovi cijena ({PRICE_WINDOW_DAYS} dana): {drops}</b>")])
-    if not cuts:
-        parts.append(_row(esc("Nema zabilježenih padova tražene cijene.")))
-    for item in cuts:
+    if cuts:
+        item = cuts[0]
         new, old = item.get("asking_price"), item.get("previous_price")
         pct = round((old - new) / old * 100) if new and old else None
         change = f" (−{pct}%)" if pct else ""
-        parts.append(_row(f"• {_car(item)}: <b>{esc(_money(new))}</b> <s>{esc(_amount(old))}</s>{esc(change)}",
-                          optional=True))
-    if drops > len(cuts) and cuts:
-        parts.append(_row(esc(f"• …još {drops - len(cuts)}"), optional=True))
-
-    standouts = list(evidence.get("first_seen") or [])
-    if standouts:
-        parts.extend([_row(""), _row("🆕 <b>Najzanimljivije novo</b>")])
-        for item in standouts:
-            parts.append(_row(
-                f"• {_car(item)}: <b>{esc(_money(item.get('price')))}</b> · "
-                + esc(f"{int(item.get('discount_pct') or 0)}% ispod medijana {_money(item.get('med_price'))} "
-                      f"za {int(item.get('n') or 0)} sličnih · {_amount(item.get('mileage') or 0)} km"),
-                optional=True))
-
-    parts.extend([
-        _row(""),
-        _row("<i>" + esc("Tražene cijene, ne prodajne. Novo = prvi put viđeno kod nas, ne datum objave. "
-                         "Nestanak iz pretrage nije prodaja. Ništa od ovoga nije preporuka.") + "</i>"),
-    ])
-    details = []
-    if run:
-        shown_status = ("dnevni budžet stranica iskorišten" if flags.get("outcome") == "budget_limited"
-                        else str(run.get("status") or "nepoznato").lower())
-        details.append(f"Pokušaj: {_stamp(run.get('finished_at') or run.get('started_at'), tz)} ({shown_status})")
-        details.append(f"{int(run.get('observations') or 0)} zapažanja · "
-                       f"{int(run.get('new_listings') or 0)} prvi put viđeno kod nas · "
-                       f"{int(run.get('errors') or 0)} {plural_bs(int(run.get('errors') or 0), 'greška', 'greške', 'grešaka')}")
-        details.append(f"Posjete: {int(run.get('search_attempted') or 0)} pretrage · "
-                       f"{int(run.get('detail_attempted') or 0)} detalja "
-                       f"({int(run.get('details_completed') or 0)} završeno)")
+        parts.append(_row(
+            f"📉 Najveći pad ({PRICE_WINDOW_DAYS} dana): {_car(item)} −{esc(_money(old - new))} → "
+            f"<b>{esc(_money(new))}</b> <s>{esc(_amount(old))}</s>{esc(change)}"))
     else:
-        details.append("Nema završenog prolaza kolektora.")
-    details.append(f"Zadnje zapažanje: {_stamp(evidence.get('latest_snapshot'), tz)} · "
-                   f"zadnji čist prolaz: {_stamp(evidence.get('clean_at'), tz)}")
-    rises = int(evidence.get("price_increases") or 0)
-    details.append(f"Uzorak cijena ({PRICE_WINDOW_DAYS} dana): {int(evidence.get('price_sample') or 0)} oglasa · "
-                   f"{drops} {plural_bs(drops, 'pad', 'pada', 'padova')} · "
-                   f"{rises} {plural_bs(rises, 'rast', 'rasta', 'rastova')}")
-    parts.append(_row("<blockquote expandable>🔧 Detalji kolektora\n" + esc("\n".join(details)) + "</blockquote>"))
+        parts.append(_row(esc(f"📉 Nema padova cijena ({PRICE_WINDOW_DAYS} dana)")))
+
+    for item in list(evidence.get("first_seen") or [])[:DIGEST_STANDOUTS]:
+        parts.append(_row(
+            f"🆕 {_car(item)}: <b>{esc(_money(item.get('price')))}</b> · "
+            + esc(f"{int(item.get('discount_pct') or 0)}% ispod medijana {_money(item.get('med_price'))} "
+                  f"za {int(item.get('n') or 0)} sličnih · {_amount(item.get('mileage') or 0)} km"),
+            optional=True))
+
+    hot = evidence.get("hot")
+    if hot and hot.get("make"):
+        parts.append(_row(esc(f"🔥 Najviše novih: {hot['make']} ({int(hot.get('n') or 0)} "
+                              f"od {int(hot.get('total') or 0)})"), optional=True))
+
+    parts.append(_row("<i>" + esc("Tražene cijene, ne prodajne. Novo = prvi put viđeno kod nas, "
+                                  "ne datum objave.") + "</i>"))
     return Html(_assemble(parts))
 
 
@@ -528,11 +522,11 @@ def load_digest_evidence(engine, now):
         prices = _one(connection, PRICE_SQL, {"cutoff": cutoff, "as_of": as_of}) or {}
         cuts = _all(connection, CUTS_SQL, {"cutoff": cutoff, "as_of": as_of, "limit": DIGEST_CUTS})
         seen = []
+        hot = None
         if run and run.get("started_at") and run.get("finished_at"):
-            seen = _all(connection, SEEN_SQL, {
-                "started": run["started_at"],
-                "finished": run["finished_at"],
-            })
+            window = {"started": run["started_at"], "finished": run["finished_at"]}
+            seen = _all(connection, SEEN_SQL, window)
+            hot = _one(connection, HOT_SQL, window)
     return {
         "generated_at": as_of,
         "run": run,
@@ -543,23 +537,8 @@ def load_digest_evidence(engine, now):
         "price_increases": int(prices.get("increases") or 0),
         "notable_cuts": cuts,
         "first_seen": seen,
+        "hot": hot,
     }
-
-
-def digest_keyboard(market_url):
-    rows = [
-        [{"text": "📉 Svi padovi", "callback_data": "drops"}, {"text": "🆕 Novi oglasi", "callback_data": "latest"}],
-        [{"text": "🔍 Pretraga", "callback_data": "search"}],
-    ]
-    if market_url:
-        parsed = urlparse(market_url)
-        origin = f"{parsed.scheme}://{parsed.netloc}"
-        rows.append([
-            {"text": "Market", "url": f"{origin}/market"},
-            {"text": "Compare", "url": f"{origin}/compare"},
-            {"text": "Following", "url": f"{origin}/following"},
-        ])
-    return {"inline_keyboard": rows}
 
 
 def drops_message(engine, lang="bs", now=None, limit=10):
@@ -645,7 +624,6 @@ def handle_digest(engine, *, headers, mode, environ=None, now=None, ledger=None,
     if plan["action"] != "send":
         return 200, body
     payload = message_payload(config.chat_id, text)
-    payload["reply_markup"] = digest_keyboard(config.market_url)
     try:
         result = call(config, "sendMessage", payload)
     except TelegramAPIError:
