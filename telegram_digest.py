@@ -107,6 +107,8 @@ CUTS_SQL = """
 # "Najzanimljivije novo": listings first seen in the latest run that are priced at least 15% under
 # the median of the same model and year (at least 4 similar ads seen in 90 days), with mileage at or
 # under that cohort's median. Grounded in our data only; recent cars with absurd mileage are skipped.
+# New cars (year >= 2025 and under 1,000 km) are not used-car deals: they are neither standouts nor part
+# of the comparison median. A NULL mileage is never "new" (such rows are dropped by the NOT NULL filter).
 SEEN_SQL = """
   WITH recent AS (
     SELECT c.listing_id,coalesce(l.make,c.make) AS make,coalesce(l.model,c.model) AS model,
@@ -118,6 +120,7 @@ SEEN_SQL = """
       AND c.collection_method IN ('olx_api','olx_website')
       AND c.price_status='priced' AND c.price>0
       AND c.year IS NOT NULL AND c.mileage IS NOT NULL
+      AND NOT (c.year >= 2025 AND c.mileage < 1000)
       AND c.last_verified_at >= (now() AT TIME ZONE 'UTC') - interval '90 days'
   ), cohort AS (
     SELECT label,year,count(*) AS n,
@@ -135,7 +138,44 @@ SEEN_SQL = """
   ORDER BY r.first_seen_at DESC,discount_pct DESC,r.listing_id
   LIMIT 2
 """
-# "Najviše novih": the brand with the most ads our collector saw for the first time in the latest run
+# "Cijene": the make+model whose median asking price moved the most over the last PRICE_WINDOW_DAYS
+# versus the PRICE_WINDOW_DAYS before that. Each listing counts once per window (its latest priced
+# observation in it), at least TREND_MIN_ADS ads in both windows, new cars (year >= 2025 and under
+# 1,000 km) excluded. A NULL year or mileage is never "new".
+TREND_MIN_ADS = 10
+TREND_SQL = """
+  WITH obs AS (
+    SELECT DISTINCT ON (s.listing_id,w.win)
+      s.listing_id,w.win,s.asking_price,
+      trim(concat_ws(' ',coalesce(l.make,c.make),coalesce(l.model,c.model))) AS label
+    FROM listing_snapshots s
+    JOIN car_listings c ON c.listing_id=s.listing_id
+    LEFT JOIN dealer_vehicle_labels l ON l.listing_id=s.listing_id
+    CROSS JOIN LATERAL (SELECT CASE
+        WHEN s.observed_at>:mid AND s.observed_at<=:as_of THEN 'cur'
+        WHEN s.observed_at>:start AND s.observed_at<=:mid THEN 'prev' END AS win) w
+    WHERE w.win IS NOT NULL
+      AND c.source='olx.ba'
+      AND s.price_status='priced' AND s.asking_price>0
+      AND (c.year IS NULL OR c.mileage IS NULL OR c.year<2025 OR c.mileage>=1000)
+    ORDER BY s.listing_id,w.win,s.observed_at DESC,s.id DESC
+  ), med AS (
+    SELECT label,
+      count(*) FILTER (WHERE win='cur') AS n_cur,
+      count(*) FILTER (WHERE win='prev') AS n_prev,
+      percentile_cont(.5) WITHIN GROUP (ORDER BY asking_price) FILTER (WHERE win='cur') AS med_cur,
+      percentile_cont(.5) WITHIN GROUP (ORDER BY asking_price) FILTER (WHERE win='prev') AS med_prev
+    FROM obs WHERE label<>'' GROUP BY label
+  )
+  SELECT label,n_cur,n_prev,med_cur,med_prev,
+    round((CAST(med_cur AS numeric)/CAST(med_prev AS numeric)-1)*100) AS change_pct
+  FROM med
+  WHERE n_cur>=CAST(:min_ads AS integer) AND n_prev>=CAST(:min_ads AS integer) AND med_prev>0
+    AND round((CAST(med_cur AS numeric)/CAST(med_prev AS numeric)-1)*100)<>0
+  ORDER BY abs(med_cur/med_prev-1) DESC,label
+  LIMIT 1
+"""
+# Fallback "Najviše novih": the brand with the most ads our collector saw for the first time in the latest run
 # window (the same window as SEEN_SQL and the status line).
 # The collector does not record when an ad leaves search, so disappearance is not measured here.
 HOT_SQL = """
@@ -445,6 +485,24 @@ def _status_line(run, flags):
     return f"⚠️ Djelimičan prolaz kolektora · {counts}"
 
 
+def _anomaly_line(run, status):
+    """Extra ⚠️ line only for an anomaly (no new ads, errors) the status line does not already flag.
+
+    A run with errors is always classified partial, so its status line is already ⚠️ and no second
+    line is added; the same holds for a missing run. A discovery gap is not a separate stored flag
+    (a budget-limited run is expected and healthy), so it is not reported here.
+    """
+    if not run or status.startswith("⚠️"):
+        return None
+    problems = []
+    if int(run.get("new_listings") or 0) == 0:
+        problems.append("0 novih oglasa u zadnjem prolazu")
+    errors = int(run.get("errors") or 0)
+    if errors > 0:
+        problems.append(f"{errors} {plural_bs(errors, 'greška', 'greške', 'grešaka')} u zadnjem prolazu")
+    return "⚠️ Pažnja: " + " · ".join(problems) if problems else None
+
+
 def _assemble(parts, limit=MAX_DIGEST_CHARS):
     """Join (text, optional) rows. Drop optional rows from the bottom until it fits.
 
@@ -481,6 +539,9 @@ def render_digest(evidence, tz=SARAJEVO):
         _row(f"🚗 <b>Garaža · {_WEEKDAYS[local.weekday()]} {local.day}. {_MONTHS[local.month - 1]}</b>"),
         _row(esc(status)),
     ]
+    warning = _anomaly_line(run, status)
+    if warning:
+        parts.append(_row(esc(warning)))
 
     cuts = list(evidence.get("notable_cuts") or [])
     if cuts:
@@ -501,8 +562,17 @@ def render_digest(evidence, tz=SARAJEVO):
                   f"za {int(item.get('n') or 0)} sličnih · {_amount(item.get('mileage') or 0)} km"),
             optional=True))
 
+    trend = evidence.get("trend")
     hot = evidence.get("hot")
-    if hot and hot.get("make"):
+    if trend and trend.get("label") and trend.get("change_pct"):
+        pct = int(trend["change_pct"])
+        sign = "−" if pct < 0 else "+"
+        n = int(trend.get("n_cur") or 0)
+        parts.append(_row(esc(
+            f"🔥 {trend['label']}: medijan {sign}{abs(pct)}% ove sedmice "
+            f"({_money(trend.get('med_cur'))}, {n} {plural_bs(n, 'oglas', 'oglasa', 'oglasa')})"),
+            optional=True))
+    elif hot and hot.get("make"):
         parts.append(_row(esc(f"🔥 Najviše novih: {hot['make']} ({int(hot.get('n') or 0)} "
                               f"od {int(hot.get('total') or 0)})"), optional=True))
 
@@ -523,6 +593,9 @@ def load_digest_evidence(engine, now):
         cuts = _all(connection, CUTS_SQL, {"cutoff": cutoff, "as_of": as_of, "limit": DIGEST_CUTS})
         seen = []
         hot = None
+        trend = _one(connection, TREND_SQL, {
+            "as_of": as_of, "mid": cutoff, "start": cutoff - timedelta(days=PRICE_WINDOW_DAYS),
+            "min_ads": TREND_MIN_ADS})
         if run and run.get("started_at") and run.get("finished_at"):
             window = {"started": run["started_at"], "finished": run["finished_at"]}
             seen = _all(connection, SEEN_SQL, window)
@@ -538,6 +611,7 @@ def load_digest_evidence(engine, now):
         "notable_cuts": cuts,
         "first_seen": seen,
         "hot": hot,
+        "trend": trend,
     }
 
 

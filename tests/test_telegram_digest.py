@@ -16,6 +16,8 @@ from telegram_digest import (
     CLEAN_SQL,
     RUN_SQL,
     SEEN_SQL,
+    TREND_SQL,
+    TREND_MIN_ADS,
     DigestConfig,
     FileLedger,
     HOT_SQL,
@@ -155,6 +157,64 @@ class DigestRendererTests(unittest.TestCase):
         self.assertEqual(2, text.count("🆕"))
         self.assertNotIn("Škoda", text)
 
+    def test_second_standout_shows_with_the_same_thresholds(self):
+        text = render_digest(evidence(), SARAJEVO)
+        self.assertEqual(2, text.count("🆕"))
+        self.assertIn("16% ispod medijana 19.500 KM za 5 sličnih", text)
+        sql = " ".join(SEEN_SQL.split())
+        self.assertTrue(sql.endswith("LIMIT 2"))
+        self.assertIn("r.price<=0.85*k.med_price AND r.mileage<=k.med_km", sql)
+        self.assertIn("HAVING count(*)>=4", sql)
+
+    def test_trend_line_replaces_the_brand_volume_line(self):
+        trend = {"label": "Volkswagen Golf 7", "change_pct": -4, "med_cur": 12400, "n_cur": 23, "n_prev": 19}
+        text = render_digest(evidence(trend=trend), SARAJEVO)
+        self.assertIn("🔥 Volkswagen Golf 7: medijan −4% ove sedmice (12.400 KM, 23 oglasa)", text)
+        self.assertNotIn("Najviše novih", text)
+        self.assertEqual(1, text.count("🔥"))
+
+    def test_trend_line_signs_and_plurals(self):
+        up = {"label": "Audi A4", "change_pct": 6, "med_cur": 21000, "n_cur": 21, "n_prev": 10}
+        text = render_digest(evidence(trend=up), SARAJEVO)
+        self.assertIn("🔥 Audi A4: medijan +6% ove sedmice (21.000 KM, 21 oglas)", text)
+
+    def test_no_trend_falls_back_to_the_brand_volume_line(self):
+        text = render_digest(evidence(trend=None), SARAJEVO)
+        self.assertIn("🔥 Najviše novih: Volkswagen (23 od 110)", text)
+        text = render_digest(evidence(trend=None, hot=None), SARAJEVO)
+        self.assertNotIn("🔥", text)
+
+    def test_trend_query_needs_enough_ads_in_both_windows_and_skips_new_cars(self):
+        sql = " ".join(TREND_SQL.split())
+        self.assertGreaterEqual(TREND_MIN_ADS, 10)
+        self.assertIn("n_cur>=CAST(:min_ads AS integer) AND n_prev>=CAST(:min_ads AS integer)", sql)
+        self.assertIn("(c.year IS NULL OR c.mileage IS NULL OR c.year<2025 OR c.mileage>=1000)", sql)
+        self.assertIn("LIMIT 1", sql)
+        self.assertNotIn("sold", sql.lower())
+
+    def test_warning_line_only_on_anomalies(self):
+        clean = evidence(clean_at=utc("2026-11-04T17:31:22"),
+                         run=dict(evidence()["run"], status="completed", errors=0, new_listings=47))
+        self.assertNotIn("Pažnja", render_digest(clean, SARAJEVO))
+        zero = evidence(clean_at=utc("2026-11-04T17:31:22"),
+                        run=dict(evidence()["run"], status="completed", errors=0, new_listings=0))
+        text = render_digest(zero, SARAJEVO)
+        lines = text.split("\n")
+        self.assertTrue(lines[1].startswith("✅"))
+        self.assertEqual("⚠️ Pažnja: 0 novih oglasa u zadnjem prolazu", lines[2])
+        self.assertEqual(1, text.count("Pažnja"))
+
+    def test_warning_line_is_not_repeated_when_the_status_line_already_warns(self):
+        text = render_digest(evidence(), SARAJEVO)  # partial run with 5 errors: status line is ⚠️
+        self.assertNotIn("Pažnja", text)
+        self.assertEqual(7, len(text.split("\n")))
+
+    def test_anomaly_line_reports_errors_on_a_run_the_status_line_calls_ok(self):
+        from telegram_digest import _anomaly_line
+        run = {"new_listings": 12, "errors": 2}
+        self.assertEqual("⚠️ Pažnja: 2 greške u zadnjem prolazu", _anomaly_line(run, "✅ Sve radi"))
+        self.assertIsNone(_anomaly_line({"new_listings": 12, "errors": 0}, "✅ Sve radi"))
+
     def test_clean_run_is_one_green_line_and_hides_the_stale_warning(self):
         text = render_digest(evidence(
             clean_at=utc("2026-11-04T17:31:22"),
@@ -231,6 +291,28 @@ class DigestRendererTests(unittest.TestCase):
         self.assertIn("ORDER BY r.first_seen_at DESC,discount_pct DESC", sql)
         self.assertTrue(sql.endswith("LIMIT 2"))
         self.assertIn("r.price<=0.85*k.med_price", sql)
+
+    def test_new_cars_are_excluded_from_standouts_and_the_median_pool(self):
+        sql = " ".join(SEEN_SQL.split())
+        rule = "AND NOT (c.year >= 2025 AND c.mileage < 1000)"
+        self.assertIn(rule, sql)
+        # The rule lives in the `recent` CTE, which feeds both the candidates and the cohort median,
+        # so a 2026 / 0 km car is neither a standout nor pulls the median down.
+        self.assertLess(sql.index("WITH recent AS"), sql.index(rule))
+        self.assertLess(sql.index(rule), sql.index("), cohort AS"))
+        self.assertIn("FROM recent WHERE label<>''", sql)
+        self.assertIn("FROM car_listings c", sql.split("), cohort AS")[0])
+
+    def test_new_car_rule_keeps_used_and_high_mileage_cars_and_ignores_null_mileage(self):
+        sql = " ".join(SEEN_SQL.split())
+        # Only 2025+ AND < 1000 km is dropped: a 2024 car or a 2025+ car with real mileage stays.
+        self.assertIn("c.year >= 2025 AND c.mileage < 1000", sql)
+        self.assertNotIn("c.year >= 2024", sql)
+        self.assertNotIn("c.mileage <= 1000", sql)
+        # NULL mileage is not treated as new: NOT (.. AND NULL) must not be what filters it, the
+        # explicit NOT NULL clause is the (pre-existing) gate and runs before the new-car rule.
+        self.assertLess(sql.index("c.mileage IS NOT NULL"), sql.index("NOT (c.year >= 2025"))
+        self.assertNotIn("coalesce(c.mileage", sql.lower())
 
     def test_hot_query_counts_new_ads_per_brand_only(self):
         sql = " ".join(HOT_SQL.split()).lower()
