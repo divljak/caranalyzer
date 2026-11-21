@@ -1,0 +1,853 @@
+# Garaža bot stress cases: realistic Bosnian / Serbian / Croatian questions and conversations.
+#
+# The EXPECTATIONS are product intent, written from what a sensible user wants, not from what the parser
+# does today. A failing case is a finding. See tests/stress/README.md for the schema.
+#
+# Turn keys:   say, reply (true = Telegram reply to the bot's previous message), covers [1-8], expect
+# covers:      which of the 8 answer-quality fixes (see README) should make this turn pass; omit = a new issue
+# expect keys: intent (str|list), note, filters{search,budget,price_min,mileage_max,mileage_min,year_min,
+#              year_max,fuel,transmission,new_ok,family,low_km}, search_has[], search_lacks[], sort
+#              (price|recency), reply_has[], reply_has_any[], reply_lacks[], buttons_min, buttons_have[],
+#              buttons_have_any[], handled, any_of[] (alternative acceptable readings)
+#              footer_chars_max (characters of notes + disclaimer under the listing rows), handled
+# Year values: "Y-10" = this year minus 10.   Case keys: id, category, title, chat (private|group), dataset (rows|empty)
+
+cases:
+
+# ───────────────────────── the real failing chat (Bosnian) ─────────────────────────
+- id: orig-1-km-is-price
+  category: original_chat
+  title: "'do 30 000km' without a model, meant 30k KM (real chat, message 1)"
+  turns:
+    - say: "Auto do 30 000km da nije starije od 10 godina"
+      covers: [1]
+      expect: {intent: clarify, note: km_unit}
+
+- id: orig-2-budget-correction-standalone
+  category: original_chat
+  title: "'Budžet je 30k a prva dva su izvan budžeta' alone (real chat, message 2)"
+  turns:
+    - say: "Budžet je 30k a prva dva su izvan budžeta"
+      covers: [2]
+      expect: {intent: [find, suggest, liquidity], filters: {budget: 30000}}
+
+- id: orig-3-mixed-budget-sell-trends
+  category: original_chat
+  title: "budget + what sells fast + trends in one message (real chat, message 3)"
+  turns:
+    - say: "Ok imam 30k budžet. Koje auto da kupim koje mogu brzo prodati. Koji su trendovi"
+      covers: [4]
+      expect:
+        intent: [liquidity, suggest]
+        filters: {budget: 30000}
+        reply_has_any: [trend, preskoč, preskoc, nisam odgovor, posebno, odvojeno, zasebno]
+
+- id: orig-4-which-models
+  category: original_chat
+  title: "'Da ali koji auto, koji modeli' alone: no budget known, so asking for one is right (sanity check)"
+  turns:
+    - say: "Da ali koji auto, koji modeli"
+      expect: {intent: clarify, buttons_min: 2}
+
+- id: orig-5-kn-resale
+  category: original_chat
+  title: "'Bilo koji model koji se brzo prodaje do 30000kn' (real chat, message 5)"
+  dataset: empty
+  turns:
+    - say: "Bilo koji model koji se brzo prodaje do 30000kn"
+      covers: [1, 6]
+      expect:
+        intent: [liquidity, suggest, clarify]
+        search_lacks: [bilo, kn]
+        buttons_min: 1
+
+- id: orig-full-conversation
+  category: original_chat
+  title: "the whole failing conversation in order, one private chat"
+  turns:
+    - say: "Auto do 30 000km da nije starije od 10 godina"
+      covers: [1]
+      expect: {intent: clarify, note: km_unit}
+    - say: "Budžet je 30k a prva dva su izvan budžeta"
+      covers: [2]
+      expect: {filters: {budget: 30000}}
+    - say: "Ok imam 30k budžet. Koje auto da kupim koje mogu brzo prodati. Koji su trendovi"
+      covers: [4]
+      expect: {intent: [liquidity, suggest], filters: {budget: 30000}}
+    - say: "Da ali koji auto, koji modeli"
+      covers: [3]
+      expect: {intent: [suggest, liquidity, find], filters: {budget: 30000}}
+    - say: "Bilo koji model koji se brzo prodaje do 30000kn"
+      covers: [1, 6]
+      expect: {intent: [liquidity, suggest, clarify], search_lacks: [bilo, kn]}
+
+# ───────────────────────── price vs mileage ambiguity ─────────────────────────
+- id: unit-km-lower-no-model
+  category: price_vs_mileage
+  title: "'do 20000km' with no model is ambiguous: ask"
+  turns:
+    - say: "auto do 20000 km"
+      covers: [1]
+      expect: {intent: clarify, note: km_unit}
+
+- id: unit-km-upper-no-model
+  category: price_vs_mileage
+  title: "'do 15000 KM' (capital) with no model is a price"
+  turns:
+    - say: "auto do 15000 KM"
+      expect: {intent: find, filters: {budget: 15000, mileage_max: null}}
+
+- id: unit-km-lower-with-model
+  category: price_vs_mileage
+  title: "'Golf do 150000 km' is clearly mileage (too big for a price)"
+  turns:
+    - say: "Golf do 150000 km"
+      expect: {intent: find, filters: {search: golf, mileage_max: 150000, budget: null}}
+
+- id: unit-km-capital-with-model
+  category: price_vs_mileage
+  title: "'Golf 7 do 15000 KM' is a price"
+  turns:
+    - say: "Golf 7 do 15000 KM"
+      expect: {intent: find, filters: {search: golf, budget: 15000, mileage_max: null}}
+
+- id: unit-k-suffix
+  category: price_vs_mileage
+  title: "'15k' is 15.000 KM"
+  turns:
+    - say: "passat do 15k"
+      expect: {intent: find, filters: {search: passat, budget: 15000, mileage_max: null}}
+
+- id: unit-hiljada
+  category: price_vs_mileage
+  title: "'20 hiljada' is a price"
+  turns:
+    - say: "Octavia do 20 hiljada"
+      expect: {intent: find, filters: {search: octavia, budget: 20000, mileage_max: null}}
+
+- id: unit-soma
+  category: price_vs_mileage
+  title: "slang 'do 15 soma' (soma = 1000 KM)"
+  turns:
+    - say: "Golf do 15 soma"
+      expect: {intent: find, filters: {search: golf, budget: 15000, mileage_max: null}}
+
+- id: unit-kn
+  category: price_vs_mileage
+  title: "'kn' (kuna) is a price, never mileage or a model word"
+  turns:
+    - say: "Golf 6 do 30000kn"
+      covers: [1]
+      expect:
+        any_of:
+          - {intent: find, filters: {search: golf, budget: 30000, mileage_max: null}}
+          - {intent: clarify, note: currency}
+
+- id: unit-kn-no-model
+  category: price_vs_mileage
+  title: "'auto do 30000 kn' must not become a search for the word 'kn'"
+  turns:
+    - say: "auto do 30000 kn"
+      covers: [1]
+      expect:
+        search_lacks: [kn]
+        filters: {mileage_max: null}
+
+- id: unit-eur
+  category: price_vs_mileage
+  title: "price in EUR: ask about the currency, never read it as KM"
+  turns:
+    - say: "Golf 7 do 10000 EUR"
+      expect: {intent: clarify, note: currency}
+
+- id: unit-evra
+  category: price_vs_mileage
+  title: "price in 'evra'"
+  turns:
+    - say: "passat do 8000 evra"
+      expect: {intent: clarify, note: currency}
+
+- id: unit-eura-symbol
+  category: price_vs_mileage
+  title: "price with the euro sign"
+  turns:
+    - say: "audi a4 do 12000€"
+      expect: {intent: clarify, note: currency}
+
+- id: unit-bare-number-after-model
+  category: price_vs_mileage
+  title: "'golf 15' is ambiguous (2015? 15k?): ask, do not guess"
+  turns:
+    - say: "golf 15"
+      expect: {intent: clarify}
+
+- id: unit-km-plus-year-no-model
+  category: price_vs_mileage
+  title: "'do 30000km novije od 2018' without a model"
+  turns:
+    - say: "do 30000km novije od 2018"
+      covers: [1]
+      expect: {intent: clarify, note: km_unit}
+
+# ───────────────────────── budgets and corrections ─────────────────────────
+- id: budget-correction-budzet-je
+  category: budget_corrections
+  title: "'budžet je 25k' after a search replaces the price bound"
+  turns:
+    - say: "golf do 15000 KM"
+      expect: {intent: find, filters: {search: golf, budget: 15000}}
+    - say: "budžet je 25k"
+      covers: [2]
+      expect: {intent: find, filters: {search: golf, budget: 25000}}
+
+- id: budget-correction-imam
+  category: budget_corrections
+  title: "'imam 20k' after a search"
+  turns:
+    - say: "passat do 10000 KM"
+      expect: {intent: find, filters: {search: passat, budget: 10000}}
+    - say: "imam 20k"
+      covers: [2]
+      expect: {intent: find, filters: {search: passat, budget: 20000}}
+
+- id: budget-correction-izvan
+  category: budget_corrections
+  title: "'ovo je izvan budžeta, imam 12k'"
+  turns:
+    - say: "octavia do 25000 KM"
+      expect: {intent: find, filters: {budget: 25000}}
+    - say: "ovo je izvan budžeta, imam 12k"
+      covers: [2]
+      expect: {intent: find, filters: {search: octavia, budget: 12000}}
+
+- id: budget-correction-preko
+  category: budget_corrections
+  title: "'preko budžeta' with a new limit"
+  turns:
+    - say: "golf 6 do 9000 KM"
+      expect: {intent: find, filters: {budget: 9000}}
+    - say: "sve preko budžeta, do 7000"
+      covers: [2]
+      expect: {intent: find, filters: {search: golf, budget: 7000}}
+
+- id: budget-correction-no-number
+  category: budget_corrections
+  title: "'izvan budžeta' with no new number: say what is needed, no crash"
+  turns:
+    - say: "golf do 12000 KM"
+      expect: {intent: find}
+    - say: "ovo je izvan budžeta"
+      covers: [2]
+      expect: {intent: [clarify, find], reply_has_any: [budžet, budzet, koliko, limit]}
+
+- id: budget-correction-mislim
+  category: budget_corrections
+  title: "existing: 'mislim da sam stavio 50-60k' corrects the previous range"
+  turns:
+    - say: "golf 7 do 30000 KM"
+      expect: {filters: {budget: 30000}}
+    - say: "mislim da sam stavio 15-20k"
+      expect: {intent: find, filters: {search: golf, price_min: 15000, budget: 20000}}
+
+- id: budget-remembered-across-messages
+  category: budget_corrections
+  title: "a stated budget carries to the next vague question"
+  turns:
+    - say: "imam 20k budžet"
+      expect: {intent: [suggest, find, clarify]}
+    - say: "koji su modeli?"
+      covers: [3]
+      expect: {intent: [suggest, find, liquidity], filters: {budget: 20000}}
+
+- id: budget-remembered-then-fuel
+  category: budget_corrections
+  title: "budget set once, then only 'dizel?'"
+  turns:
+    - say: "šta mogu kupiti do 18000 KM"
+      expect: {intent: [suggest, find], filters: {budget: 18000}}
+    - say: "a dizel?"
+      covers: [3]
+      expect: {filters: {budget: 18000, fuel: diesel}}
+
+- id: budget-max
+  category: budget_corrections
+  title: "'maksimalno 9000' reads as a price"
+  turns:
+    - say: "polo maksimalno 9000 KM"
+      expect: {intent: find, filters: {search: polo, budget: 9000}}
+
+# ───────────────────────── follow-ups that rely on context ─────────────────────────
+- id: follow-year
+  category: followups
+  title: "'a od 2018?' narrows the previous search"
+  turns:
+    - say: "golf do 15000 KM"
+      expect: {filters: {search: golf, budget: 15000}}
+    - say: "a od 2018?"
+      expect: {intent: find, filters: {search: golf, budget: 15000, year_min: 2018}}
+
+- id: follow-fuel
+  category: followups
+  title: "'a dizel?' after a model search"
+  turns:
+    - say: "octavia do 20000 KM"
+      expect: {filters: {search: octavia}}
+    - say: "a dizel?"
+      expect: {intent: find, filters: {search: octavia, budget: 20000, fuel: diesel}}
+
+- id: follow-gearbox
+  category: followups
+  title: "'a automatik?'"
+  turns:
+    - say: "passat dizel do 18000 KM"
+      expect: {filters: {search: passat, fuel: diesel}}
+    - say: "a automatik?"
+      expect: {intent: find, filters: {search: passat, fuel: diesel, transmission: automatic}}
+
+- id: follow-more
+  category: followups
+  title: "'pokaži još' pages on"
+  turns:
+    - say: "golf do 15000 KM"
+      expect: {intent: find}
+    - say: "pokaži još"
+      expect: {intent: [find, no_more], filters: {search: golf}}
+
+- id: follow-cheaper
+  category: followups
+  title: "'nešto jeftinije' lowers the bound or asks how much"
+  turns:
+    - say: "golf do 15000 KM"
+      expect: {intent: find}
+    - say: "nešto jeftinije"
+      expect:
+        any_of:
+          - {intent: find, filters: {search: golf}}
+          - {intent: clarify, reply_has_any: [koliko, budžet, budzet, do]}
+
+- id: follow-newer
+  category: followups
+  title: "'a novije?' narrows by year or asks which year"
+  turns:
+    - say: "passat do 12000 KM"
+      expect: {intent: find}
+    - say: "a novije?"
+      expect:
+        any_of:
+          - {intent: find, filters: {search: passat}}
+          - {intent: clarify}
+
+- id: follow-reply-to-bot
+  category: followups
+  title: "a Telegram reply to the bot's answer carries the scope"
+  turns:
+    - say: "octavia do 20000 KM"
+      expect: {intent: find}
+    - say: "od 2017"
+      reply: true
+      expect: {intent: find, filters: {search: octavia, budget: 20000, year_min: 2017}}
+
+
+# ───────────────────────── mixed multi-intent ─────────────────────────
+- id: mixed-trends-and-find
+  category: mixed_intents
+  title: "'trendovi i golf do 15000' answers the clear part and says what it skipped"
+  turns:
+    - say: "Pokaži trendove ali i golf do 15000 KM"
+      covers: [4]
+      expect:
+        intent: [trends, find]
+        reply_has_any: [preskoč, preskoc, posebno, odvojeno, zasebno, nisam odgovor, zatim, pitaj]
+
+- id: mixed-compare-and-budget
+  category: mixed_intents
+  title: "'golf vs octavia i šta da kupim do 20k'"
+  turns:
+    - say: "Golf vs Octavia, a onda mi reci šta da kupim do 20000 KM"
+      covers: [4]
+      expect:
+        intent: [compare, suggest]
+        reply_has_any: [preskoč, preskoc, posebno, odvojeno, zasebno, nisam odgovor, zatim, pitaj]
+
+- id: mixed-price-and-liquidity
+  category: mixed_intents
+  title: "'koliko košta golf 7 i da li se brzo prodaje'"
+  turns:
+    - say: "Koliko košta golf 7 2016 i da li se brzo prodaje?"
+      covers: [4]
+      expect:
+        intent: [price_check, liquidity, model_stats]
+        reply_has_any: [preskoč, preskoc, posebno, odvojeno, zasebno, nisam odgovor, zatim, pitaj]
+
+- id: mixed-greeting-and-search
+  category: mixed_intents
+  title: "greeting + search: do the search"
+  turns:
+    - say: "Zdravo, treba mi golf 7 do 15000 KM"
+      expect: {intent: find, filters: {search: golf, budget: 15000}}
+
+- id: mixed-three-questions
+  category: mixed_intents
+  title: "three questions at once (first clear one answered)"
+  turns:
+    - say: "Imam 25k. Šta da kupim? Šta se najbrže prodaje? Ima li nešto novo danas?"
+      covers: [4]
+      expect:
+        intent: [suggest, liquidity]
+        filters: {budget: 25000}
+        reply_has_any: [preskoč, preskoc, posebno, odvojeno, zasebno, nisam odgovor, zatim, pitaj]
+
+- id: mixed-thanks-and-new
+  category: mixed_intents
+  title: "'hvala, a imaš li passat dizel' is a search"
+  turns:
+    - say: "hvala, a imaš li passat dizel"
+      expect: {intent: find, filters: {search: passat, fuel: diesel}}
+
+# ───────────────────────── vague advice ─────────────────────────
+- id: vague-sta-da-kupim
+  category: vague_advice
+  title: "'šta da kupim' with no budget: ask for one"
+  turns:
+    - say: "šta da kupim"
+      expect: {intent: clarify, buttons_min: 2}
+
+- id: vague-sta-da-kupim-budget
+  category: vague_advice
+  title: "'šta da kupim do 20000 KM' gives a shortlist"
+  turns:
+    - say: "šta da kupim do 20000 KM"
+      expect: {intent: suggest, filters: {budget: 20000}}
+
+- id: vague-brzo-se-prodaje
+  category: vague_advice
+  title: "'koji auto se brzo prodaje' with no budget"
+  turns:
+    - say: "koji auto se brzo prodaje"
+      covers: [6]
+      expect: {intent: [liquidity, clarify], buttons_min: 1}
+
+- id: vague-brzo-se-prodaje-budget
+  category: vague_advice
+  title: "'koji se auto brzo prodaje do 15000 KM'"
+  turns:
+    - say: "koji se auto brzo prodaje do 15000 KM"
+      expect: {intent: liquidity, filters: {budget: 15000}}
+
+- id: vague-liquidity-empty-data
+  category: vague_advice
+  title: "not enough sold-fast data must still end with suggestions, not a dead end"
+  dataset: empty
+  turns:
+    - say: "koji se auto brzo prodaje do 15000 KM"
+      covers: [6]
+      expect: {intent: liquidity, buttons_min: 2}
+
+- id: vague-pouzdan-dizel
+  category: vague_advice
+  title: "'pouzdan dizel za porodicu'"
+  turns:
+    - say: "pouzdan dizel za porodicu"
+      expect:
+        any_of:
+          - {intent: clarify, buttons_min: 1}
+          - {intent: [suggest, find], filters: {fuel: diesel, family: true}}
+
+- id: vague-porodicni-budget
+  category: vague_advice
+  title: "'porodični auto do 18000 KM dizel'"
+  turns:
+    - say: "porodični auto do 18000 KM dizel"
+      expect: {intent: find, filters: {family: true, budget: 18000, fuel: diesel}}
+
+- id: vague-najbolja-ponuda
+  category: vague_advice
+  title: "'ima li neka dobra prilika' -> deals"
+  turns:
+    - say: "ima li neka dobra prilika ove sedmice"
+      expect: {intent: deals}
+
+- id: vague-no-model-sorted-by-price
+  category: vague_advice
+  title: "a search without a model lists the cheapest first, not the newest"
+  turns:
+    - say: "auto do 10000 KM"
+      covers: [5]
+      expect: {intent: find, filters: {budget: 10000}, sort: price}
+
+# ───────────────────────── years / age ─────────────────────────
+- id: year-ne-starije-10
+  category: years_age
+  title: "'ne starije od 10 godina'"
+  turns:
+    - say: "golf dizel ne starije od 10 godina"
+      expect: {intent: find, filters: {search: golf, fuel: diesel, year_min: "Y-10"}}
+
+- id: year-novija-od
+  category: years_age
+  title: "'novija od 2018'"
+  turns:
+    - say: "octavia novija od 2018"
+      expect: {intent: find, filters: {search: octavia, year_min: 2018}}
+
+- id: year-od-do
+  category: years_age
+  title: "'2015-2018'"
+  turns:
+    - say: "golf 2015-2018 do 15000 KM"
+      expect: {intent: find, filters: {search: golf, year_min: 2015, year_max: 2018, budget: 15000}}
+
+- id: year-two-digit
+  category: years_age
+  title: "'passat 08' is a year (leading zero)"
+  turns:
+    - say: "passat 08"
+      expect: {intent: find, filters: {search: passat, year_min: 2008, year_max: 2008}}
+
+- id: year-golf-8
+  category: years_age
+  title: "'golf 8' is a generation, not a price or 2008"
+  turns:
+    - say: "golf 8"
+      expect: {intent: find, filters: {search: golf, year_min: 2019}}
+
+- id: year-age-with-budget-no-model
+  category: years_age
+  title: "'do 20000 KM ne starije od 8 godina' with no model"
+  turns:
+    - say: "do 20000 KM ne starije od 8 godina"
+      expect: {intent: [find, suggest], filters: {budget: 20000, year_min: "Y-8"}}
+
+# ───────────────────────── new cars ─────────────────────────
+- id: new-novi-golf
+  category: new_cars
+  title: "'novi golf' keeps this year's cars in"
+  turns:
+    - say: "novi golf"
+      expect: {intent: find, filters: {search: golf, new_ok: true}}
+
+- id: new-0km
+  category: new_cars
+  title: "'golf 0 km'"
+  turns:
+    - say: "golf 0 km"
+      expect: {intent: find, filters: {search: golf, new_ok: true, mileage_max: null}}
+
+- id: new-nov-auto-budget
+  category: new_cars
+  title: "'nov auto do 40000 KM' (price, not mileage)"
+  turns:
+    - say: "nov auto do 40000 KM"
+      expect: {intent: find, filters: {budget: 40000, new_ok: true}}
+
+
+# ───────────────────────── fuel / gearbox / body ─────────────────────────
+- id: attr-dizel
+  category: fuel_gearbox_body
+  title: "diesel"
+  turns:
+    - say: "dizel do 10000 KM"
+      expect: {intent: find, filters: {fuel: diesel, budget: 10000}}
+
+- id: attr-benzin
+  category: fuel_gearbox_body
+  title: "petrol"
+  turns:
+    - say: "polo benzin do 9000 KM"
+      expect: {intent: find, filters: {search: polo, fuel: petrol, budget: 9000}}
+
+- id: attr-automatik
+  category: fuel_gearbox_body
+  title: "'automatik'"
+  turns:
+    - say: "passat automatik do 20000 KM"
+      expect: {intent: find, filters: {search: passat, transmission: automatic, budget: 20000}}
+
+- id: attr-manuelni
+  category: fuel_gearbox_body
+  title: "'manuelac'"
+  turns:
+    - say: "golf 7 manuelac dizel"
+      expect: {intent: find, filters: {search: golf, transmission: manual, fuel: diesel}}
+
+- id: attr-suv
+  category: fuel_gearbox_body
+  title: "'SUV do 25000 KM': body type is not a model name, never searched as one"
+  turns:
+    - say: "neki SUV do 25000 KM"
+      expect:
+        search_lacks: [suv]
+        intent: [find, suggest, clarify]
+
+- id: attr-karavan
+  category: fuel_gearbox_body
+  title: "'karavan dizel do 12000 KM'"
+  turns:
+    - say: "karavan dizel do 12000 KM"
+      expect:
+        search_lacks: [karavan]
+        filters: {fuel: diesel, budget: 12000}
+
+
+# ───────────────────────── cities ─────────────────────────
+- id: city-sarajevo
+  category: cities
+  title: "'golf u Sarajevu': the city must not become part of the model"
+  turns:
+    - say: "golf do 15000 KM u Sarajevu"
+      expect: {intent: find, filters: {search: golf, budget: 15000}, search_lacks: [sarajevu, sarajevo]}
+
+- id: city-mostar
+  category: cities
+  title: "'passat Mostar'"
+  turns:
+    - say: "passat dizel Mostar"
+      expect: {intent: find, filters: {search: passat, fuel: diesel}, search_lacks: [mostar]}
+
+- id: city-banja-luka
+  category: cities
+  title: "'octavia iz Banje Luke'"
+  turns:
+    - say: "octavia iz Banje Luke do 20000 KM"
+      expect: {intent: find, filters: {search: octavia, budget: 20000}, search_lacks: [banje, luke, banja, luka]}
+
+- id: city-tuzla
+  category: cities
+  title: "'ima li u Tuzli golf'"
+  turns:
+    - say: "ima li u Tuzli neki golf"
+      expect: {intent: find, filters: {search: golf}, search_lacks: [tuzli, tuzla]}
+
+
+# ───────────────────────── typos / no diacritics / slang ─────────────────────────
+- id: typo-no-diacritics
+  category: typos_slang
+  title: "no diacritics: 'sta da kupim do 15000 KM'"
+  turns:
+    - say: "sta da kupim do 15000 KM"
+      expect: {intent: suggest, filters: {budget: 15000}}
+
+- id: typo-skoda
+  category: typos_slang
+  title: "'skoda oktavija'"
+  turns:
+    - say: "skoda oktavija dizel do 18000 KM"
+      expect: {intent: find, filters: {fuel: diesel, budget: 18000}, search_has: [octavia]}
+
+- id: typo-volkswagen
+  category: typos_slang
+  title: "'folksvagen pasat'"
+  turns:
+    - say: "folksvagen pasat do 12000 KM"
+      expect: {intent: find, filters: {budget: 12000}, search_has: [passat], search_lacks: [folksvagen]}
+
+- id: typo-slang-jeftino
+  category: typos_slang
+  title: "'nesto jeftino za grad do 5 soma'"
+  turns:
+    - say: "nesto jeftino za grad do 5 soma"
+      expect: {intent: [find, suggest], filters: {budget: 5000}}
+
+- id: typo-slang-kola
+  category: typos_slang
+  title: "'kola' = car; 'koje kola da uzmem do 12k'"
+  turns:
+    - say: "koja kola da uzmem do 12k"
+      expect: {intent: [suggest, find], filters: {budget: 12000}, search_lacks: [kola]}
+
+- id: typo-spaced-thousands
+  category: typos_slang
+  title: "'do 15 000 KM' with a space as the thousands separator"
+  turns:
+    - say: "golf do 15 000 KM"
+      expect: {intent: find, filters: {search: golf, budget: 15000}}
+
+- id: typo-dizle
+  category: typos_slang
+  title: "'dizle' typo for dizel"
+  turns:
+    - say: "passat dizle do 12000 KM"
+      expect: {intent: find, filters: {search: passat, fuel: diesel, budget: 12000}}
+
+# ───────────────────────── make / model aliases ─────────────────────────
+- id: alias-golf-7
+  category: aliases
+  title: "'Golf 7' is Golf with 2012-2020"
+  turns:
+    - say: "Golf 7"
+      expect: {intent: find, filters: {search: golf, year_min: 2012, year_max: 2020}}
+
+- id: alias-pasat
+  category: aliases
+  title: "'Pasat' (one s)"
+  turns:
+    - say: "pasat do 12000 KM"
+      expect: {intent: find, filters: {search: passat, budget: 12000}}
+
+- id: alias-merc
+  category: aliases
+  title: "'Merc' = Mercedes"
+  turns:
+    - say: "merc do 15000 KM"
+      expect:
+        intent: find
+        filters: {budget: 15000}
+        search_has: [merc]
+
+- id: alias-bembara
+  category: aliases
+  title: "'Bembara' = BMW"
+  turns:
+    - say: "bembara dizel do 20000 KM"
+      expect:
+        intent: find
+        filters: {fuel: diesel, budget: 20000}
+        search_has: [bmw]
+
+- id: alias-c-klasa
+  category: aliases
+  title: "'C klasa'"
+  turns:
+    - say: "c klasa do 20000 KM"
+      expect: {intent: find, filters: {budget: 20000}, search_has: [c klasa]}
+
+- id: alias-clio
+  category: aliases
+  title: "'reno klio'"
+  turns:
+    - say: "reno klio do 6000 KM"
+      expect: {intent: find, filters: {budget: 6000}, search_has: [clio]}
+
+- id: alias-compare
+  category: aliases
+  title: "'golf ili pasat' compare"
+  turns:
+    - say: "golf ili pasat"
+      expect: {intent: compare}
+
+# ───────────────────────── out of scope / greetings ─────────────────────────
+- id: scope-greeting
+  category: out_of_scope
+  title: "'Zdravo' greets"
+  turns:
+    - say: "Zdravo"
+      expect: {intent: chitchat, reply_lacks: [tag]}
+
+- id: scope-greeting-bok
+  category: out_of_scope
+  title: "'bok, kako si'"
+  turns:
+    - say: "bok, kako si"
+      expect: {intent: chitchat}
+
+- id: scope-thanks
+  category: out_of_scope
+  title: "'hvala puno' is an acknowledgement, not a search for 'hvala puno'"
+  turns:
+    - say: "hvala puno"
+      expect: {any_of: [{handled: false}, {intent: chitchat}, {intent: ignore}]}
+
+- id: scope-credit
+  category: out_of_scope
+  title: "loans are out of scope"
+  turns:
+    - say: "može li kredit za auto"
+      expect: {intent: chitchat}
+
+- id: scope-insurance
+  category: out_of_scope
+  title: "insurance"
+  turns:
+    - say: "koliko košta osiguranje za golf"
+      expect: {intent: chitchat}
+
+- id: scope-forecast
+  category: out_of_scope
+  title: "price forecast is unsupported"
+  turns:
+    - say: "hoće li cijene automobila pasti sljedeće godine"
+      expect: {intent: [unsupported, chitchat]}
+
+- id: scope-registration-howto
+  category: out_of_scope
+  title: "how to register a car is a procedure, not a listing"
+  turns:
+    - say: "kako da registrujem auto"
+      expect: {intent: chitchat}
+
+
+# ───────────────────────── group chat ─────────────────────────
+- id: group-greeting-no-tag-reminder
+  category: group_chat
+  title: "a greeting in the group must not nag 'tag me'"
+  chat: group
+  turns:
+    - say: "zdravo"
+      expect: {intent: chitchat, reply_lacks: [označ, tag me, taguj]}
+
+- id: group-help-no-tag-reminder
+  category: group_chat
+  title: "/help must drop the 'in a group, tag me or reply to me' paragraph"
+  chat: group
+  turns:
+    - say: "/help"
+      covers: [8]
+      expect: {reply_lacks: [označ, tag me, tag the bot, "@mention"]}
+
+- id: group-search-no-tag-reminder
+  category: group_chat
+  title: "a search answer in the group carries no tag reminder"
+  chat: group
+  turns:
+    - say: "golf do 15000 KM"
+      expect: {intent: find, reply_lacks: [označ, tag me, taguj]}
+
+- id: group-correction-same-person
+  category: group_chat
+  title: "same person corrects their own question in the group"
+  chat: group
+  turns:
+    - say: "golf do 15000 KM"
+      expect: {intent: find}
+    - say: "mislim da sam stavio 20k"
+      expect: {intent: find, filters: {search: golf, budget: 20000}}
+
+# ───────────────────────── result formatting (needs the canned rows) ─────────────────────────
+- id: fmt-row-detail
+  category: result_format
+  title: "each row names fuel, gearbox and city (the database has them; rows only show year, price, km)"
+  turns:
+    - say: "golf do 20000 KM"
+      covers: [7]
+      expect: {intent: find, reply_has_any: [dizel, benzin, automatik, manuel, sarajevo, mostar, tuzla, banja luka]}
+
+- id: fmt-save-buttons-name-the-car
+  category: result_format
+  title: "save buttons say make and model, not just year and price"
+  turns:
+    - say: "golf do 20000 KM"
+      covers: [7]
+      expect: {intent: find, buttons_have_any: [golf, octavia, astra]}
+
+- id: fmt-short-footer
+  category: result_format
+  title: "with several filters the notes under the results stay short (<= 120 characters in all)"
+  turns:
+    - say: "golf od 2018 dizel automatik do 100000 km do 20000 KM"
+      covers: [7]
+      expect: {intent: find, footer_chars_max: 120}
+
+- id: fmt-no-model-cheapest-first
+  category: result_format
+  title: "'auto do 6000 KM' lists the cheapest first"
+  turns:
+    - say: "auto do 6000 KM"
+      covers: [5]
+      expect: {intent: find, sort: price}
+
+- id: fmt-model-newest-first
+  category: result_format
+  title: "a search WITH a model keeps the recency order (guard against over-fixing fix 5)"
+  turns:
+    - say: "golf do 15000 KM"
+      expect: {intent: find, sort: recency}
