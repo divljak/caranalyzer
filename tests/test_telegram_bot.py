@@ -212,7 +212,7 @@ class FamilyAndCallbackTests(unittest.TestCase):
         intent = parse_question("golf do 20000 Km")
         self.assertEqual(("clarify", "km_unit", 20000), (intent.kind, intent.note, intent.offset))
         text_value, choices = telegram_bot.answer_intent(Mock(), intent, TelegramConfig.from_env(ENV), lang="bs")
-        self.assertEqual("Misliš li 20.000 KM (cijena) ili 20.000 km (kilometraža)?", text_value)
+        self.assertEqual("Cijena (KM) ili kilometraža? (20.000)", text_value)
         self.assertEqual([("💰 Do 20.000 KM (cijena)", "f:20000:0:0:0:golf"),
                           ("🛣 Do 20.000 km (kilometraža)", "f:0:0:20000:0:golf")],
                          [row[0] for row in choices.rows])
@@ -310,21 +310,21 @@ class AnswerQualityDbTests(unittest.TestCase):
         self.assertEqual(("find", Filters("", 10000, family=True)), (intent.kind, intent.filters))
         reply, page = telegram_bot.answer_intent(self.engine, intent, TelegramConfig.from_env(ENV), lang="bs")
         self.assertIsInstance(reply, Html)
-        self.assertEqual(["__qa_oct", "__qa_pas", "__qa_tou"], self.ids(reply))  # seen 1, 2, 3 days ago
+        self.assertEqual(["__qa_pas", "__qa_tou", "__qa_oct"], self.ids(reply))  # no model: cheapest first
         self.assertTrue(reply.startswith("<b>Viđeni oglasi · do 10.000 KM · za porodicu</b>"))
         self.assertIn("Nemamo podatak o karoseriji", reply)
-        self.assertIn("(viđeni prije 14–90 dana, možda više nisu aktivni): 4.", reply)
+        self.assertIn("4 starijih skriveno", reply)
         self.assertEqual(4, page.older_hidden)
         buttons = [b for row in keyboard(TelegramConfig.from_env(ENV), page, "bs")["inline_keyboard"] for b in row]
         self.assertIn(("🕰 Uključi starije (4)", "fop:10000:0:0:0:"),
                       [(b["text"], b.get("callback_data")) for b in buttons])
         self.assertNotIn("https://olx.ba/artikal/__qa_oct\n", reply)  # the link sits on the car name
-        self.assertIn('<a href="https://olx.ba/artikal/__qa_oct"><b>Škoda Octavia</b></a> · 2012 · <b>9.800 KM</b>', reply)
+        self.assertIn('<a href="https://olx.ba/artikal/__qa_oct"><b>Škoda Octavia</b></a> · 2012 · 💰 <b>9.800 KM</b>', reply)
 
     def test_older_listings_come_back_on_request_ranked_after_fresh_ones(self):
         seed_family_scenario(self.engine, self.now)
         reply = telegram_bot.find_message(self.engine, Filters("", 10000, family=True, include_old=True), lang="bs")
-        self.assertEqual(["__qa_oct", "__qa_pas", "__qa_tou", "__qa_stale4", "__qa_stale1"], self.ids(reply))
+        self.assertEqual(["__qa_pas", "__qa_tou", "__qa_stale2", "__qa_oct", "__qa_stale3"], self.ids(reply))  # cheapest first
         self.assertIn("(uključeni i stariji)", reply)
         self.assertIn("⚠ Viđeno prije", reply)
         context = telegram_bot.context_from_reply(telegram_bot.html_to_text(reply))
@@ -340,14 +340,14 @@ class AnswerQualityDbTests(unittest.TestCase):
         self.assertIn("__qa_e210", all_ids)
         self.assertEqual("__qa_e210", all_ids[-1])  # demoted to the very end
         self.assertIn("⚠ Neobični podaci", page2)
-        self.assertIn("podaci u bazi nisu mijenjani", page2)
+        self.assertIn("neobični podaci: provjeri oglas", page2)
         with self.engine.connect() as c:
             stored = c.execute(text("SELECT year,price,mileage FROM car_listings WHERE listing_id='__qa_e210'")).one()
         self.assertEqual((2022, 6500, 399000), tuple(stored))
 
     def test_easiest_to_sell_question_from_the_group(self):
         seed_liquidity_scenario(self.engine, self.now)
-        intent = parse_question("Auto do 20000km, staro do 10 godina koje najlakse mogu prodati")
+        intent = parse_question("Auto, kilometraža do 20000km, staro do 10 godina koje najlakse mogu prodati")
         self.assertEqual("liquidity", intent.kind)
         self.assertEqual(Filters(year_min=datetime.now().year - 10, mileage_max=20000), intent.filters)
         reply, _ = telegram_bot.answer_intent(self.engine, intent, TelegramConfig.from_env(ENV), lang="bs")

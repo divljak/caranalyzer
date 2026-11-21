@@ -81,10 +81,9 @@ date or any car fact (reliability, common faults, value, forecasts) that was not
 never recommend a specific car from your own knowledge or call any car "the best" or "the smartest" \
 choice: you may only point out what the database facts show.
 
-The "chat" field says whether this is a "private" chat or a "group". In a group you only see a message \
-when it tags you, replies to you, or arrives within a few minutes after your last answer to that person. \
-Never tell someone they can just write without tagging you unless chat is "private" or they are \
-continuing right after your answer: say that in a group they should tag you or reply to your message."""
+The "chat" field says whether this is a "private" chat or a "group". Never mention tagging, mentioning \
+or replying to you, and never explain how to reach you: the person is already talking to you, and the \
+bot handles that itself."""
 
 SYSTEM_PROMPT = PERSONA + """
 
@@ -189,6 +188,13 @@ below similar ones, always as "what the data shows" and never as a guarantee or 
 Say plainly that we cannot see what actually sells: most listed is not best selling. Remind them \
 to check each ad. Set show_details to true."""
 
+LIQUIDITY_ADDENDUM = """
+
+This answer is about which cars are easiest to resell. The facts end with a list (models or listings): \
+always set show_details to true so that list is attached, and never describe the answer as a dead end \
+or say there is no data when the facts contain a list. Say plainly that appearing in our data is not \
+a confirmed sale. Remind them to check each ad."""
+
 DEALS_ADDENDUM = """
 
 This answer lists listings priced well below the same model and year in our data. Describe them as \
@@ -261,7 +267,14 @@ def _check_text(value, allowed_numbers, limit=MAX_REPLY_CHARS):
         return "", "refused to redo a search"
     if re.search(_BLAMES_OLX, fold(value)):
         return "", "blamed OLX for the bot's own reading"
+    if re.search(_TAG_REMINDER, fold(value)):
+        return "", "group tag reminder"
     return value, ""
+
+
+# "u grupi moraš tagovati bota", "tag me or reply to my message": the reminder is not part of an answer.
+_TAG_REMINDER = (r"\btag(?:uj|ov|ir|g)\w*|\btag me\b|\btagging\b|\b(?:mention|spomeni|oznaci)\w*\s+(?:me|mene|bota)\b|"
+                 r"\b(?:reply|odgovori|odgovorite)\b[^.!?]{0,30}\b(?:my|moju|moj)\s+(?:message|poruk\w*)\b")
 
 
 # "OLX didn't recognise that model": the bot read the message, not OLX.
@@ -642,7 +655,8 @@ def phrase(message, facts, config, *, post=None, history=None, mode="", language
         turns = _clean_history(history)
         if turns:
             user["recent_turns"] = turns
-        system = PHRASE_PROMPT + {"suggest": SUGGEST_ADDENDUM, "deals": DEALS_ADDENDUM}.get(mode, "")
+        system = PHRASE_PROMPT + {"suggest": SUGGEST_ADDENDUM, "deals": DEALS_ADDENDUM,
+                                         "liquidity": LIQUIDITY_ADDENDUM}.get(mode, "")
         plan, status = _generate(config, system, user, PHRASE_SCHEMA, 800, post)
         if not isinstance(plan, dict):
             LOG.warning("gemini phrasing unavailable: %s", status)

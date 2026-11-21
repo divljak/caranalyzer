@@ -426,7 +426,7 @@ class BosnianAnswerDbTests(unittest.TestCase):
         self.assertTrue(reply.startswith("Viđeni oglasi · golf · do 15.000 KM"))
         self.assertIn("Prikazujem 1–5 od 7 oglasa viđenih u zadnjih 14 dana", reply)
         self.assertIn("Viđeno juče", reply)
-        self.assertIn("Ovo su viđene tražene cijene", reply)
+        self.assertIn("Viđene tražene cijene, ne preporuke", reply)
         self.assertNotIn("Showing", reply)
         self.assertIn("Nema više rezultata.", find_message(self.engine, Filters("golf", 15000), 95, lang="bs"))
         self.assertIn("Nema odgovarajućih oglasa", find_message(self.engine, Filters("ferrari"), lang="bs"))
@@ -438,7 +438,7 @@ class BosnianAnswerDbTests(unittest.TestCase):
         self.assertIn("(viđeni prije 14–90 dana, možda više nisu aktivni): 1.", hidden)
         reply = find_message(self.engine, Filters("golf", 8500, include_old=True), lang="bs")
         self.assertIn("⚠ Viđeno prije 4 sedmice", reply)
-        self.assertIn("oglas možda više nije aktivan", reply)
+        self.assertIn("⚠ viđeno prije više od 14 dana", reply)
 
     def test_shortlist_in_bosnian(self):
         self.seed_suggest()
