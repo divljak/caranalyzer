@@ -4,6 +4,8 @@
     python -m tests.stress.runner --json out.json # also write the machine-readable result
     python -m tests.stress.runner --strict        # exit 1 when any case fails (for CI on a fixed branch)
     python -m tests.stress.runner -k budget       # only case ids / categories containing "budget"
+    python -m tests.stress.runner --original      # only the first 100 cases (ids without the "v2-" prefix)
+    python -m tests.stress.runner --new           # only the v2 cases (ids starting "v2-")
 
 Needs PyYAML (``pip install pyyaml``). Everything is offline: see ``harness.py``.
 """
@@ -20,14 +22,19 @@ from telegram_intent import fold
 from tests.stress.harness import Session
 
 CASES_FILE = pathlib.Path(__file__).with_name("bot_cases.yaml")
+# The v2 cases (ids "v2-...") live in their own file so the first 100 stay exactly as written.
+CASE_FILES = (CASES_FILE, pathlib.Path(__file__).with_name("bot_cases_v2.yaml"))
 FILTER_KEYS = ("search", "budget", "price_min", "mileage_max", "mileage_min", "year_min", "year_max", "fuel",
                "transmission", "new_ok", "family", "low_km")
 
 
-def load_cases(path=CASES_FILE):
-    with open(path, encoding="utf-8") as handle:
-        data = yaml.safe_load(handle)
-    cases = data["cases"]
+def load_cases(paths=CASE_FILES):
+    cases = []
+    for path in [paths] if isinstance(paths, (str, pathlib.Path)) else paths:
+        if not pathlib.Path(path).exists():
+            continue
+        with open(path, encoding="utf-8") as handle:
+            cases.extend(yaml.safe_load(handle)["cases"])
     ids = [c["id"] for c in cases]
     assert len(ids) == len(set(ids)), "duplicate case ids"
     return cases
@@ -98,6 +105,25 @@ def _check_alternative(result, expect):
             problems.append(f"footer is {used} characters, expected at most {expect['footer_chars_max']}")
     if "handled" in expect and bool(result["handled"]) != expect["handled"]:
         problems.append(f"handled={result['handled']}, expected {expect['handled']}")
+    for key, bound in (expect.get("lt") or {}).items():  # "a jeftinije?": the new cap is below the old one
+        have = getattr(intent.filters, key, None) if intent else None
+        if have is None or not have < _year_value(bound):
+            problems.append(f"filters.{key} = {have!r}, expected below {_year_value(bound)!r}")
+    for key, bound in (expect.get("gt") or {}).items():  # "a novije?": the year floor moves up
+        have = getattr(intent.filters, key, None) if intent else None
+        if have is None or not have > _year_value(bound):
+            problems.append(f"filters.{key} = {have!r}, expected above {_year_value(bound)!r}")
+    if "days" in expect and (intent.days if intent else None) != expect["days"]:
+        problems.append(f"days {intent.days if intent else None!r}, expected {expect['days']!r}")
+    labels = intent.labels if intent else ()
+    for label in expect.get("labels_has", []):
+        if label not in labels:
+            problems.append(f"labels {labels!r} lack {label!r}")
+    for label in expect.get("labels_lacks", []):
+        if label in labels:
+            problems.append(f"labels {labels!r} wrongly contain {label!r}")
+    if "reply_chars_max" in expect and len(result["text"]) > expect["reply_chars_max"]:
+        problems.append(f"reply is {len(result['text'])} characters, expected at most {expect['reply_chars_max']}")
     return problems
 
 
@@ -128,7 +154,8 @@ def run_case(case):
     session = Session(chat=case.get("chat", "private"), dataset=case.get("dataset", "rows"))
     turns = []
     for turn in case["turns"]:
-        result = session.say(turn["say"], reply=bool(turn.get("reply")))
+        result = session.say(turn["say"], reply=bool(turn.get("reply")), untagged=bool(turn.get("untagged")),
+                             user_id=turn.get("user"))
         problems = check_turn(result, turn.get("expect") or {})
         intent = result["intent"]
         turns.append({"say": turn["say"], "problems": problems, "covers": turn.get("covers", []),
@@ -136,16 +163,25 @@ def run_case(case):
                       "note": intent.note if intent else None,
                       "filters": ({k: getattr(intent.filters, k) for k in FILTER_KEYS
                                    if getattr(intent.filters, k)} if intent else {}),
+                      "labels": list(intent.labels) if intent else [], "gemini": result["gemini"],
+                      "handled": result["handled"],
                       "sort": result["sort"], "buttons": result["buttons"],
                       "reply": result["text"][:400], "error": result["error"]})
     return {"id": case["id"], "category": case["category"], "title": case.get("title", ""),
+            "impact": case.get("impact", ""),
             "passed": all(not t["problems"] for t in turns), "turns": turns}
 
 
-def run_all(selector=None):
+NEW_PREFIX = "v2-"
+
+
+def run_all(selector=None, only=None):
+    """``only``: None (all), "original" (the first 100) or "new" (ids starting with ``NEW_PREFIX``)."""
     results = []
     for case in load_cases():
         if selector and selector not in case["id"] and selector not in case["category"]:
+            continue
+        if only and (only == "new") != case["id"].startswith(NEW_PREFIX):
             continue
         results.append(run_case(case))
     return results
@@ -178,7 +214,8 @@ def failure_lines(results):
         for t in r["turns"]:
             if t["problems"]:
                 covers = f" (planned fix {','.join(map(str, t['covers']))})" if t["covers"] else " (NEW)"
-                out.append(f"   > {t['say']!r}{covers}")
+                route = " [Gemini first in prod]" if t.get("gemini") else " [parser-only]"
+                out.append(f"   > {t['say']!r}{covers}{route}")
                 out.extend(f"       - {p}" for p in t["problems"])
     return out
 
@@ -186,7 +223,8 @@ def failure_lines(results):
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     selector = argv[argv.index("-k") + 1] if "-k" in argv else None
-    results = run_all(selector)
+    only = "original" if "--original" in argv else "new" if "--new" in argv else None
+    results = run_all(selector, only)
     print("\n".join(summary_lines(results)))
     print()
     print("\n".join(failure_lines(results)))
