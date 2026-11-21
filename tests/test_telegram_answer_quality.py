@@ -323,7 +323,7 @@ class AnswerQualityDatabaseTests(unittest.TestCase):
         self.assertEqual("", lines[-2])
         self.assertEqual(1, sum(1 for line in lines if line.startswith("<i>")))  # nothing else italic, no 3-4 note lines
         self.assertIn("⚠ viđeno prije više od 14 dana", lines[-1])
-        self.assertIn("oglasi bez godišta ili kilometraže", lines[-1])
+        self.assertIn("oglasi bez godišta/km su izostavljeni", lines[-1])  # shortened so the line stays <= 120
 
     def test_save_buttons_carry_make_and_model(self):
         self.seed([("s1", "Volkswagen", "Golf", 2022, 134900, 30000, "diesel", "automatic", "Sarajevo"),

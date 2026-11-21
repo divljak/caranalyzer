@@ -259,6 +259,7 @@ class Improvements5AnswerTests(unittest.TestCase):
         self.addCleanup(self.cleanup)
         self.now = _naive_now()
         telegram_bot._SCOPES.clear()
+        telegram_bot._BUDGETS.clear()  # a budget remembered by another test must not leak in
         telegram_bot._HISTORY.clear()
 
     def cleanup(self):
@@ -405,7 +406,9 @@ class Improvements5AnswerTests(unittest.TestCase):
     def test_a_stray_word_is_not_explained_as_a_model_the_ads_cannot_name(self):  # row 23: "polo grad"
         self.seed([("p1", "Volkswagen", "Polo", 2008, 4_600, 144_000)])
         reply, _ = self.answer("vw polo za grad do 11k")
-        self.assertIn("Nisam prepoznao „polo grad“, pa tražim „polo“.", reply)
+        # "za grad" (for the city) is filler since the 21 Nov parser round: Polo is searched directly
+        self.assertTrue(reply.startswith("Viđeni oglasi · polo · do 11.000 KM"), reply)
+        self.assertNotIn("Nisam prepoznao", reply)
         self.assertNotIn("ne mogu izdvojiti", reply)
 
     def test_a_price_check_for_a_model_that_is_not_in_the_data_says_so(self):

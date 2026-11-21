@@ -23,6 +23,7 @@ from telegram_i18n import (
 from telegram_intent import (
     Filters,
     Intent,
+    MAKE_MODELS,
     _TITLES,
     alias_pattern,
     model_hint,
@@ -359,8 +360,16 @@ def _like_pattern(value):
     aliased = alias_pattern(value)  # "Mercedes C klasa" -> listings stored as "Mercedes-Benz C 220", ...
     if aliased:
         return aliased
-    escaped = fold(value).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    folded = fold(value).strip()
+    escaped = folded.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    if re.fullmatch(r"[a-z]{1,3}", folded) and folded not in MAKE_MODELS and folded not in SHORT_MAKES:
+        # "rs", "su", "up", "ka": a whole word at the start of the model ("Volkswagen Up", "Audi RS3"), never
+        # letters inside another name ("Opel Corsa", "Škoda Superb")
+        return f"% {escaped}%"
     return f"%{escaped}%"
+
+
+SHORT_MAKES = frozenset({"vw", "kia", "bmw", "mg", "ds", "uaz", "gaz"})  # a make starts the label: any position
 
 
 def _cohort_stats(connection, label, year_min=None, year_max=None):
@@ -626,6 +635,8 @@ def _attr_parts(filters, lang=DEFAULT_LANGUAGE):
         parts.append(titles["new"])
     if filters.low_km:
         parts.append(titles["lowkm"])
+    if filters.cheapest:
+        parts.append(titles["cheapest"])
     return parts
 
 
@@ -772,6 +783,7 @@ _FIND_SQL = f"""
     CASE WHEN CAST(:low_km AS boolean) AND mileage >= 1000 THEN mileage END ASC NULLS LAST,
     CASE WHEN :search='' AND CAST(:new_ok AS boolean) THEN NOT coalesce({_NEW_LIKE.format(p='counted')}, false) END ASC,
     CASE WHEN :search='' THEN price END ASC NULLS LAST,
+    CASE WHEN CAST(:cheapest AS boolean) THEN price END ASC NULLS LAST,
     date(last_verified_at) DESC,
     year DESC NULLS LAST,
     mileage ASC NULLS LAST,last_verified_at DESC,listing_id
@@ -809,7 +821,8 @@ def _bound_params(filters):
     return {"budget": filters.budget, "price_min": filters.price_min, "year_min": filters.year_min,
             "year_max": filters.year_max, "mileage_max": filters.mileage_max,
             "mileage_min": filters.mileage_min, "low_km": bool(filters.low_km), "fuel": filters.fuel or "",
-            "transmission": filters.transmission or "", "new_ok": _new_ok(filters)}
+            "transmission": filters.transmission or "", "new_ok": _new_ok(filters),
+            "cheapest": bool(filters.cheapest)}
 
 
 def _find_rows(connection, filters, offset, probe=False, probe_new=False, hints=()):
@@ -1171,8 +1184,8 @@ def find_page(engine, filters, offset=0, lang=DEFAULT_LANGUAGE):
         first, last = offset + 1, offset + len(matches)
         span = f"{first}" if first == last else f"{first}–{last}"
         key = "find_showing_all" if filters.include_old else "find_showing"
-        if not filters.search and not filters.low_km:
-            key += "_cheapest"  # a search without a model lists the cheapest first (see _FIND_SQL)
+        if (not filters.search or filters.cheapest) and not filters.low_km:
+            key += "_cheapest"  # without a model, or "najjeftiniji golf": the cheapest first (see _FIND_SQL)
         lines.append(esc(t(lang, key, span=span, total=total, days=FRESH_DAYS)))
         if hints:
             words = " ".join(hints)
@@ -1792,20 +1805,21 @@ def _filters_from_fields(search, price, year, mileage, **flags):
 
 FUEL_CODES = {"diesel": "d", "petrol": "b", "hybrid": "h", "electric": "e", "lpg": "g"}
 GEARBOX_CODES = {"automatic": "a", "manual": "m"}
-_FLAG_TAIL = r"(n?)([dbheg]?)([am]?)(k?)"
+_FLAG_TAIL = r"(n?)([dbheg]?)([am]?)(k?)(c?)"
 
 
 def _attr_flags(filters):
     """Button flag letters for "incl. new", fuel and gearbox (after the older o / p letters)."""
     return (("n" if filters.new_ok else "") + FUEL_CODES.get(filters.fuel, "")
-            + GEARBOX_CODES.get(filters.transmission, "") + ("k" if filters.low_km else ""))
+            + GEARBOX_CODES.get(filters.transmission, "") + ("k" if filters.low_km else "")
+            + ("c" if filters.cheapest else ""))
 
 
-def _attr_values(new, fuel, gearbox, low_km=""):
+def _attr_values(new, fuel, gearbox, low_km="", cheapest=""):
     fuels = {code: value for value, code in FUEL_CODES.items()}
     gearboxes = {code: value for value, code in GEARBOX_CODES.items()}
     return {"new_ok": bool(new), "fuel": fuels.get(fuel, ""), "transmission": gearboxes.get(gearbox, ""),
-            "low_km": bool(low_km)}
+            "low_km": bool(low_km), "cheapest": bool(cheapest)}
 
 
 def liquidity_callback(filters):
@@ -1821,7 +1835,7 @@ def parse_liquidity_callback(data):
     if len(parts) != 5 or not flags:
         return None
     filters = _filters_from_fields(parts[4], *parts[1:4], family=bool(flags.group(1)),
-                                   **_attr_values(*flags.group(2, 3, 4, 5)))
+                                   **_attr_values(*flags.group(2, 3, 4, 5, 6)))
     return filters if filters is not None and _bounds_in_range(filters) else None
 
 
@@ -1874,6 +1888,8 @@ def clarify_message(note="", question="", lang=DEFAULT_LANGUAGE, labels=()):
         return t(lang, "clarify_correction")
     if note == "over_budget":
         return t(lang, "clarify_over_budget")
+    if note in {"budget", "newer", "compare"}:
+        return t(lang, f"clarify_{note}")
     return t(lang, "clarify_default")
 
 
@@ -1998,7 +2014,7 @@ def parse_refine_page(data):
     except ValueError:
         return None
     filters = _filters_from_fields(parts[-1], *parts[1:4], family=bool(flags.group(2)),
-                                   include_old=bool(flags.group(1)), **_attr_values(*flags.group(3, 4, 5, 6)))
+                                   include_old=bool(flags.group(1)), **_attr_values(*flags.group(3, 4, 5, 6, 7)))
     if filters is None:
         return None
     in_range = _bounds_in_range(filters) and 0 <= offset <= MAX_OFFSET
@@ -2408,6 +2424,12 @@ def intent_notes(intent, lang=DEFAULT_LANGUAGE):
         notes.append(t(lang, "note_kn"))
     if "budget_reused" in intent.labels and intent.filters.budget:
         notes.append(t(lang, "note_budget_reused", amount=_thousands(intent.filters.budget)))
+    if "same_budget" in intent.labels and intent.filters.budget:
+        notes.append(t(lang, "note_same_budget", amount=_thousands(intent.filters.budget)))
+    if "location" in intent.labels:
+        notes.append(t(lang, "note_location"))
+    if "body" in intent.labels:
+        notes.append(t(lang, "note_body"))
     skipped = [label.partition(":")[2] for label in intent.labels if label.startswith("skipped:")]
     if skipped:
         names = [t(lang, f"skip_{kind}") if kind in SKIPPABLE else kind for kind in skipped]
@@ -2515,7 +2537,13 @@ def _answer_intent(engine, intent, config, lang=DEFAULT_LANGUAGE):
         f = intent.filters
         buttons = tuple((f"🔎 {model[:24]}", refine_callback(_model_filters(model, f)))
                         for model in models[:3])
-        return text_value, (Choices((buttons,)) if buttons else False)
+        if not buttons:  # too little data to rank models: still offer a next step, never a dead end
+            listings = ((t(lang, "btn_show_listings"), refine_callback(f)) if not f.is_empty()
+                        else (t(lang, "btn_latest"), "latest"))  # an empty search button would do nothing
+            buttons = (listings,
+                       (t(lang, "btn_suggest_budget", amount=_thousands(f.budget)), suggest_callback(f.budget))
+                       if f.budget else (t(lang, "btn_trends30"), "trends:30"))
+        return text_value, Choices((buttons,))
     if intent.kind == "compare":
         text_value, used = compare(engine, " | ".join(intent.labels), lang, intent.filters.year_min,
                                    intent.filters.year_max, family=intent.filters.family)
@@ -2552,6 +2580,8 @@ def _answer_intent(engine, intent, config, lang=DEFAULT_LANGUAGE):
         if intent.kind == "clarify" and "more" in intent.labels and not intent.reply:
             return text_value, example_choices(lang)
         if intent.kind == "clarify" and intent.note == "mileage_stats" and not intent.reply:
+            return text_value, False
+        if intent.kind == "clarify" and intent.note in {"newer", "compare"} and not intent.reply:
             return text_value, False
         if intent.kind == "clarify" and intent.note not in {"currency", "correction", "price_check"}:
             return text_value, budget_choices(lang)
@@ -3124,7 +3154,8 @@ def _needs_interpreter(intent, text_value):
         return False  # "pokaži još" is the next page of the last search, whatever Gemini would make of it
     if intent.kind in {"ignore", "clarify", "chitchat", "unsupported"}:
         return not intent.note
-    return intent.kind == "find" and not intent.filters.numeric()
+    # a bare model name or a price-statistics question without numbers ("koliko je X") may be small talk
+    return intent.kind in {"find", "model_stats"} and not intent.filters.numeric()
 
 
 def _understand(text_value, message, scope_key, llm, history=None, lang=DEFAULT_LANGUAGE, chat_kind="", trace=None):
@@ -3141,13 +3172,19 @@ def _understand(text_value, message, scope_key, llm, history=None, lang=DEFAULT_
     intent = parse_question(text_value, context)
     stated = stated_filters(text_value, context).budget
     budget = _recall_budget(scope_key) if scope_key else None
-    if (budget and intent.kind == "clarify" and not intent.note and not intent.reply and not stated
+    if (budget and intent.kind in {"clarify", "unsupported"} and not intent.note and not intent.reply and not stated
             and wants_recommendation(text_value)):
         # "Da ali koji auto, koji modeli": the budget was given earlier, so use it instead of asking again
         intent = Intent("suggest", Filters(budget=budget), labels=("budget_reused",))
+    ask_gemini = llm is not None and _needs_interpreter(intent, text_value)  # decided on the message itself
+    if budget and not stated and chat_kind != "group" and _reuses_budget(intent):
+        # "imam 20k" ... "a šta se brzo prodaje" / "ok a dizel": the same budget, said once (a private chat
+        # only: in a group only a correction may reuse the person's earlier question)
+        intent = replace(intent, filters=replace(intent.filters, budget=budget),
+                         labels=intent.labels + ("budget_reused",))
     if scope_key:
         _remember_budget(scope_key, intent.filters.budget or stated)
-    if llm is not None and _needs_interpreter(intent, text_value):
+    if ask_gemini:
         interpreted = llm(text_value, context or remembered, history or [], language=lang, chat_kind=chat_kind)
         interpreted = _grounded(interpreted, text_value, context or remembered)
         if interpreted is not None:
@@ -3155,6 +3192,17 @@ def _understand(text_value, message, scope_key, llm, history=None, lang=DEFAULT_
             return interpreted
         trace["path"] = "parser_after_gemini_failed"
     return intent
+
+
+def _reuses_budget(intent):
+    """True for an answer that should use a budget stated earlier in the chat: a resale, shortlist or deals
+    question, or a search without a model (fuel, gearbox, year only), when it states no price bound itself."""
+    filters = intent.filters
+    if filters.budget or filters.price_min or intent.note in {"correction", "more"}:
+        return False
+    if intent.kind in {"liquidity", "deals"}:
+        return True
+    return intent.kind == "find" and not filters.search and not intent.offset and not filters.is_empty()
 
 
 def _grounded(interpreted, text_value, previous):

@@ -575,7 +575,9 @@ class SweepDatabaseTests(unittest.TestCase):
         self.assertIn("100% oglasa koje smo vidjeli (26 od 26)", reply)
         self.assertNotIn("medijan 0 dana", reply)
         _, choices = telegram_bot.answer_intent(self.engine, parse_question("šta se najlakše prodaje?"), CONFIG, lang="bs")
-        self.assertIs(False, choices)
+        # planned fix 6 (no dead end): with nothing to rank, the answer still offers the listings and trends
+        self.assertIsInstance(choices, telegram_bot.Choices)
+        self.assertEqual(["latest", "trends:30"], [data for _, data in choices.rows[0]])
 
 
 if __name__ == "__main__":
