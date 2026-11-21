@@ -265,8 +265,9 @@ class GeminiKnowsWhereItIsTests(unittest.TestCase):
         self.assertEqual("private", seen["llm"])
 
     def test_the_help_text_explains_tagging_in_both_languages(self):
-        self.assertIn("In a group, tag me or reply to one of my messages", telegram_bot.help_message("en"))
-        self.assertIn("U grupi me označi ili odgovori na neku moju poruku", telegram_bot.help_message("bs"))
+        # planned fix 8 (21 Nov 2026): /help no longer tells people to tag the bot in a group
+        self.assertNotIn("tag me", telegram_bot.help_message("en"))
+        self.assertNotIn("označi", telegram_bot.help_message("bs"))
 
 
 class IgnoredMessageDiagnosticsTests(unittest.TestCase):

@@ -16,7 +16,7 @@ import re
 import unicodedata
 
 
-MAX_QUESTION = 400
+MAX_QUESTION = 1000  # a voice-to-text message can run past 400 characters with the request at the very end
 PAGE_SIZE = 5  # listings per page (telegram_bot.PAGE_SIZE is the same number)
 MAX_PAGE_OFFSET = 95
 MAX_SEARCH = 40
@@ -45,6 +45,7 @@ class Filters:
     new_ok: bool = False  # the user asks for new cars, so current-year cars under 1.000 km stay in
     mileage_min: int | None = None  # "preko 200.000 km": at least this many km; ``mileage_max`` is the upper bound
     low_km: bool = False  # "malo kilometara": a soft preference, lowest mileage first (never a hard filter)
+    cheapest: bool = False  # "najjeftiniji golf": a model search listed cheapest first (never a filter)
 
     @property
     def price_max(self):
@@ -98,6 +99,7 @@ def merge_filters(base, new):
         fuel=new.fuel or base.fuel,
         transmission=new.transmission or base.transmission,
         new_ok=new.new_ok or base.new_ok,
+        cheapest=new.cheapest or base.cheapest,
     )
 
 
@@ -119,11 +121,39 @@ class Intent:
     page_total: int | None = None
 
 
+# Serbian Cyrillic (plus the few Russian letters people mix in) to Latin: "Голф до 15000 КМ" reads as
+# "Golf do 15000 KM". Applied to every incoming message (``strip_mentions``); ``fold`` keeps one letter each.
+_CYRILLIC = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "ђ": "đ", "е": "e", "ж": "ž", "з": "z", "и": "i", "ј": "j",
+    "к": "k", "л": "l", "љ": "lj", "м": "m", "н": "n", "њ": "nj", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t",
+    "ћ": "ć", "у": "u", "ф": "f", "х": "h", "ц": "c", "ч": "č", "џ": "dž", "ш": "š", "й": "j", "ы": "i", "э": "e",
+    "ю": "ju", "я": "ja", "щ": "šč", "ъ": "", "ь": "", "ё": "jo", "є": "je", "і": "i", "ї": "ji",
+}
+
+
+def to_latin(value):
+    """Transliterate Cyrillic letters, keeping capitals ("КМ" -> "KM", "Љубушки" -> "Ljubuški")."""
+    if not value or not re.search("[Ѐ-ӿ]", value):
+        return value or ""
+    out = []
+    for char in value:
+        latin = _CYRILLIC.get(char.lower())
+        if latin is None:
+            out.append(char)
+        elif char.isupper():
+            out.append(latin[:1].upper() + latin[1:])
+        else:
+            out.append(latin)
+    return "".join(out)
+
+
 def fold(value):
     """Lower-case and strip diacritics while keeping string length unchanged."""
     out = []
     for char in (value or ""):
         lowered = char.lower()[:1] or char  # "İ".lower() is two characters: keep one per input character
+        if lowered in _CYRILLIC:
+            lowered = (_CYRILLIC[lowered] or " ")[0]
         if lowered == "đ":
             out.append("d")
             continue
@@ -137,11 +167,17 @@ def clean_search(value):
     return re.sub(r"\s+", " ", value).strip()[:MAX_SEARCH].strip()
 
 
-_AMOUNT = (r"([0-9]{1,3}(?:[., ][0-9]{3})+(?![0-9])|[0-9]+)\s*"
-           r"(k(?![a-z0-9])|h?iljad\w*|tisuc\w*|thousand\w*)?")
+# "15.000", "15 000", "7,5k" / "7.5 hiljada" (a decimal only before a thousands word), "15"
+_THOUSAND_WORD = r"k(?![a-z0-9])|h?iljad\w*|tisuc\w*|thousand\w*|soma\b|som\b"
+_NUMBER = (r"[0-9]{1,3}(?:[., ][0-9]{3})+(?![0-9])|[0-9]{1,3}[.,][0-9]{1,2}(?=\s*(?:" + _THOUSAND_WORD + r"))|[0-9]+")
+_AMOUNT = r"(" + _NUMBER + r")\s*(" + _THOUSAND_WORD + r")?"
 
 
 def _amount(digits, thousands, bounds):
+    decimal = re.fullmatch(r"([0-9]{1,3})[.,]([0-9]{1,2})", (digits or "").strip())
+    if decimal and thousands:  # "7,5k" is 7.500, never 75.000 or a "7" and a "5k"
+        value = int(decimal.group(1)) * 1000 + int(decimal.group(2).ljust(3, "0"))
+        return value if bounds[0] <= value <= bounds[1] else None
     cleaned = re.sub(r"[^0-9]", "", digits)
     if not cleaned:
         return None
@@ -184,22 +220,75 @@ expensive skup skupa skupo skupi kosta kostaju kosti kostao vrijedi vrijede wort
 isto same that thats generacija generacije generation gen model modela modeli verzija iljada iljade
 is isn its it's price prices good fine okej ovog ovom taj tog
 bilo kolko kolika koliki najvise najmanje not most registracija registracije registraciju registracijom registrovan ponuda ponude ponudu ponudi offer offers ove ovih sedmice sedmici tjedna tjedan
+""".split()) | set("""
+pozdrav pozdravi pozdravljam pozz poz zdravo selam selamun aleikum alejkum alejkumu merhaba hvala fala falim unaprijed
+unapred puno brate brat buraz burazeru ekipa ekipo ljudi molim hitno hitan hitna dajte zanima zanimaju zanimalo
+interesuje interesuju interesira imal imas imate imaju imali kakav kakvu kakve kakvi kakvog uzmem uzmes uzeti uzmi
+uzimam kupio kupila kupujem kupovati kupis ipak evo eto ovako tako takvo slicno slicnog dvoje troje djece putujemo
+putujem putovanja bio bila bude kola kolima autic autica auta kad kada pojavi pojave pojavio javi javite obavijesti
+obavijestite obavjesti obavijest obavjestite su smo ste iz kod ovdje tu tamo nekakav nekog neku nove novi nova novu
+novog novih nov polovni polovno polovan polovna polovne polovnog polovnih rabljeni rabljen rabljena rabljeno rabljenog
+koristen koristeni koristena koristenog nekoristen nekoristeni nekoristena nekoristenog skoro gotovo maksimalno
+maksimum minimalno minimum novija noviji novijeg novijih mladji mladja mladje grad gradsku gradska gradski gradsko
+voznju voznja skuplje skuplji skuplja skupljeg skuplju povoljnije povoljniji povoljnija izvan budzeta budzetu budzetom isplati isplativ isplativo isplativa sacuvane sacuvaj sacuvana sacuvanih sacuvam sacuvati presao presla
+preslo presli prede predje predjeno predeno predena vozen vozeno navozeno mozda prvi prva prvo prve prva dva tri
+drugi druga drugo drugu ostali ostale ostalo other another wanted pls plz please thanks
+marka marku marke marki posao poslu
 """.split())
 
 # Words that start a question or describe a price, never part of a make or model ("prosječno",
 # "najjeftiniji", "normalna"): dropped from the search text whatever their ending.
-_FILLER_PREFIXES = ("regist", "prosjec", "najjeftin", "jeftin", "normaln", "realn", "najpovoljn", "povoljn")
+_FILLER_PREFIXES = ("regist", "prosjec", "najjeftin", "jeftin", "normaln", "realn", "najpovoljn", "povoljn",
+                    "odlicn", "stanj", "ocuvan", "garazir", "uvoz", "servisn")  # "u odličnom stanju", "iz uvoza"
 
 _MENTION = re.compile(r"@\w+")
-_MILEAGE_CUES = r"(?:mileage|kilometraz\w*|kilometers|kilometres|odvozen\w*|prijeden\w*|on the clock)"
+_MILEAGE_CUES = (r"(?:mileage|kilometraz\w*|kilometers|kilometres|odvozen\w*|prijeden\w*|on the clock|"
+                 r"pre(?:sa|sl)\w*|predj?(?:e|en)\w*|navozen\w*|vozen\w*)")
 
 
 def strip_mentions(value):
-    return re.sub(r"\s+", " ", _MENTION.sub(" ", value or "")).strip()
+    """The message without @mentions, with Cyrillic transliterated and whitespace collapsed."""
+    return re.sub(r"\s+", " ", _MENTION.sub(" ", to_latin(value or ""))).strip()
+
+
+# Places the listings cannot be filtered by yet. They are cut out of a question (with the preposition before
+# them: "iz Mostara", "u Banjaluci", "sa područja Tuzle", "kod Sarajeva", "Istočno Sarajevo", "u RS"), so they
+# never become part of the model or get "repaired" into one (Doboj -> Doblo); the answer then says that location
+# is not a filter. Matched on folded text by stem, so every case ending is covered.
+_PLACE_NAMES = (
+    r"sarajev\w*|mostar\w*|banj\w*\s*luk\w*|banjaluc\w*|tuzl\w*|zenic\w*|bihac\w*|doboj\w*|brck\w*|bijeljin\w*|"
+    r"trebinj\w*|livn\w*|travnik\w*|cazin\w*|konjic\w*|gorazd\w*|kakanj\w*|zvornik\w*|prijedor\w*|gradacc?\w*|"
+    r"gracanic\w*|lukavc\w*|lukavac|srebrenik\w*|tesanj\w*|tesnj\w*|maglaj\w*|zavidovic\w*|jajc\w*|bugojn\w*|"
+    r"capljin\w*|ljubusk\w*|posusj\w*|sirok\w* brijeg\w*|gradisk\w*|modric\w*|dervent\w*|kiseljak\w*|vogosc\w*|"
+    r"ilidz\w*|hadzic\w*|fojnic\w*|vitez\w*|sansk\w* most\w*|velik\w* kladus\w*|kladus\w*|neum\w*|stolc\w*|"
+    r"hercegovin\w*|bosansk\w* krajin\w*|krajin\w*|posavin\w*|semberij\w*|podrinj\w*|zagreb\w*|beograd\w*|"
+    r"njemack\w*|austrij\w*|svedsk\w*|fbih|federacij\w*|republik\w* srpsk\w*|cijel\w* bih|cijel\w* bosn\w*")
+_PLACE = re.compile(
+    r"(?:\b(?:u|iz|kod|oko|blizu|po|sa|s|na)\s+)?(?:\b(?:podrucj\w*|okolin\w*|regij\w*|opcin\w*|kanton\w*)\s+)?"
+    r"(?:\b(?:istocn\w*|novo|novi|stari|staro)\s+)?\b(?:" + _PLACE_NAMES + r")\b"
+    r"|\b(?:u|iz|po|na podrucju)\s+rs\b")
+
+
+def strip_places(value):
+    """(text with place names blanked out, True if any). Length is kept, so spans still line up with ``fold``."""
+    folded = fold(value)
+    spans = [match.span() for match in _PLACE.finditer(folded)]
+    if not spans:
+        return value, False
+    chars = list(value)
+    for start, end in spans:
+        chars[start:end] = " " * (end - start)
+    return "".join(chars), True
+
+
+def is_place(token):
+    """True when a single word is a place name ("doboj", "mostaru"): never a model, never typo-repaired."""
+    return re.fullmatch(_PLACE_NAMES, fold(token or "")) is not None
 
 
 _FAMILY = (r"\b(?:porodic\w*|familij\w*|famil(?:y|ies)|djec\w*|dijete|djete|kids?|children|karavan\w*|"
-           r"monovolumen\w*|kombi\w*|wagon|estate|mpv|minivan|prostran\w*|roomy|spacious|sedmosjed\w*|7 sjedist\w*)\b")
+           r"monovolumen\w*|kombi\w*|wagon|estate|mpv|minivan|prostran\w*|roomy|spacious|sedmosjed\w*|7 sjedist\w*|"
+           r"combi|avant|varijant\w*|variant|touring|sportwagon|sports? tourer|tourer|sw)\b")
 _INCLUDE_OLD = (r"\b(?:(?:i |ukljuci (?:i )?|pokazi (?:i )?|sa |s )starij\w*|"
                 r"include (?:the )?older|older (?:ones|ads|listings) too|with older|incl\w* old\w*)\b")
 
@@ -217,7 +306,13 @@ _GEARBOXES = (
 )
 # "novi auto", "brand new", "0 km": the user wants new cars, so dealer cars at 0 km are not hidden.
 _NEW_CARS = (r"\b(?:nov[oiau]?|nove|new|brand new)\s+(?:auto\w*|car\w*|vozil\w*|kola|automobil\w*)\b|"
-             r"\bbrand new\b|\b0\s*km\b|\bnula kilometar\w*|\bfabricki nov\w*|\bnove? iz salona\b")
+             r"\bbrand new\b|\b0\s*km\b|\bnula kilometar\w*|\bfabricki nov\w*|\b(?:nov\w*\s+)?iz salona\b|"
+             r"\bnekoristen\w*|\bneregistrovan\w*\s+nov\w*")
+# "polovni", "rabljeni", "korišteni": used cars, the default; after a new-car search it switches back to used.
+_USED = r"\b(?:polovn\w*|polovan|rabljen\w*|koristen\w*|used|second[- ]hand)\b"
+# Body types the listings do not record: never a model, the answer says it is not a filter.
+_BODY = (r"\b(?:suv\w*|dzip\w*|terenac|terenc\w*|limuzin\w*|kabriolet\w*|kabrio|cabrio\w*|convertible|"
+         r"hatchback\w*|hecbek\w*|pick\s*-?\s*up\w*|pikap\w*|coupe|sedan\w*|crossover\w*|krosover\w*)\b")
 
 
 def _attribute(folded, table):
@@ -233,6 +328,19 @@ def wants_family(folded):
     return re.search(_FAMILY, folded) is not None
 
 
+def wants_new(folded):
+    """"novi auto", "nov golf 8", "iz salona", "nekorišten passat": new cars stay in. "skoro nov" (nearly new) does not."""
+    if re.search(_NEW_CARS, folded):
+        return True
+    for match in re.finditer(r"\b(?:nov|novi|novu|nova|novog|novo|new)\s+([a-z]+)", folded):
+        if re.search(r"\b(?:skoro|gotovo|kao|ko|almost|like|nearly)\s+$", folded[:match.start()]):
+            continue
+        word = match.group(1)
+        if word in _KNOWN_MODELS or word in MAKE_MODELS or word in GENERATIONS or _lemma(word) != word:
+            return True
+    return False
+
+
 def wants_older(folded):
     return re.search(_INCLUDE_OLD, folded) is not None
 
@@ -245,7 +353,7 @@ _YEAR_SPAN = re.compile(
 # "do 2018", "prije 2018", "before 2018", "starije od 2018": the newest model year, not a price
 _YEAR_CEILING = (r"(?:\bdo|\bprije|\bpre|\bbefore|\buntil|\bup to|\bstarij\w*\s+od|\bolder than)\s*"
                  r"((?:19|20)[0-9]{2})\b(?!\s*(?:k(?![a-z])|km|bam|kam|marak\w*|hiljad\w*|tisuc\w*|thousand|eur\w*|[.,]?000))")
-_THOUSANDS = r"k(?![a-z0-9])|h?iljad\w*|tisuc\w*|thousand"
+_THOUSANDS = r"k(?![a-z0-9])|h?iljad\w*|tisuc\w*|thousand|soma\b|som\b"
 # "preko 40k", "iznad 30.000 KM", "over 20k": a lower price bound only.
 _NOT_LESS = (r"(?:ne|nikako|no|not|never)\s+(?:manje|ispod|less|under|below|fewer)(?:\s+(?:than|od))?")
 _ABOVE = (r"(?<!\bne )(?<!\bno )(?<!\bnot )\b(?:preko|iznad|vise od|vece od|over|above|more than|at least|najmanje|"
@@ -253,9 +361,9 @@ _ABOVE = (r"(?<!\bne )(?<!\bno )(?<!\bnot )\b(?:preko|iznad|vise od|vece od|over
 _PRICE_UNIT = r"km|bam|kam|maraka|marke|marks?"
 _PRICE_SPAN = re.compile(
     r"(?<![a-z0-9.,])" + _RANGE_FROM
-    + r"(?P<a>[0-9]{1,3}(?:[., ][0-9]{3})+(?![0-9])|[0-9]+)\s*(?P<ma>" + _THOUSANDS + r")?\s*(?P<ua>" + _PRICE_UNIT
+    + r"(?P<a>" + _NUMBER + r")\s*(?P<ma>" + _THOUSANDS + r")?\s*(?P<ua>" + _PRICE_UNIT
     + r")?(?![a-z0-9])" + _RANGE_SEP
-    + r"(?P<b>[0-9]{1,3}(?:[., ][0-9]{3})+(?![0-9])|[0-9]+)\s*(?P<mb>" + _THOUSANDS + r")?\s*(?P<ub>" + _PRICE_UNIT
+    + r"(?P<b>" + _NUMBER + r")\s*(?P<mb>" + _THOUSANDS + r")?\s*(?P<ub>" + _PRICE_UNIT
     + r")?(?![a-z0-9])")
 
 
@@ -278,7 +386,7 @@ _NOT_LESS_CUE = _NOT_LESS + r"\s*(?:oko\s*)?$"  # "ne manje od 100000 km": a min
 _MAX_CUE = (r"(?:manje|less|under|ispod|below|max\w*|do|up to|upto|until|najvise|at most|" + _NEGATED
             + r")\s*(?:od|than)?\s*(?:oko\s*)?$")
 # "malo kilometara", "mala kilometraza", "low mileage": a preference for few km, not a bound.
-_LOW_KM = (r"\b(?:malo|mala|mali|nisk\w*|nizak|low|few|little)\s+(?:km|kms|kilometar\w*|kilometr\w*|mileage|"
+_LOW_KM = (r"\b(?:malo|mala|mali|manje|manjom|manjim|nisk\w*|nizak|low|lower|less|few|fewer|little)\s+(?:km|kms|kilometar\w*|kilometr\w*|mileage|"
            r"kilometers|kilometres)(?![a-z0-9])")
 _KM_WORDS = r"kilometar\w*|kilometr\w*|kilometers|kilometres|kms"
 _MILEAGE_WORD_AFTER = re.compile(rf"\s*(?:{_KM_WORDS})(?![a-z0-9])")
@@ -292,6 +400,15 @@ def _generation_digits(folded):
         if model and match.group(2) in GENERATIONS[model]:
             found.update(i for i in range(match.start(2), match.end(2)) if folded[i].isdigit())
     return found
+
+
+def _span_number(value):
+    """"15.000" -> 15000, "7,5" -> 7.5 (a decimal is only valid with a thousands word), None when empty."""
+    decimal = re.fullmatch(r"([0-9]{1,3})[.,]([0-9]{1,2})", value or "")
+    if decimal:
+        return float(f"{decimal.group(1)}.{decimal.group(2)}")
+    digits = re.sub(r"[^0-9]", "", value or "")
+    return int(digits) if digits else None
 
 
 def _price_range(folded, original, km_is_price, blocked=()):
@@ -309,16 +426,19 @@ def _price_range(folded, original, km_is_price, blocked=()):
         units = [original[match.start(g):match.end(g)] for g in ("ua", "ub") if match.group(g)]
         if len(units) == 2 and units[0] != units[1]:
             continue  # "12000 KM do 200000 km": a price and a mileage, not one range
+        if units and not match.group("ub") and not match.group("lead") and match.group("sep") in {"do", "to", "until"}:
+            continue  # "ispod 200k km do 12k": a mileage, then a price cap, not one range
         many_a, many_b = bool(match.group("ma")), bool(match.group("mb"))
-        low_digits = re.sub(r"[^0-9]", "", match.group("a"))
-        high_digits = re.sub(r"[^0-9]", "", match.group("b"))
-        if not low_digits or not high_digits:
+        low, high = _span_number(match.group("a")), _span_number(match.group("b"))
+        if low is None or high is None:
             continue
-        low, high = int(low_digits), int(high_digits)
         if many_a or (many_b and low < 1000):
             low *= 1000
         if many_b or (many_a and high < 1000):
             high *= 1000
+        if low != int(low) or high != int(high):
+            continue  # a decimal without a thousands word ("2.5 do 3") is not an amount
+        low, high = int(low), int(high)
         if _MILEAGE_WORD_AFTER.match(folded, match.end()):
             kind, bounds = "mileage", MILEAGE_RANGE  # "100 do 200 hiljada kilometara"
         elif "km" in units and not km_is_price:
@@ -353,7 +473,7 @@ def _extract_filters(folded, original, km_is_price=False):
     # A lone year ("Golf 2015") is that model year only; "od 2015", "2015+", "novije od 2015" are a lower bound
     # and "do 2018", "prije 2018" an upper one. (pattern, bound) where bound is "min", "max" or "exact".
     for pattern, bound in (() if span else (
-        (r"(?:from|since|after|newer than|od|iza|nakon|novije od)\s*((?:19|20)[0-9]{2})\b", "min"),
+        (r"(?:from|since|after|newer than|od|iza|nakon|novij\w* od|mladj\w* od)\s*((?:19|20)[0-9]{2})\b", "min"),
         (r"\b((?:19|20)[0-9]{2})\s*(?:\+|or newer|or later|and newer|ili novije|i novije)", "min"),
         (_YEAR_CEILING, "max"),
         (r"\b((?:19|20)[0-9]{2})\b(?!\s*(?:k(?![a-z])|km|bam|kam|marak\w*|hiljad\w*|tisuc\w*|thousand|eur\w*))",
@@ -421,7 +541,8 @@ def _extract_filters(folded, original, km_is_price=False):
     # "BAM" is a price. A mixed-case "Km" could be either, so the bot asks instead of guessing.
     # When correcting a price question (``km_is_price``) a lower-case "km" is read as KM too.
     # "kilometara" / "hiljada kilometara" always names mileage, whatever the case.
-    for match in re.finditer(rf"(?<![0-9.,]){_AMOUNT}\s*(km|{_KM_WORDS})(?![a-z0-9])", original, re.I):
+    # Matched on the folded text ("100 tisuća km" has a "ć"), the unit's case read from the original.
+    for match in re.finditer(rf"(?<![0-9.,]){_AMOUNT}\s*(km|{_KM_WORDS})(?![a-z0-9])", folded):
         if not all(mask[i] for i in range(match.start(), match.end())):
             continue
         unit = original[match.start(3):match.end(3)]
@@ -472,14 +593,17 @@ def _extract_filters(folded, original, km_is_price=False):
                 consume(match)
                 break
 
-    spans = [m for m in re.finditer(rf"(?<![0-9]){_AMOUNT}\s*(?:km|bam|kam|maraka|marks|eur|euro|kn|kuna|kune|hrk)?(?![a-z])", folded)
+    spans = [m for m in re.finditer(rf"(?<![0-9]){_AMOUNT}\s*(km|bam|kam|maraka|marke|marks|eur|euro|kn|kuna|kune|hrk)?(?![a-z])", folded)
              if all(mask[i] for i in range(m.start(), m.end()))]
+    unitless = None
     for match in spans:
         if budget is not None:
             break
         candidate = _amount(match.group(1), match.group(2), PRICE_RANGE)
         if candidate:
             budget = candidate
+            if not match.group(2) and not match.group(3):
+                unitless = candidate  # "golf do 150 000": neither "KM" nor "k" says it is a price
             consume(match)
             break
 
@@ -487,7 +611,7 @@ def _extract_filters(folded, original, km_is_price=False):
     gearbox, gearbox_spans = _attribute(folded, _GEARBOXES)
     for match in (list(re.finditer(_FAMILY, folded)) + list(re.finditer(_INCLUDE_OLD, folded))
                   + list(re.finditer(_LIQUID, folded)) + list(re.finditer(_NEW_CARS, folded))
-                  + list(re.finditer(_DEALS, folded))
+                  + list(re.finditer(_DEALS, folded)) + list(re.finditer(_BODY, folded))
                   + list(fuel_spans) + list(gearbox_spans)):
         consume(match)
     rest = "".join(char if keep else " " for char, keep in zip(original, mask))
@@ -495,13 +619,15 @@ def _extract_filters(folded, original, km_is_price=False):
         mileage_min = None
     filters = Filters(budget=budget, year_min=year, mileage_max=mileage, family=wants_family(folded),
                       include_old=wants_older(folded), price_min=price_min, year_max=year_max,
-                      fuel=fuel, transmission=gearbox, new_ok=re.search(_NEW_CARS, folded) is not None,
+                      fuel=fuel, transmission=gearbox, new_ok=wants_new(folded),
                       mileage_min=mileage_min, low_km=low_km)
     _UNCLEAR[0] = unit_unclear
     _BARE_KM[0] = bare_km
+    _UNITLESS[0] = unitless
     return filters, rest
 
 
+_UNITLESS = [None]  # a price cap read from a bare number with no unit or "k" in the last parse
 _BARE_KM = [None]  # amount a lower-case "km" alone made a mileage bound in the last parse
 _UNCLEAR = [None]  # amount whose unit (KM price or km mileage) was unclear in the last parse
 
@@ -509,22 +635,77 @@ _UNCLEAR = [None]  # amount whose unit (KM price or km mileage) was unclear in t
 def _singular(token):
     """Drop a plural ending so 'golfs' / 'golfovi' search as 'golf' (LIKE is substring-based)."""
     lowered = token.lower()
-    if len(lowered) > 5 and lowered.endswith(("ovi", "evi")):
+    if len(lowered) > 5 and lowered.endswith(("ovi", "evi", "ove")):
         return token[:-3]
     if len(lowered) > 4 and lowered.endswith("s") and not lowered.endswith(("ss", "es", "us", "is")):
         return token[:-1]
     return token
 
 
+# Names people say or misspell that are never in an ad: the word the ads use instead.
+SLANG = {
+    "bembara": "bmw", "bemba": "bmw", "beemve": "bmw", "bmvee": "bmw", "merdzo": "mercedes", "mercedez": "mercedes",
+    "pezo": "peugeot", "pezoo": "peugeot", "pezej": "peugeot", "reno": "renault",
+    "klio": "clio", "megan": "megane", "folksvagen": "volkswagen", "folksvagn": "volkswagen", "folcvagen": "volkswagen",
+    "folkswagen": "volkswagen", "volksvagen": "volkswagen", "wolkswagen": "volkswagen", "oktavija": "octavia",
+    "oktavia": "octavia", "oktavu": "octavia", "skodu": "skoda", "skodom": "skoda", "skode": "skoda",
+    "trojka": "serija 3", "trojku": "serija 3", "petica": "serija 5", "peticu": "serija 5",
+}
+# "golf vii", "golf mk7", "golfa sedmicu": the generation number those words stand for (only right after a model).
+_GENERATION_WORDS = {
+    "ii": "2", "iii": "3", "iv": "4", "v": "5", "vi": "6", "vii": "7", "viii": "8",
+    "trojka": "3", "trojku": "3", "cetvorka": "4", "cetvorku": "4", "petica": "5", "peticu": "5",
+    "sestica": "6", "sesticu": "6", "sedmica": "7", "sedmicu": "7", "sedmicom": "7", "osmica": "8", "osmicu": "8",
+}
+# Case endings of a model name ("golfa", "passatom", "octaviju", "fabije"): (ending, replacement).
+_ENDINGS = (("ijom", "ia"), ("iju", "ia"), ("ije", "ia"), ("iji", "ia"), ("ovima", ""), ("ove", ""), ("om", ""),
+            ("em", ""), ("om", "a"), ("u", "a"), ("e", "a"), ("i", "a"), ("a", ""), ("u", ""), ("e", ""))
+
+
+def _lemma(token, previous=""):
+    """"golfa" -> "golf", "octaviju" -> "octavia", "skodu" -> "skoda": a case form of a catalogue name, else the token.
+    After a make ("renault astre") only that make's own models count."""
+    folded = fold(token)
+    make = fold(previous)
+    if folded in SLANG:
+        return SLANG[folded]
+    if folded.startswith("oktav"):
+        folded = "oc" + folded[2:]  # "oktaviju" is "octavia" spelt as it is said
+    if (len(folded) < 4 or not folded.isalpha() or folded in _KNOWN_MODELS or folded in MAKE_MODELS
+            or folded in GENERATIONS):
+        return token
+    for ending, replacement in _ENDINGS:
+        if folded.endswith(ending) and len(folded) - len(ending) >= 3:
+            stem = folded[:len(folded) - len(ending)] + replacement
+            if make in MAKE_MODELS and stem not in MAKE_MODELS[make]:
+                continue
+            if stem in _KNOWN_MODELS or stem in MAKE_MODELS or stem in GENERATIONS:
+                return stem
+    return token
+
+
 def _search_tokens(rest):
     tokens = []
     for raw in re.split(r"\s+", rest.lower().replace("'", "").replace("\u2019", "")):
+        if re.search(r"[<>=(){}]", raw.strip("()[]\"'!?.,:")):
+            continue  # markup or code ("<script>", "'1'='1"), never a model name; "(golf)" is still golf
         raw = re.sub(r"^([0-9])[,]([0-9][a-z]?)$", r"\1.\2", raw)  # "3,0" is the engine size 3.0, not "3 0"
         token = clean_search(raw).strip(".-")
         folded = fold(token)
+        if tokens and folded in _GENERATION_WORDS and _generation_model(tokens[-1]):
+            number = _GENERATION_WORDS[folded]
+            if number in GENERATIONS[_generation_model(tokens[-1])]:
+                tokens.append(number)  # "golf vii", "golfa sedmicu"
+                continue
+        mark = re.fullmatch(r"mk([0-9])", folded)
+        if mark and tokens and _generation_model(tokens[-1]):
+            tokens.append(mark.group(1))  # "golf mk7"
+            continue
+        if re.fullmatch(r"[0-9]{5,}", folded):
+            continue  # "do 999999999 KM": an amount out of range is not a model number
         if (token and folded not in _STOPWORDS and fold(token.rstrip("s")) not in _STOPWORDS
                 and not folded.startswith(_FILLER_PREFIXES)):
-            tokens.append(_singular(token))
+            tokens.extend(_lemma(_singular(token), tokens[-1] if tokens else "").split())
     return tokens
 
 
@@ -628,8 +809,8 @@ def repair_typo(token, previous=""):
     own models are candidates, so a real but unlisted model is left for the database to suggest."""
     folded = fold(token)
     if (len(folded) < 5 or not folded.isalpha() or folded in COMMON_NAMES or folded in _KNOWN_MODELS
-            or folded in MAKE_MODELS or folded in _STOPWORDS):
-        return token
+            or folded in MAKE_MODELS or folded in _STOPWORDS or is_place(folded)):
+        return token  # "Doboj" is a town, never a misspelt "Doblo"
     make = fold(previous)
     # "octavie", "passati", "golfovi" are inflected forms, not typos: the database search handles those
     close = [name for name in difflib.get_close_matches(folded, COMMON_NAMES, n=3, cutoff=TYPO_CUTOFF)
@@ -709,8 +890,25 @@ def hint_patterns(hints):
 
 
 _COMPARE_SPLIT = re.compile(
-    r"\s*(?:\||\bvs\.?\b|\bversus\b|\bnaspram\b|\bagainst\b|\bcompared to\b|\bor\b|\bili\b|\band\b|\bi\b|\bwith\b)\s*",
+    r"\s*(?:\||\bvs\.?\b|\bversus\b|\bnaspram\b|\bprotiv\b|\bagainst\b|\bcompared to\b|\bor\b|\bili\b|\band\b|"
+    r"\bi\b|\bwith\b|\bsa\b)\s*",
     re.I)
+_CAR_WORDS = None
+
+
+def _label_text(chunk):
+    """A compare side as a search, with a one-letter typo repaired ("pasat" -> "passat")."""
+    tokens = _search_tokens(chunk)
+    return clean_search(" ".join(repair_typo(token, tokens[i - 1] if i else "") for i, token in enumerate(tokens)))
+
+
+def _chunk_names_car(chunk):
+    """True when a compare side names a make, model or alias ("pasat" -> Passat, "octavije" -> Octavia)."""
+    global _CAR_WORDS
+    if _CAR_WORDS is None:
+        _CAR_WORDS = set(MAKE_MODELS) | set(_KNOWN_MODELS) | set(GENERATIONS) | {"vw", "benz", "serija", "mercedes"}
+    tokens = _search_tokens(chunk)
+    return any(fold(repair_typo(token, tokens[i - 1] if i else "")) in _CAR_WORDS for i, token in enumerate(tokens))
 
 
 def _compare_labels(text_value):
@@ -720,33 +918,47 @@ def _compare_labels(text_value):
     if match:
         body = text_value[match.start(1):]
         candidates = _COMPARE_SPLIT.split(body)
-    elif re.search(r"\bvs\.?\b|\bversus\b|\bnaspram\b|\|", folded):
+    elif re.search(r"\bvs\.?\b|\bversus\b|\bnaspram\b|\bprotiv\b|\|", folded):
         candidates = _COMPARE_SPLIT.split(text_value)
     elif re.search(r"\b(?:better|bolji|bolje|which)\b.*\b(?:or|ili)\b", folded):
         candidates = _COMPARE_SPLIT.split(text_value)
-    elif (re.search(r"\b(?:or|ili)\b", folded)
-          and not re.search(r"[0-9]", folded) and len(folded.split()) <= 8
+    elif (re.search(r"\b(?:or|ili)\b", folded) and len(folded.split()) <= 10
           and not _attribute(folded, _FUELS)[1] and not _attribute(folded, _GEARBOXES)[1]):
-        candidates = _COMPARE_SPLIT.split(text_value)  # "Octavia ili Passat za porodicu?"
-        if not text_value.strip().endswith("?"):
+        candidates = [chunk for part in text_value.split(",") for chunk in _COMPARE_SPLIT.split(part)]
+        named = [chunk for chunk in candidates if _search_text(chunk)]
+        if len(named) >= 2 and all(_chunk_names_car(chunk) for chunk in named):
+            # "golf ili pasat", "golf 7 ili octavia 3 do 20000", "golf, octavia ili leon": cars on every side
+            # (the first two are compared)
+            labels = [_label_text(chunk) for chunk in named]
+            return tuple(labels[:2])
+        if re.search(r"[0-9]", folded) or len(folded.split()) > 8:
+            candidates = []
+        elif not text_value.strip().endswith("?"):
             # no question mark: only a clear "make model ili make model" pair, never "golf ili nesto"
             if len(candidates) != 2 or any(len(_search_text(chunk).split()) < 2 for chunk in candidates):
                 candidates = []
     labels = []
     for chunk in candidates:
-        label = _search_text(chunk)
+        label = _label_text(chunk)
+        if label and _attribute(fold(label), _FUELS)[1] and not _chunk_names_car(label):
+            return ()  # "dizel ili benzin": fuels, not two models
         if label:
             labels.append(label)
     return tuple(labels[:2]) if len(labels) == 2 else ()
 
 
 def _days_from(folded):
+    months = re.search(r"\b([1-9][0-9]?)\s*(?:mjesec\w*|mesec\w*|months?)\b", folded)
+    if months:  # "zadnja 3 mjeseca": 90 days (the longest window the bot keeps)
+        return max(1, min(int(months.group(1)) * 30, 90))
     match = re.search(r"\b([1-9][0-9]?)\s*(?:d\b|day|days|dan|dana)", folded)
     if not match:
-        match = re.search(r"\b(?:last|past|zadnjih|posljednjih)\s*([1-9][0-9]?)\b", folded)
+        match = re.search(r"\b(?:last|past|zadnjih|zadnja|zadnje|posljednjih|posljednja)\s*([1-9][0-9]?)\b", folded)
     if match:
         return max(1, min(int(match.group(1)), 90))
-    if re.search(r"\b(?:month|mjesec)\b", folded):
+    if re.search(r"\b(?:godin\w*|year)\b", folded) and re.search(r"\b(?:zadnj\w*|posljednj\w*|ov\w*|last|past|this)\b", folded):
+        return 90  # "ove godine": as far back as the bot keeps
+    if re.search(r"\b(?:month|mjesec\w*|mesec\w*)\b", folded):
         return 30
     if re.search(r"\b(?:week|sedmic|sedmica)\w*", folded):
         return 7
@@ -763,11 +975,18 @@ def looks_like_followup(text_value):
     Used only for the best-effort memory of a private chat: filter-only messages
     ("from 2018", "under 12000") or ones opening with "what about ...".
     """
-    original = strip_mentions((text_value or "")[:MAX_QUESTION]).strip()
-    if _FOLLOWUP_CUE.match(original) or re.search(_MORE, fold(original)):
+    original = strip_places(strip_mentions((text_value or "")[:MAX_QUESTION]).strip())[0]
+    folded = fold(original)
+    if _FOLLOWUP_CUE.match(original) or re.search(_MORE, folded):
         return True
-    filters, rest = _extract_filters(fold(original), original)
-    return bool(filters.numeric() or filters.include_old or filters.attributes()) and not _search_tokens(rest)
+    if re.search(r"^(?:ajde\s+|hajde\s+)?(?:compare|uporedi\w*|usporedi\w*|poredi\w*)\b", folded):
+        return True  # "uporedi sa octaviom": with the car just searched
+    filters, rest = _extract_filters(folded, original)
+    if _search_tokens(rest):
+        return False
+    # "do 12000", "dizel", "nešto jeftinije", "može i skuplje", "koliko košta": the last search, changed
+    return bool(filters.numeric() or filters.include_old or filters.attributes() or re.search(_RELATIVE, folded)
+                or re.search(_PRICE_ASK, folded))
 
 
 # "I meant / I said / no, rather ..." — the message corrects the previous answer's search.
@@ -793,7 +1012,7 @@ _BUDGET_STATE = re.compile(
     r"\b(?:budzet(?:\s+mi)?\s+je|moj\s+budzet\s+je|(?:my\s+)?budget\s+is|"
     r"imam(?:\s+(?:oko|do|max|samo|cca))?\s+(?=[0-9])|"
     r"(?:izvan|van|preko|iznad|over|above)\s+(?:(?:mog|moje|mojeg|my|the)\s+)?(?:budzet\w*|budget))")
-_KN_AMOUNT = re.compile(r"[0-9]\s*(?:kn|kuna|kune|hrk)(?![a-z0-9])")
+_KN_AMOUNT = re.compile(r"[0-9]\s*(?:(?:k|h?iljad\w*|tisuc\w*|soma)\s*)?(?:kn|kuna|kune|hrk)(?![a-z0-9])")
 
 
 def _budget_correction(folded):
@@ -815,12 +1034,14 @@ _TITLES = (
      "budget": "Recently observed at or below ", "find": "Observed listings", "upto": "up to ", "from": "from ",
      "family": "for a family", "old": "incl. older", "lowkm": "low mileage", "suggest": "Data-based shortlist",
      "liquidity": "⏱ Fastest to disappear from our search", "new": "incl. new", "deals": "🏷 Good deals",
+     "cheapest": "cheapest first",
      "fuel": {"diesel": "diesel", "petrol": "petrol", "hybrid": "hybrid", "electric": "electric", "lpg": "LPG"},
      "gearbox": {"automatic": "automatic", "manual": "manual"}},
     {"trends": "Zabilježene promjene tražene cijene · zadnjih ", "trends_unit": "dana",
      "budget": "Nedavno viđeno do ", "find": "Viđeni oglasi", "upto": "do ", "from": "od ",
      "family": "za porodicu", "old": "i stariji", "lowkm": "malo kilometara", "suggest": "Uža lista na osnovu podataka",
      "liquidity": "⏱ Najbrže nestaju iz naše pretrage", "new": "i novi", "deals": "🏷 Dobre prilike",
+     "cheapest": "prvo najjeftiniji",
      "fuel": {"diesel": "dizel", "petrol": "benzin", "hybrid": "hibrid", "electric": "električni", "lpg": "LPG"},
      "gearbox": {"automatic": "automatik", "manual": "manuelni"}},
 )
@@ -831,7 +1052,7 @@ def _title_filters(body, titles):
     """Filters from the ' · '-separated pieces after an answer's title."""
     values = {"search": "", "budget": None, "year_min": None, "mileage_max": None, "family": False,
               "include_old": False, "price_min": None, "year_max": None, "fuel": "", "transmission": "",
-              "new_ok": False, "mileage_min": None, "low_km": False}
+              "new_ok": False, "mileage_min": None, "low_km": False, "cheapest": False}
     upto, since = titles["upto"], titles["from"]
     fuels = {label: value for value, label in titles["fuel"].items()}
     gearboxes = {label: value for value, label in titles["gearbox"].items()}
@@ -851,6 +1072,8 @@ def _title_filters(body, titles):
             values["new_ok"] = True
         elif piece == titles["lowkm"]:
             values["low_km"] = True
+        elif piece == titles.get("cheapest"):
+            values["cheapest"] = True
         elif km_span:
             values["mileage_min"] = _amount(km_span.group(1), None, MILEAGE_RANGE)
             values["mileage_max"] = _amount(km_span.group(2), None, MILEAGE_RANGE)
@@ -931,16 +1154,22 @@ def context_from_reply(reply_text):
     return None
 
 
-_FOLLOW = r"\b(?:follow\w*|track\w*|watch\w*|prati\w*|zaprati\w*|pracenj\w*|praceni\w*)\b"
+_FOLLOW = (r"\b(?:follow\w*|track\w*|watch\w*|prati\w*|zaprati\w*|pracenj\w*|praceni\w*|notify|alert me|"
+           r"let me know|obavij?est\w*|obavest\w*)\b|\bjavi(?:te)?\s+(?:mi|nam|kad\w*)\b")
+# "više ne prati passat", "prestani pratiti golf", "unfollow golf": never an offer to follow; the follow list with
+# its unfollow buttons instead.
+_UNFOLLOW = (r"\b(?:ne|nemoj|vise ne|prestan\w*|stop\w*|dont|don't|do not|no longer)\s+(?:(?:vise|vise da|da|to|with)\s+)?"
+             r"(?:prat\w*|zaprat\w*|follow\w*|track\w*|watch\w*)|\bunfollow\w*|\b(?:otprati|odprati|otprat|odprat)\w*")
 _SHORTLIST = r"\b(?:shortlist\w*|saved (?:cars?|ads?|listings?)|sacuvan\w*|sacuva\w*|moja lista|moj spisak|my list)\b"
 _STATUS = r"\b(?:status|fresh\w*|up to date|stale|collector|how old|when was|azurn\w*|kolektor)\b"
 _LATEST = r"\b(?:latest|newest|what'?s new|whats new|new listings|interesting|finds|najnovij\w*|sta ima novo|novo)\b"
 _TRENDS = (r"\b(?:trend\w*|price changes?|prices? (?:drop|fall|rise|change)\w*|pojeftin\w*|poskup\w*)|"
-           r"\bcijen\w*.*\b(?:mijenj|pad|rast)\w*|\b(?:mijenj|pad|rast)\w*.*\bcijen\w*")
+           r"\bcijen\w*.*\b(?:mijenj\w*|pad\w*|rast\w*|pal[aeio]\b|porasl\w*|skocil\w*|skocil\w*)|"
+           r"\b(?:mijenj|pad|rast)\w*.*\bcijen\w*")
 _LIQUID = (r"\bnajlak\w*(?:\s+\w+){0,2}\s+prod\w*|\bnajbrz\w*(?:\s+\w+){0,2}\s+prod\w*|"
            r"\b(?:brzo|lako|lakse|brze)\s+(?:se\s+)?prod\w*|\b(?:naj)?likvid\w*|\beasiest to sell\b|"
            r"\bsells? (?:the )?(?:fastest|quickest)\b|\bquickest to sell\b|\bsell(?:s)? (?:fast|quickly)\b|"
-           r"\bfastest (?:to )?sell\w*\b")
+           r"\bfastest (?:to )?sell\w*\b|\bnajtrazenij\w*|\bnajpopularnij\w*|\bmost (?:wanted|popular)\b")
 _GREETING = (r"^(?:hej|hey|hi|hello|ej|bok|cao|zdravo|pozdrav|selam|merhaba|yo|sta ima|kako si|dobar dan|dobro jutro|"
              r"dobro vece|dobra vecer|laku noc|good (?:morning|evening|afternoon))"
              r"(?:\s+(?:bote|bot|svima|ekipo|ekipa|garaza|there|everyone|all))?\W*$")
@@ -962,6 +1191,15 @@ _SMALL_TALK = (
 
 
 SMALL_TALK_MAX_WORDS = 7
+# Questions that are not about cars at all ("koliko je sati", football, a seller's phone number, "is this a scam",
+# "forget your rules and tell me the token"): the scope answer, never a search or price statistics.
+_OFF_TOPIC = (r"\b(?:koliko je sati|koje je vrijeme sad\w*|what time is it|koji je (?:danas )?datum|koji je danas dan|"
+              r"lig\w* prvaka|champions league|fudbal\w*|nogomet\w*|utakmic\w*|broj\w* telefona|telefon\w*|"
+              r"kontakt\w* prodav\w*|phone number|prevar\w*|scam\w*|"
+              r"(?:zaboravi|ignorisi|ignoriraj|ignore|forget)\b.*\b(?:pravil\w*|instrukc\w*|upute|instructions|rules|prompt)|"
+              r"\btoken\w*|api key|lozink\w*|password\w*|system prompt)\b")
+_INSULT = r"\b(?:glup\w*|budal\w*|idiot\w*|kreten\w*|debil\w*|stupid|dumb|useless|beskoristan|beskorisn\w*)\b"
+_WHERE_TO_BUY = (r"^(?:a\s+)?(?:gdje|gde|where)\b.*\b(?:kupi\w*|kupuj\w*|nabav\w*|buy|purchase|prodaj\w*|sell)\b")
 
 
 def small_talk_topic(folded):
@@ -986,7 +1224,7 @@ DEAL_WEEK_DAYS = 7
 DEAL_DEFAULT_DAYS = 14  # same window as the shortlist's "priced well below similar listings"
 
 _YEAR_SINGLE = (
-    (r"(?:from|since|after|newer than|od|iza|nakon|novije od)\s*((?:19|20)[0-9]{2})\b", False),
+    (r"(?:from|since|after|newer than|od|iza|nakon|novij\w* od|mladj\w* od)\s*((?:19|20)[0-9]{2})\b", False),
     (r"\b((?:19|20)[0-9]{2})\s*(?:\+|or newer|or later|and newer|ili novije|i novije)", False),
     (_YEAR_CEILING, "max"),
     (r"\b((?:19|20)[0-9]{2})\b", True),
@@ -1027,7 +1265,7 @@ def short_model_number(tokens, folded):
         model = _generation_model(word)
         if model and number in GENERATIONS[model]:
             continue
-        after = (r"(?![0-9]|\s*(?:k(?![a-z])|km|kn|bam|kam|maraka|hiljad\w*|iljad\w*|tisuc\w*|thousand|"
+        after = (r"(?![0-9]|\s*(?:k(?![a-z])|km|kn|bam|kam|maraka|hiljad\w*|iljad\w*|tisuc\w*|thousand|soma|som\b|"
                  r"god\w*|years?|eur\w*|kw|ks|ps|hp|cc|ccm|[.,]?[0-9]|%))")
         if re.search(rf"\b{re.escape(fold(word))}\s+{number}{after}", folded):
             if number.startswith("0"):
@@ -1042,7 +1280,8 @@ _MORE = (r"^(?:(?:hajde|ajde|molim te|please)\s+)?(?:(?:pokazi|prikazi|daj|show|
          r"(?:\s+(?:jos|oglasa?|oglase|rezultat\w*|auta|stranic\w*|page|results?|ads|listings?|cars|ih|jedan|jednu))*\W*$")
 
 # "koliko km ima prosječno", "average mileage of a golf 7": the typical mileage of a model, not its price.
-_KM_NOUN = r"(?<![0-9])\b(?:km|kms|kilometar\w*|kilometr\w*|kilometraz\w*|mileage|odvozen\w*|prijeden\w*)\b"
+_KM_NOUN = (r"(?<![0-9])\b(?:km|kms|kilometar\w*|kilometr\w*|kilometraz\w*|mileage|odvozen\w*|prijeden\w*|"
+            r"pre(?:sa|sl)\w*|predj?(?:e|en)\w*)\b")
 _AVG_ASK = (r"\b(?:prosje\w*|average|avg|typical|tipicn\w*|obicn\w*|uobicajen\w*|median\w*|medijan\w*|usually|"
             r"normaln\w*|koliko|how many|how much)\b")
 _PRICE_WORD = r"\b(?:cijen\w*|price\w*|kosta\w*|cost\w*|vrijed\w*|eur|bam|kam)\b"
@@ -1054,14 +1293,31 @@ _VAGUE = (r"\b(?:pouzdan\w*|reliable|dependable|nice|lijep\w*|dobar auto|good ca
           r"stedljiv\w*|economical|something|nesto|sporty|sigurn\w*|safe)\b")
 VAGUE_MAX_WORDS = 8
 _FORECAST = r"\b(?:will|predict\w*|forecast\w*|going to|next (?:year|month|week)|prognoz\w*|hoce li|budu[cć]\w*)\b"
-_CURRENCY = r"\b(?:eur|euro|euros|usd|dollars?)\b|[€$]"
+_CURRENCY = (r"\b(?:eur|eura|euro|eure|eurima|euros|evra|evro|evre|evri|evrima|usd|dollars?|dolar\w*)\b|[€$]")
 _ACK = r"^(?:thanks|thank you|thx|ty|ok|okay|hvala|super|great|nice|cool|sjajno)\W*$"
+_ACK_CORE = frozenset("thanks thank thx ty tnx ok okay okej oke hvala fala hvalaa super great nice cool sjajno odlicno "
+                      "top perfect savrseno extra ekstra bravo".split())
+_ACK_WORDS = _ACK_CORE | frozenset("you u e eto evo ti vam puno lijepa ljepa velika mnogo brate brat buraz bro to je "
+                                   "sve that s it all much a lot ok i so very jako bas mi".split())
+_ACK_EMOJI = re.compile("[\U0001F44D\U0001F64F\U0001F44C\u2764\U0001F60A\U0001F642\U0001F917\u263A\u2705]")
+
+
+def is_acknowledgement(folded):
+    """"hvala", "hvala puno", "ok hvala ti brate", "e super, fala", "hvala, to je to", "👍": thanks, not a question."""
+    if re.search(_ACK, folded):
+        return True
+    words = re.findall(r"[a-z]+", folded)
+    if not words:
+        return bool(_ACK_EMOJI.search(folded)) and not re.search(r"[0-9]", folded)
+    return (len(words) <= 7 and all(word in _ACK_WORDS for word in words) and any(word in _ACK_CORE for word in words)
+            and not re.search(r"[0-9?]", folded))
 _SUGGEST = (r"\b(?:suggest\w*|recommend\w*|preporuc\w*|should i buy|what to buy|what (?:car|cars) (?:should|to)|"
             r"which car|best (?:buy|value|deal|car)s?|worth buying|smartest|najpametnij\w*|pametno\w*|"
             r"sta (?:da )?kupi\w*|sta kupiti|koji auto|najbolje (?:se )?prodaj\w*|najtrazenij\w*|"
             r"best sell\w*|what sells|sells? best|popular)\b")
 _ADVICE = r"\b(?:should i buy|what (?:car|to buy)|which car|recommend\w*|best (?:car|deal)s?|worth buying|preporuc\w*|koji auto|sta kupiti|sta da kupim)\b"
-_WHICH_MODEL = r"\bkoj\w*\s+(?:model\w*|auto\w*|kola)\b|\bwhich\s+(?:models?|cars?)\b"
+_WHICH_MODEL = (r"\bkoj\w*\s+(?:(?:su|je|bi|da)\s+)?(?:model\w*|auto\w*|kola|marku|marke)\b|"
+                r"\bwhich\s+(?:models?|cars?)\b")
 
 
 def wants_recommendation(text_value):
@@ -1200,8 +1456,11 @@ def _correct(original, folded, context):
     if cut:
         original, folded = original[:cut.start()], folded[:cut.start()]
     filters, rest = _extract_filters(folded, original, km_reads_as_price(context.filters, folded))
-    named = [token for token in _search_tokens(rest) if not token.isdigit()]
+    tokens, generation = generation_hint(_search_tokens(rest))
+    named = [token for token in tokens if not token.isdigit()]
     new = replace(filters, search=clean_search(" ".join(named)) if len(named) <= 3 else "")
+    if generation and not (new.year_min or new.year_max):  # "pogrešno, golf 6 ne 7": that generation's years
+        new = replace(new, year_min=generation[0], year_max=generation[1])
     if not (new.numeric() or new.search or new.family or new.include_old or new.attributes()):
         return None
     merged = merge_filters(context.filters, new)
@@ -1228,7 +1487,8 @@ def _correct_budget(original, folded, context):
     kind = context.kind
     if kind == "suggest" and not merged.budget:
         kind = "find"
-    return Intent(kind, merged, note="correction")
+    labels = () if new.budget else ("same_budget",)  # the answer asks for the new cap
+    return Intent(kind, merged, note="correction", labels=labels)
 
 
 def _more(context):
@@ -1244,10 +1504,22 @@ def _more(context):
 def parse_question(text_value, context=None, _restating=False):
     """Turn one question into an Intent (see ``_parse_question``). A car search that mentions registration
     carries the label "registration", so the answer can say it is not a filter."""
+    text_value, place = strip_places(strip_mentions((text_value or "")[:MAX_QUESTION]))
     intent = None if _restating else _mixed_question(text_value, context)
     if intent is None:
         intent = _parse_question(text_value, context, _restating)
+    if intent.kind == "unsupported" and not intent.note and not _restating:
+        intent = _last_clause(text_value, context) or intent
+    if (place and intent.kind in {"unsupported", "clarify"} and not intent.note and not intent.labels
+            and context is not None and context.kind in CORRECTABLE):
+        intent = Intent(context.kind, context.filters, days=context.days)  # "a u Sarajevu?": same search
     folded = fold(strip_mentions((text_value or "")[:MAX_QUESTION]))
+    located = {"find", "suggest", "liquidity", "deals", "price_check", "model_stats", "mileage_stats", "compare"}
+    if place and intent.kind in located and "location" not in intent.labels:
+        intent = replace(intent, labels=intent.labels + ("location",))  # the answer says location is not a filter
+    if (intent.kind in {"find", "suggest", "liquidity", "deals"} and re.search(_BODY, folded)
+            and "body" not in intent.labels):
+        intent = replace(intent, labels=intent.labels + ("body",))  # "SUV do 25000": body type is not a filter
     if intent.kind == "find" and "registration" not in intent.labels and re.search(_REGISTRATION, folded):
         intent = replace(intent, labels=intent.labels + ("registration",))
     if (intent.kind in {"find", "liquidity", "suggest", "deals"} and (intent.filters.budget or intent.filters.price_min)
@@ -1256,8 +1528,93 @@ def parse_question(text_value, context=None, _restating=False):
     return intent
 
 
+def _is_keyboard_mash(folded):
+    """"asdfghjkl": one long word with almost no vowels that is not close to any car name."""
+    words = folded.split()
+    if len(words) != 1 or not words[0].isalpha() or len(words[0]) < 6:
+        return False
+    word = words[0]
+    if word in _STOPWORDS or re.search(_SHORTLIST + "|" + _FOLLOW + "|" + _STATUS + "|" + _LATEST, word):
+        return False
+    return sum(char in "aeiouy" for char in word) / len(word) < 0.2 and repair_typo(word) == word
+
+
+_CHEAPER = r"\b(?:jeftinij\w*|cheaper|povoljnij\w*|manje para|nize cijen\w*|nizu cijenu|less money)\b"
+_PRICIER = r"\b(?:skuplj\w*|pricier|more expensive|vise para|veci budzet|vec\w* budzet)\b"
+_NEWER = r"\b(?:novij\w*|mladj\w*|newer|recent\w*)\b"
+_OTHER_MODEL = (r"\b(?:drug\w*|ostal\w*|other|another|razn\w*)\s+(?:model\w*|auto\w*|kola|mark\w*|cars?|options?)\b|"
+                r"\bneki drugi\b|\bnesto drugo\b|\bsta (?:jos|drugo)\b|\balternativ\w*")
+_RELATIVE = "|".join((_CHEAPER, _PRICIER, _NEWER, _OTHER_MODEL, _USED))
+RELATIVE_CHEAPER = 0.85  # "a jeftinije?": 15% under the cap shown, rounded down to 500 KM
+RELATIVE_PRICIER = 1.2
+RELATIVE_NEWER_YEARS = 2
+
+
+def _round_to(value, step, up=False):
+    return int((value + (step - 1 if up else 0)) // step * step)
+
+
+def _relative_followup(folded, filters, context):
+    """Follow-ups that move a bound of the last search instead of naming a new one: "a jeftinije?", "može i
+    skuplje", "a novije?", "a neki drugi model?", "a polovni?", and a bare "koliko košta" about the car just
+    searched. The model, fuel and the other bounds are kept. Without a bound to move the bot asks. None when the
+    message is not such a follow-up (or names its own model / bound)."""
+    if filters.search or context is None or context.kind not in CORRECTABLE:
+        return None
+    base = context.filters
+    if re.search(_PRICE_ASK, folded) and base.search and not filters.numeric() and context.kind == "find":
+        exact = bool(base.year_min and base.year_min == base.year_max)
+        return _price_check(merge_filters(replace(base, budget=None, price_min=None), filters), folded, exact)
+    if filters.numeric():
+        return None
+    if re.search(_OTHER_MODEL, folded):
+        budget = filters.budget or base.budget
+        if not budget:
+            return Intent("clarify", note="budget")
+        return Intent("suggest", replace(merge_filters(base, filters), search="", budget=budget, include_old=False))
+    kind = context.kind if context.kind != "suggest" or base.budget else "find"
+    if re.search(_CHEAPER, folded):
+        if not base.budget:
+            return Intent("clarify", note="budget")
+        cap = max(PRICE_RANGE[0], _round_to(base.budget * RELATIVE_CHEAPER, 500))
+        low = base.price_min if base.price_min and base.price_min < cap else None
+        return Intent(kind, replace(merge_filters(base, filters), budget=cap, price_min=low), days=context.days,
+                      labels=("relative",))
+    if re.search(_PRICIER, folded):
+        if not base.budget:
+            return Intent("clarify", note="budget")
+        cap = min(PRICE_RANGE[1], _round_to(base.budget * RELATIVE_PRICIER, 500, up=True))
+        return Intent(kind, replace(merge_filters(base, filters), budget=cap), days=context.days, labels=("relative",))
+    if re.search(_NEWER, folded):
+        if not base.year_min:
+            return Intent("clarify", note="newer")
+        year = min(YEAR_RANGE[1], base.year_min + RELATIVE_NEWER_YEARS)
+        high = base.year_max if base.year_max and base.year_max >= year else None
+        return Intent(kind, replace(merge_filters(base, filters), year_min=year, year_max=high), days=context.days,
+                      labels=("relative",))
+    if re.search(_USED, folded) and base.new_ok:
+        return Intent(kind, replace(merge_filters(base, filters), new_ok=False), days=context.days)
+    return None
+
+
+def _last_clause(text_value, context=None):
+    """A long, rambling message whose request comes last ("..., na kraju, zanima me octavia karavan dizel do
+    18000 KM"): the last clause, when it alone is a clear search. None otherwise."""
+    clauses = [part for part in re.split(r"[.!?;,]+", text_value or "") if re.search(r"\w", part)]
+    if len(clauses) < 2 or len((text_value or "").split()) < 9:
+        return None
+    intent = _parse_question(clauses[-1], context, _restating=True)
+    if intent.kind in {"find", "suggest", "liquidity"} and (intent.filters.search or intent.filters.numeric()):
+        return intent
+    return None
+
+
 _NOT_AN_INTENT = {"clarify", "unsupported", "chitchat", "ignore", "no_more"}
 _SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s+|\s*;\s*")
+# "trendove ali i golf do 15000", "Golf vs Octavia, a onda ...", "koliko košta golf 7 i da li se brzo prodaje":
+# a conjunction that starts a second request inside one sentence.
+_REQUEST_BREAK = re.compile(r"\s*,?\s*\b(?:ali i|a onda|pa onda|i onda|a zatim|i zatim|i da li|i jel|i je li|"
+                            r"a da li|and then|and also|but also)\b\s*", re.I)
 MIXED_MAX_PARTS = 4
 
 
@@ -1271,7 +1628,8 @@ def _mixed_question(text_value, context=None):
     folded = fold(original)
     if re.search(_CORRECTION, folded) or re.search(_MORE, folded):
         return None
-    parts = [part.strip() for part in _SENTENCE_BREAK.split(original) if re.search(r"\w", part)]
+    parts = [piece.strip() for part in _SENTENCE_BREAK.split(original) for piece in _REQUEST_BREAK.split(part)
+             if re.search(r"\w", piece)]
     if not 2 <= len(parts) <= MIXED_MAX_PARTS:
         return None
     states, requests = [], []
@@ -1307,13 +1665,24 @@ def _parse_question(text_value, context=None, _restating=False):
         return Intent("unsupported")
     folded = fold(original)
 
-    if re.search(_ACK, folded):
+    if is_acknowledgement(folded):
         return Intent("ignore")
     topic = small_talk_topic(folded)
     if topic:
         return Intent("chitchat", labels=(topic,))
     if re.search(_MORE, folded):
         return _more(context)
+    if re.search(_OFF_TOPIC, folded):
+        return Intent("chitchat", labels=("scope",))
+    if not _names_a_car(folded) and not re.search(r"[0-9]", folded):
+        if re.search(_INSULT, folded):
+            return Intent("chitchat")
+        if re.search(_WHERE_TO_BUY, folded):
+            return Intent("chitchat", labels=("scope",))  # "gdje da kupim polovan auto": general advice
+        if _is_keyboard_mash(folded):
+            return Intent("unsupported")
+    if re.search(_UNFOLLOW, folded):
+        return Intent("following")  # the follow list, with an unfollow button per model
     if re.search(_OUT_OF_SCOPE_ALWAYS, folded):
         return Intent("chitchat", labels=("scope",))
     if re.search(_OUT_OF_SCOPE_UNLESS_FILTERS, folded):
@@ -1338,6 +1707,13 @@ def _parse_question(text_value, context=None, _restating=False):
             cut = _COMPLAINT.search(folded)
             if cut:
                 original, folded = original[:cut.start()], folded[:cut.start()]
+            said = _CORRECTION.search(folded)
+            tail = original[said.end():] if said else ""
+            if re.search(r"\w", tail):  # "... pa sam mislio golf ili tako nešto do 15 hiljada": what follows the phrase
+                restated = _parse_question(tail, _restating=True)
+                if restated.kind in {"find", "suggest", "liquidity"} and (
+                        restated.filters.search or restated.filters.budget or restated.filters.price_min):
+                    return restated
             restated = _parse_question(original, _restating=True) if original.strip() else Intent("unsupported")
             if restated.kind in {"find", "suggest", "liquidity"} and (
                     restated.filters.search or restated.filters.budget or restated.filters.price_min):
@@ -1362,6 +1738,13 @@ def _parse_question(text_value, context=None, _restating=False):
         if wants_family(folded):  # "Octavia vs Golf za porodicu": the answer adds a line about the family list
             return Intent("compare", Filters(family=True), labels=labels)
         return Intent("compare", labels=labels)
+    asked = re.search(r"^(?:a\s+)?(?:ajde\s+|hajde\s+)?(?:compare|uporedi\w*|usporedi\w*|poredi\w*)\b(.*)$", folded)
+    if asked:  # "uporedi sa octaviom" after a Passat search; "uporedi ih" with nothing to go on
+        other = _search_text(original[asked.start(1):])
+        if other and context is not None and context.filters.search and fold(context.filters.search) != fold(other):
+            return Intent("compare", labels=(context.filters.search, other))
+        if len(other.split()) <= 1:
+            return Intent("clarify", note="compare")
 
     if re.search(_TRENDS, folded):
         days = _days_from(folded)
@@ -1372,6 +1755,7 @@ def _parse_question(text_value, context=None, _restating=False):
     filters, rest = _extract_filters(folded, original, _km_range_is_price(context, folded, original))
     unclear = _UNCLEAR[0]
     bare_km = _BARE_KM[0]
+    unitless = _UNITLESS[0]
     tokens = _search_tokens(rest)
     tokens, generation = generation_hint(tokens)
     tokens = [repair_typo(token, tokens[i - 1] if i else "") for i, token in enumerate(tokens)]
@@ -1421,6 +1805,11 @@ def _parse_question(text_value, context=None, _restating=False):
         kind = ("liquidity",) if re.search(_LIQUID, folded) else ()
         return Intent("clarify", filters, note="km_unit", offset=unclear, labels=kind)
 
+    if (unitless and filters.budget == unitless and unitless > BARE_KM_ASK_MAX and filters.search
+            and filters.mileage_max is None and not re.search(_LIQUID, folded)):
+        # "golf do 150 000" with no unit: no Golf costs 150.000 KM, but it could. Ask, never guess.
+        return Intent("clarify", replace(filters, budget=None), note="km_unit", offset=unitless)
+
     if re.search(_LIQUID, folded):
         return Intent("liquidity", filters)
 
@@ -1430,9 +1819,13 @@ def _parse_question(text_value, context=None, _restating=False):
     if re.search(_FOLLOW, folded):
         generic = {"model", "modeli", "modela", "models", "cars", "auta", "automobili"}
         named = " ".join(word for word in filters.search.split() if fold(word) not in generic)
-        if named and not filters.numeric():
+        if named:  # "prati golf 7", "zaprati mi passat do 15000": the model is followed (bounds are not part of it)
             return Intent("follow", Filters(search=named))
         return Intent("following")
+
+    relative = _relative_followup(folded, filters, context)
+    if relative is not None:
+        return relative
 
     model_words = [t for t in tokens if len(t) > 2 or any(c.isdigit() for c in t)]
     if filters.budget and re.search(_SUGGEST, folded) and (not model_words or len(model_words) >= 3):
@@ -1454,8 +1847,11 @@ def _parse_question(text_value, context=None, _restating=False):
     if context and context.kind == "trends" and tokens and all(t.isdigit() for t in tokens):
         return Intent("trends", days=max(1, min(int(tokens[0]), 90)))
 
-    if len(tokens) > 4 or (not filters.numeric() and len(original.split()) >= 9):
+    if len(tokens) > 4 or (not (filters.numeric() or (filters.attributes() and not tokens)) and len(original.split()) >= 9):
         return Intent("unsupported")  # a sentence, not a car name
+
+    if filters.search and re.search(_DEAL_CHEAPEST, folded):
+        filters = replace(filters, cheapest=True)  # "koji je najjeftiniji golf": golfs, cheapest first
 
     if context and context.kind == "find" and (not filters.is_empty() or filters.include_old):
         return Intent("find", merge_filters(context.filters, filters))

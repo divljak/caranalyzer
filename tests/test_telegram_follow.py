@@ -76,8 +76,13 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual("find", parse_question("Golf under 15000 KM").kind)
         self.assertEqual("clarify", parse_question("what car should I buy").kind)
 
-    def test_budgets_make_it_a_search_not_a_follow(self):
-        self.assertEqual("following", parse_question("follow golf under 15000 KM").kind)
+    def test_a_budget_or_generation_does_not_block_following_the_model(self):
+        # R6 (stress suite v2, 21 Nov 2026): "zaprati mi passat do 15000" / "prati golf 7" follow the model;
+        # before, any number turned the request into the follow list.
+        for message, search in (("follow golf under 15000 KM", "golf"), ("zaprati mi passat do 15000", "passat"),
+                                ("prati golf 7", "golf")):
+            intent = parse_question(message)
+            self.assertEqual(("follow", search), (intent.kind, intent.filters.search), message)
 
     def test_the_planner_can_ask_to_follow(self):
         self.assertEqual(("follow", "golf"), (lambda i: (i.kind, i.filters.search))(

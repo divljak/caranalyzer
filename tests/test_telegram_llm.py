@@ -262,6 +262,7 @@ def msg(text, *, user=123, chat_id=123, chat_type="private", uid=1, reply_to=Non
 class PrivateChatTests(unittest.TestCase):
     def setUp(self):
         telegram_bot._SCOPES.clear()
+        telegram_bot._BUDGETS.clear()  # a budget remembered by another test must not leak in
         telegram_bot._HISTORY.clear()
         telegram_bot._ACTIVE.clear()
         self.call = Mock()

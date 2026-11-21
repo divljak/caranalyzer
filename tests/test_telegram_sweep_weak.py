@@ -163,7 +163,7 @@ class DealsParsingTests(unittest.TestCase):
         for message, filters in (("dobre prilike", Filters()), ("ima li nešto povoljno?", Filters()),
                                  ("good deals under 15k", Filters(budget=15000)),
                                  ("dobre ponude do 20 hiljada od 2015", Filters(budget=20000, year_min=2015)),
-                                 ("povoljne Octavie dizel", Filters("octavie", fuel="diesel")),
+                                 ("povoljne Octavie dizel", Filters("octavia", fuel="diesel")),  # case form -> the model name
                                  ("any bargains?", Filters())):
             intent = parse_question(message)
             self.assertEqual(("deals", filters), (intent.kind, intent.filters), message)
