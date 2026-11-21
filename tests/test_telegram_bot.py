@@ -208,18 +208,11 @@ class FamilyAndCallbackTests(unittest.TestCase):
             self.assertEqual("liquidity", parse_question(message).kind, message)
         self.assertEqual("suggest", parse_question("imam 50k budzet, sta se najbolje prodaje").kind)
 
-    def test_the_km_unit_question_offers_one_tap_answers(self):
-        intent = parse_question("golf do 20000 Km")
-        self.assertEqual(("clarify", "km_unit", 20000), (intent.kind, intent.note, intent.offset))
-        text_value, choices = telegram_bot.answer_intent(Mock(), intent, TelegramConfig.from_env(ENV), lang="bs")
-        self.assertEqual("Cijena (KM) ili kilometraža? (20.000)", text_value)
-        self.assertEqual([("💰 Do 20.000 KM (cijena)", "f:20000:0:0:0:golf"),
-                          ("🛣 Do 20.000 km (kilometraža)", "f:0:0:20000:0:golf")],
-                         [row[0] for row in choices.rows])
-        liquid = parse_question("sta se najlakse proda do 20000 Km")
-        _, choices = telegram_bot.answer_intent(Mock(), liquid, TelegramConfig.from_env(ENV), lang="bs")
-        self.assertEqual(["l:20000:0:0:", "l:0:0:20000:"], [row[0][1] for row in choices.rows])
-        self.assertEqual(Filters(mileage_max=20000), telegram_bot.parse_liquidity_callback("l:0:0:20000:"))
+    def test_mixed_case_km_is_currency_and_never_asked(self):
+        for message in ("golf do 20000 Km", "golf do 20000 kM"):
+            intent = parse_question(message)
+            self.assertNotEqual("clarify", intent.kind, message)
+            self.assertEqual((20000, None), (intent.filters.budget, intent.filters.mileage_max), message)
 
 
 def _naive_now():

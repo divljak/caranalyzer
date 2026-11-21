@@ -24,7 +24,11 @@ from telegram_intent import Filters, Intent, context_from_reply, parse_question
 from telegram_llm import bounds_match, intent_from_plan, reply_keeps_range
 
 QUESTION = "Pronadji mi koje auto se najbolje prodaje od 50 - 60k, godiste od 2022 - 2024"
-CORRECTION = "Mislim da sam stavio gore od 50.000km do 60.000km a ti mi pokazujes skodu od 33k"
+# Ogi originally wrote lower-case "km" here, meaning KM. Under the case rule (lower-case km = mileage,
+# upper-case KM = currency) the price reading needs "KM"; the lower-case original is kept for the
+# no-context cases, where a mileage range gives the bot nothing to re-run.
+CORRECTION_LOWER = "Mislim da sam stavio gore od 50.000km do 60.000km a ti mi pokazujes skodu od 33k"
+CORRECTION = CORRECTION_LOWER.replace("km", " KM")
 EXPECTED = {"price_min": 50000, "price_max": 60000, "year_min": 2022, "year_max": 2024}
 HEADER = "Uža lista na osnovu podataka · 50.000–60.000 KM · 2022–2024"
 
@@ -75,7 +79,7 @@ class OgisConversationParserTests(unittest.TestCase):
         corrected = parse_question(CORRECTION, first)
         self.assertEqual("suggest", corrected.kind)
         self.assertEqual(EXPECTED, bounds(corrected.filters))
-        self.assertIsNone(corrected.filters.mileage_max)  # "km" after a price question is KM here
+        self.assertIsNone(corrected.filters.mileage_max)  # "KM" after a price question is currency
         self.assertEqual("correction", corrected.note)
 
     def test_the_correction_fixes_what_the_old_answer_got_wrong(self):
@@ -138,7 +142,7 @@ class RangeParsingTests(unittest.TestCase):
             self.assertEqual(("find", expected), (intent.kind, intent.filters), message)
 
     def test_a_correction_with_nothing_to_correct_asks_instead_of_guessing(self):
-        intent = parse_question(CORRECTION)  # no previous question known
+        intent = parse_question(CORRECTION_LOWER)  # no previous question known
         self.assertEqual(("clarify", "correction"), (intent.kind, intent.note))
         text_value, choices = telegram_bot.answer_intent(Mock(), intent, CONFIG, lang="bs")
         self.assertNotRegex(text_value, CANNOT_CHANGE)
@@ -323,7 +327,7 @@ class OgisConversationFlowTests(unittest.TestCase):
     def test_someone_elses_question_is_never_corrected(self):
         call = telegram_fake()
         self.run_update(say("@mojagaraza_bot " + QUESTION, uid=1), call)
-        intent, sent = self.run_update(say("@mojagaraza_bot " + CORRECTION, user=456, uid=2), call)
+        intent, sent = self.run_update(say("@mojagaraza_bot " + CORRECTION_LOWER, user=456, uid=2), call)
         self.assertEqual(("clarify", "correction"), (intent.kind, intent.note))
         self.assertNotRegex(sent, CANNOT_CHANGE)
 

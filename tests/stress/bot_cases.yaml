@@ -17,11 +17,11 @@ cases:
 # ───────────────────────── the real failing chat (Bosnian) ─────────────────────────
 - id: orig-1-km-is-price
   category: original_chat
-  title: "'do 30 000km' without a model, meant 30k KM (real chat, message 1)"
+  title: "'do 30 000km' without a model: lowercase km is mileage (case rule; the real chat meant KM, which now needs 'KM')"
   turns:
     - say: "Auto do 30 000km da nije starije od 10 godina"
       covers: [1]
-      expect: {intent: clarify, note: km_unit}
+      expect: {intent: find, filters: {mileage_max: 30000, budget: null}}
 
 - id: orig-2-budget-correction-standalone
   category: original_chat
@@ -65,9 +65,9 @@ cases:
   category: original_chat
   title: "the whole failing conversation in order, one private chat"
   turns:
-    - say: "Auto do 30 000km da nije starije od 10 godina"
+    - say: "Auto do 30 000 KM da nije starije od 10 godina"
       covers: [1]
-      expect: {intent: clarify, note: km_unit}
+      expect: {intent: find, filters: {budget: 30000, mileage_max: null}}
     - say: "Budžet je 30k a prva dva su izvan budžeta"
       covers: [2]
       expect: {filters: {budget: 30000}}
@@ -84,11 +84,11 @@ cases:
 # ───────────────────────── price vs mileage ambiguity ─────────────────────────
 - id: unit-km-lower-no-model
   category: price_vs_mileage
-  title: "'do 20000km' with no model is ambiguous: ask"
+  title: "'do 20000km' with no model: lowercase km is mileage, no question (case rule)"
   turns:
     - say: "auto do 20000 km"
       covers: [1]
-      expect: {intent: clarify, note: km_unit}
+      expect: {intent: find, filters: {mileage_max: 20000, budget: null}}
 
 - id: unit-km-upper-no-model
   category: price_vs_mileage
@@ -187,7 +187,7 @@ cases:
   turns:
     - say: "do 30000km novije od 2018"
       covers: [1]
-      expect: {intent: clarify, note: km_unit}
+      expect: {intent: find, filters: {mileage_max: 30000, year_min: 2018, budget: null}}
 
 # ───────────────────────── budgets and corrections ─────────────────────────
 - id: budget-correction-budzet-je
