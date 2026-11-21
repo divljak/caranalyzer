@@ -399,7 +399,7 @@ class QuestionQueryTests(unittest.TestCase):
         reply = find_message(self.engine, Filters("golf", None, None, 200000))
         self.assertNotIn("__tg_2", reply)  # unknown mileage
         self.assertIn("Showing 1–2 of 2", reply)
-        self.assertIn("without a recorded year or mileage", reply)
+        self.assertIn("ads without a year or mileage are skipped", reply)
         octavia = find_message(self.engine, Filters("octavia"))
         self.assertNotIn("__tg_5", octavia)  # no price
 
@@ -488,7 +488,7 @@ class QuestionQueryTests(unittest.TestCase):
         reply = find_message(self.engine, Filters("golf", 15000))
         self.assertIn("__tg_fresh", reply)
         self.assertNotIn("__tg_old", reply)  # last seen 30 days ago: hidden by default
-        self.assertIn("Older matches not shown (seen 14–90 days ago, may no longer be listed): 1.", reply)
+        self.assertIn("1 older hidden", reply)
         self.assertNotIn("⚠ Seen", reply)
         _, page = telegram_bot.answer_intent(self.engine, Intent("find", Filters("golf", 15000)), CONFIG)
         self.assertEqual(1, page.older_hidden)
@@ -500,7 +500,7 @@ class QuestionQueryTests(unittest.TestCase):
         self.assertIn("Seen 2 days ago", reply)
         self.assertIn("⚠ Seen 4 weeks ago", reply)
         self.assertEqual(1, reply.count("⚠ Seen"))
-        self.assertIn("may no longer be listed", reply)
+        self.assertIn("last seen over 14 days ago", reply)
         self.assertIn("(older ones included) · most recently seen first", reply)
 
     def test_no_age_warning_when_everything_is_fresh(self):

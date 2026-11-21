@@ -38,7 +38,7 @@ def say(text_value, *, user=123, chat_id=GROUP, chat_type="supergroup", uid=1, e
     return {"update_id": uid, "message": message}
 
 
-QUESTION = "Auto do 20000km, staro do 10 godina koje najlakse mogu prodati"
+QUESTION = "Auto, kilometraža do 20000km, staro do 10 godina koje najlakse mogu prodati"
 
 
 def telegram(member_count=3, members=("member", "administrator")):
@@ -244,7 +244,7 @@ class GeminiKnowsWhereItIsTests(unittest.TestCase):
         post = self.ok({"intent": "chitchat", "reply": "Hej!"})
         telegram_llm.interpret("hej", None, self.CFG, post=post, chat_kind="group")
         prompt = post.call_args.kwargs["json"]["systemInstruction"]["parts"][0]["text"]
-        self.assertIn('Never tell someone they can just write without tagging you', prompt)
+        self.assertIn('Never mention tagging, mentioning', prompt)
         self.assertIn('"chat" field', prompt)
         post = self.ok({"reply": "Evo.", "show_details": False})
         telegram_llm.phrase("x", "facts", self.CFG, post=post, chat_kind="group")

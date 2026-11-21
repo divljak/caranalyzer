@@ -23,6 +23,7 @@ MAX_SEARCH = 40
 PRICE_RANGE = (1_000, 1_000_000)
 YEAR_RANGE = (1980, 2035)
 MILEAGE_RANGE = (1_000, 1_000_000)
+BARE_KM_ASK_MAX = 100_000  # "do 200000km" is mileage: nobody caps a used-car price that high, so it is not asked
 
 TITLE_FIND = "Observed listings"
 TITLE_BUDGET = "Recently observed at or below "
@@ -182,7 +183,7 @@ najjeftiniji najjeftinija najjeftinije najjeftinijeg najjeftinijih jeftin jeftin
 expensive skup skupa skupo skupi kosta kostaju kosti kostao vrijedi vrijede worth treba trebao trebala trebalo
 isto same that thats generacija generacije generation gen model modela modeli verzija iljada iljade
 is isn its it's price prices good fine okej ovog ovom taj tog
-kolko kolika koliki najvise najmanje not most registracija registracije registraciju registracijom registrovan ponuda ponude ponudu ponudi offer offers ove ovih sedmice sedmici tjedna tjedan
+bilo kolko kolika koliki najvise najmanje not most registracija registracije registraciju registracijom registrovan ponuda ponude ponudu ponudi offer offers ove ovih sedmice sedmici tjedna tjedan
 """.split())
 
 # Words that start a question or describe a price, never part of a make or model ("prosječno",
@@ -386,6 +387,7 @@ def _extract_filters(folded, original, km_is_price=False):
     mileage = mileage_min = None
     budget = price_min = None
     unit_unclear = None
+    bare_km = None
     low_km = False
     low = re.search(_LOW_KM, folded)
     if low:  # "malo kilometara": a preference, never search text
@@ -437,6 +439,8 @@ def _extract_filters(folded, original, km_is_price=False):
         candidate = _amount(match.group(1), match.group(2).lower() if match.group(2) else None, MILEAGE_RANGE)
         if candidate:
             set_mileage(candidate, match.start())
+            if unit == "km" and mileage == candidate and bare_km is None:
+                bare_km = candidate  # "do 30 000km": mileage only because of the unit's case, see _parse_question
             consume(match)
     unconsumed = "".join(char if keep else " " for char, keep in zip(folded, mask))  # no "low mileage" here
     for pattern in (
@@ -468,7 +472,7 @@ def _extract_filters(folded, original, km_is_price=False):
                 consume(match)
                 break
 
-    spans = [m for m in re.finditer(rf"(?<![0-9]){_AMOUNT}\s*(?:km|bam|kam|maraka|marks|eur|euro)?", folded)
+    spans = [m for m in re.finditer(rf"(?<![0-9]){_AMOUNT}\s*(?:km|bam|kam|maraka|marks|eur|euro|kn|kuna|kune|hrk)?(?![a-z])", folded)
              if all(mask[i] for i in range(m.start(), m.end()))]
     for match in spans:
         if budget is not None:
@@ -494,9 +498,11 @@ def _extract_filters(folded, original, km_is_price=False):
                       fuel=fuel, transmission=gearbox, new_ok=re.search(_NEW_CARS, folded) is not None,
                       mileage_min=mileage_min, low_km=low_km)
     _UNCLEAR[0] = unit_unclear
+    _BARE_KM[0] = bare_km
     return filters, rest
 
 
+_BARE_KM = [None]  # amount a lower-case "km" alone made a mileage bound in the last parse
 _UNCLEAR = [None]  # amount whose unit (KM price or km mileage) was unclear in the last parse
 
 
@@ -780,9 +786,26 @@ _COMPLAINT = re.compile(
     re.S)
 
 
+# "Budžet je 30k", "imam 30k", "prvi su izvan budžeta": the user states (or restates) a price cap while
+# looking at an earlier search. A message that also asks for resale, trends or a recommendation is a mixed
+# message instead (see ``_mixed_question``).
+_BUDGET_STATE = re.compile(
+    r"\b(?:budzet(?:\s+mi)?\s+je|moj\s+budzet\s+je|(?:my\s+)?budget\s+is|"
+    r"imam(?:\s+(?:oko|do|max|samo|cca))?\s+(?=[0-9])|"
+    r"(?:izvan|van|preko|iznad|over|above)\s+(?:(?:mog|moje|mojeg|my|the)\s+)?(?:budzet\w*|budget))")
+_KN_AMOUNT = re.compile(r"[0-9]\s*(?:kn|kuna|kune|hrk)(?![a-z0-9])")
+
+
+def _budget_correction(folded):
+    return (_BUDGET_STATE.search(folded) is not None
+            and not re.search(f"{_LIQUID}|{_TRENDS}|{_SUGGEST}", folded))
+
+
 def is_correction(text_value):
-    """True when a message corrects the previous question ("mislim da sam stavio ...", "ne, nego ...")."""
-    return _CORRECTION.search(fold(strip_mentions((text_value or "")[:MAX_QUESTION]))) is not None
+    """True when a message corrects the previous question ("mislim da sam stavio ...", "ne, nego ...",
+    "budžet je 30k a prvi su izvan budžeta")."""
+    folded = fold(strip_mentions((text_value or "")[:MAX_QUESTION]))
+    return _CORRECTION.search(folded) is not None or _budget_correction(folded)
 
 
 # Titles the bot puts on its first line, per language. Replies are parsed back from them, so a
@@ -1038,6 +1061,16 @@ _SUGGEST = (r"\b(?:suggest\w*|recommend\w*|preporuc\w*|should i buy|what to buy|
             r"sta (?:da )?kupi\w*|sta kupiti|koji auto|najbolje (?:se )?prodaj\w*|najtrazenij\w*|"
             r"best sell\w*|what sells|sells? best|popular)\b")
 _ADVICE = r"\b(?:should i buy|what (?:car|to buy)|which car|recommend\w*|best (?:car|deal)s?|worth buying|preporuc\w*|koji auto|sta kupiti|sta da kupim)\b"
+_WHICH_MODEL = r"\bkoj\w*\s+(?:model\w*|auto\w*|kola)\b|\bwhich\s+(?:models?|cars?)\b"
+
+
+def wants_recommendation(text_value):
+    """True when a message asks the bot to pick cars ("koji auto, koji modeli"), so a budget stated earlier
+    is all it needs."""
+    folded = fold(strip_mentions((text_value or "")[:MAX_QUESTION]))
+    return re.search(f"{_SUGGEST}|{_ADVICE}|{_VAGUE}|{_WHICH_MODEL}", folded) is not None
+
+
 _STATS = r"\b(?:how much|average|typical|median|cost\w*|price of|koliko|prosjecn\w*|cijena)\b"
 
 
@@ -1178,6 +1211,26 @@ def _correct(original, folded, context):
     return Intent(kind, merged, note="correction")
 
 
+def _correct_budget(original, folded, context):
+    """"Budžet je 30k a prva dva su izvan budžeta": the previous search with the new price cap.
+
+    Model words in the message are never read (it talks about the results, not a new model). Without an
+    amount the previous cap is applied again; without either, the bot asks for the budget."""
+    filters, _ = _extract_filters(folded, original, km_reads_as_price(context.filters, folded))
+    new = Filters(budget=filters.budget, price_min=filters.price_min, year_min=filters.year_min,
+                  year_max=filters.year_max, mileage_max=filters.mileage_max, mileage_min=filters.mileage_min,
+                  fuel=filters.fuel, transmission=filters.transmission)
+    if not new.budget and not context.filters.budget:
+        return Intent("clarify", note="over_budget")
+    merged = merge_filters(context.filters, new)
+    if new.budget and not new.mileage_max and context.filters.mileage_max == new.budget:
+        merged = replace(merged, mileage_max=None)  # the number was read as km the first time: it is the price cap
+    kind = context.kind
+    if kind == "suggest" and not merged.budget:
+        kind = "find"
+    return Intent(kind, merged, note="correction")
+
+
 def _more(context):
     """"pokaži još": the next page of the last find, or "no more" when it was the last page."""
     if context is None or context.kind != "find":
@@ -1191,11 +1244,58 @@ def _more(context):
 def parse_question(text_value, context=None, _restating=False):
     """Turn one question into an Intent (see ``_parse_question``). A car search that mentions registration
     carries the label "registration", so the answer can say it is not a filter."""
-    intent = _parse_question(text_value, context, _restating)
-    if intent.kind == "find" and "registration" not in intent.labels and re.search(
-            _REGISTRATION, fold(strip_mentions((text_value or "")[:MAX_QUESTION]))):
-        return replace(intent, labels=intent.labels + ("registration",))
+    intent = None if _restating else _mixed_question(text_value, context)
+    if intent is None:
+        intent = _parse_question(text_value, context, _restating)
+    folded = fold(strip_mentions((text_value or "")[:MAX_QUESTION]))
+    if intent.kind == "find" and "registration" not in intent.labels and re.search(_REGISTRATION, folded):
+        intent = replace(intent, labels=intent.labels + ("registration",))
+    if (intent.kind in {"find", "liquidity", "suggest", "deals"} and (intent.filters.budget or intent.filters.price_min)
+            and "kn" not in intent.labels and _KN_AMOUNT.search(folded)):
+        intent = replace(intent, labels=intent.labels + ("kn",))  # the answer says "kn" was read as KM
     return intent
+
+
+_NOT_AN_INTENT = {"clarify", "unsupported", "chitchat", "ignore", "no_more"}
+_SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s+|\s*;\s*")
+MIXED_MAX_PARTS = 4
+
+
+def _mixed_question(text_value, context=None):
+    """One message that asks for several different things ("imam 30k budžet. Koje auto da kupim koje mogu
+    brzo prodati. Koji su trendovi"): answer the first clear request and name what was skipped.
+
+    A sentence that only states a budget is not a request: its filters are carried into the answer. Returns
+    None unless two sentences make different requests (a single request is parsed as before)."""
+    original = strip_mentions((text_value or "")[:MAX_QUESTION]).strip()
+    folded = fold(original)
+    if re.search(_CORRECTION, folded) or re.search(_MORE, folded):
+        return None
+    parts = [part.strip() for part in _SENTENCE_BREAK.split(original) if re.search(r"\w", part)]
+    if not 2 <= len(parts) <= MIXED_MAX_PARTS:
+        return None
+    states, requests = [], []
+    for part in parts:
+        intent = _parse_question(part, context)
+        if intent.kind in _NOT_AN_INTENT:
+            continue
+        if intent.kind in {"find", "suggest"} and not intent.filters.search and _BUDGET_STATE.search(fold(part)):
+            states.append(intent.filters)
+        else:
+            requests.append(intent)
+    kinds = []
+    for request in requests:
+        if request.kind not in kinds:
+            kinds.append(request.kind)
+    if len(kinds) < 2:
+        return None
+    chosen = requests[0]
+    filters = chosen.filters
+    if chosen.kind in {"find", "liquidity", "suggest", "deals"}:
+        for state in states:
+            filters = merge_filters(state, filters)
+    skipped = tuple("skipped:" + kind for kind in kinds[1:])
+    return replace(chosen, filters=filters, labels=chosen.labels + skipped)
 
 
 def _parse_question(text_value, context=None, _restating=False):
@@ -1224,6 +1324,9 @@ def _parse_question(text_value, context=None, _restating=False):
     if registration and (re.search(_PROCEDURE, folded) or not _names_a_car(folded)):
         return Intent("chitchat", labels=("scope",))  # "kako da registrujem auto": a procedure, not a listing
 
+    if (not _restating and context is not None and context.kind in CORRECTABLE
+            and not _CORRECTION.search(folded) and _budget_correction(folded)):
+        return _correct_budget(original, folded, context)
     if not _restating and _CORRECTION.search(folded):
         if context is not None and context.kind in CORRECTABLE:
             corrected = _correct(original, folded, context)
@@ -1268,6 +1371,7 @@ def _parse_question(text_value, context=None, _restating=False):
 
     filters, rest = _extract_filters(folded, original, _km_range_is_price(context, folded, original))
     unclear = _UNCLEAR[0]
+    bare_km = _BARE_KM[0]
     tokens = _search_tokens(rest)
     tokens, generation = generation_hint(tokens)
     tokens = [repair_typo(token, tokens[i - 1] if i else "") for i, token in enumerate(tokens)]
@@ -1303,6 +1407,14 @@ def _parse_question(text_value, context=None, _restating=False):
     if (re.search(_PRICE_ASK, folded) and filters.search and not filters.family
             and not (filters.budget or filters.price_min) and not re.search(_LIQUID, folded)):
         return _price_check(filters, folded, bare_year)  # "Audi A3 2016 cijena": that model year +-1, not "from 2016"
+
+    if (bare_km and bare_km <= BARE_KM_ASK_MAX and filters.mileage_max == bare_km and not filters.search and filters.budget is None
+            and filters.mileage_min is None and not filters.low_km and (context is None or context.filters.is_empty())
+            and not re.search(_MILEAGE_CUES, folded)):
+        # "Auto do 30 000km": no model and no word about mileage, so the unit alone cannot say whether the
+        # user means a 30.000 KM price cap or 30.000 km on the clock. One tap decides.
+        kind = ("liquidity",) if re.search(_LIQUID, folded) else ()
+        return Intent("clarify", replace(filters, mileage_max=None), note="km_unit", offset=bare_km, labels=kind)
 
     if unclear and filters.budget is None and filters.mileage_max is None:
         # one tap decides: price (KM) or mileage (km)

@@ -314,7 +314,7 @@ class WeakCasesDatabaseTests(unittest.TestCase):
         self.assertIn("viđeni u zadnjih 7 dana, prvo najjeftiniji:", reply)
         self.assertEqual({"deal"}, self.ids(reply))
         self.assertIn("ispod medijana", reply)
-        self.assertTrue(button_labels(markup)[0].startswith("⭐ 2016 · 12.000 KM"))
+        self.assertTrue(button_labels(markup)[0].startswith("⭐ Škoda Octavia · 2016 · 12.000 KM"))
         reply, _ = self.answer("dobre prilike")
         self.assertEqual({"deal", "old"}, self.ids(reply))
         reply, _ = self.answer("povoljne Octavie")  # plural: searched as octavia

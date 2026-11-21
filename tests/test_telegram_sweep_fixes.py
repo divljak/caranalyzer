@@ -423,7 +423,7 @@ class SweepDatabaseTests(unittest.TestCase):
         filters = conversation("Golf do 20k", "ne, nego dizel", "a automatik?")[-1].filters  # F1c
         reply, _ = self.find(filters)
         self.assertEqual({"gda"}, self.ids(reply))
-        self.assertIn("Mjenjač je upisan na samo oko petine oglasa", reply)
+        self.assertIn("mjenjač je upisan na oko 1 od 5 oglasa", reply)
 
     # 1. model search end to end
     def test_unknown_model_asks_did_you_mean_and_lists_nothing(self):
@@ -508,7 +508,7 @@ class SweepDatabaseTests(unittest.TestCase):
         self.seed(rows)
         reply, _ = self.find(Filters(price_min=20000, budget=60000))  # P1
         self.assertFalse(any(i.startswith(("kn", "cn", "cu")) for i in self.ids(reply)), reply)
-        self.assertIn("Izostavljeno: 11 novih auta", reply)
+        self.assertIn("11 novih auta izostavljeno", reply)
         suggest = telegram_bot.suggest_message(self.engine, Filters(budget=60000, price_min=20000), lang="bs")
         self.assertNotIn("Corolla", suggest)  # C1a: no "33% below median" deal on a 0 km car
         self.assertIn("Kia Sportage · 5 oglasa", suggest)

@@ -60,13 +60,13 @@ class ButtonTests(unittest.TestCase):
         for store in (telegram_bot._SCOPES, telegram_bot._HISTORY, telegram_bot._LANGS, telegram_bot._ACTIVE):
             store.clear()
 
-    def test_star_buttons_sit_under_the_results_two_to_a_row(self):
-        items = tuple((f"id{n}", 2016 + n % 3, 10000 + n * 500) for n in range(5))
+    def test_star_buttons_sit_under_the_results_one_to_a_row_with_make_and_model(self):
+        items = tuple((f"id{n}", 2016 + n % 3, 10000 + n * 500, "Volkswagen Golf") for n in range(5))
         rows = keyboard(CONFIG, Page(Filters("golf", 15000), 5, items=items))["inline_keyboard"]
-        self.assertEqual([2, 2, 1], [len(row) for row in rows[:3]])
-        self.assertEqual("⭐ 2016 · 10.000 KM", rows[0][0]["text"])
+        self.assertEqual([1, 1, 1], [len(row) for row in rows[:3]])  # make and model make a label too long for two
+        self.assertEqual("⭐ Volkswagen Golf · 2016 · 10.000 KM", rows[0][0]["text"])
         self.assertEqual("c:id0", rows[0][0]["callback_data"])
-        self.assertTrue(all("⭐" not in b["text"] for row in rows[3:] for b in row))  # refinements follow
+        self.assertTrue(all("⭐" not in b["text"] for row in rows[5:] for b in row))  # refinements follow
         self.assertIn("Show more (6–10)", [b["text"] for row in rows for b in row])
 
     def test_no_star_buttons_when_nothing_is_shown_or_the_id_is_unsafe(self):
