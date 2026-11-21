@@ -133,12 +133,12 @@ cases:
 - id: v2-conv-km-unit-then-answer
   category: long_conversations
   impact: silent
-  title: "the bot asks km or KM, the user answers in words, then narrows"
+  title: "lowercase km is read as mileage, the user then says they meant a price in words, then narrows"
   turns:
     - say: "auto do 20000 km"
-      expect: {intent: clarify, note: km_unit}
+      expect: {intent: find, filters: {mileage_max: 20000, budget: null}}
     - say: "mislio sam na cijenu, 20 hiljada maraka"
-      expect: {intent: [find, suggest], filters: {budget: 20000, mileage_max: null}}
+      expect: {intent: [find, suggest], filters: {budget: 20000}}
     - say: "a dizel"
       expect: {intent: [find, suggest], filters: {budget: 20000, fuel: diesel}}
     - say: "i da nije starije od 2014"
@@ -489,21 +489,34 @@ cases:
 - id: v2-pm-model-lowercase-km-plausible-price
   category: price_vs_mileage_v2
   impact: silent
-  title: "'audi a4 do 25 000 km': 25.000 is a plausible price AND mileage; lowercase km is how people write KM"
+  title: "'audi a4 do 25 000 km': case rule (Ogi): lowercase km is mileage, uppercase KM is currency"
   turns:
     - say: "audi a4 do 25 000 km"
-      expect: {intent: clarify, note: km_unit}
+      expect: {intent: find, filters: {search: audi a4, mileage_max: 25000, budget: null}}
+
+- id: v2-pm-model-uppercase-km-is-price
+  category: price_vs_mileage_v2
+  impact: silent
+  title: "'audi a4 do 25 000 KM': uppercase KM is the currency, a 25.000 KM price cap"
+  turns:
+    - say: "audi a4 do 25 000 KM"
+      expect: {intent: find, filters: {search: audi a4, budget: 25000, mileage_max: null}}
 
 - id: v2-pm-cheap-signals-price
   category: price_vs_mileage_v2
   impact: visible
-  title: "'jeftin auto do 8000 km': 'jeftin' says it's a price (asking is acceptable)"
+  title: "'jeftin auto do 8000 km': case rule wins over the 'jeftin' hint, lowercase km is mileage"
   turns:
     - say: "trazim jeftin auto do 8000 km"
-      expect:
-        any_of:
-          - {intent: [find, suggest], filters: {budget: 8000, mileage_max: null}}
-          - {intent: clarify, note: km_unit}
+      expect: {intent: [find, suggest], filters: {mileage_max: 8000, budget: null}}
+
+- id: v2-pm-cheap-signals-price-upper
+  category: price_vs_mileage_v2
+  impact: visible
+  title: "'jeftin auto do 8000 KM': uppercase KM is the currency"
+  turns:
+    - say: "trazim jeftin auto do 8000 KM"
+      expect: {intent: [find, suggest], filters: {budget: 8000, mileage_max: null}}
 
 - id: v2-pm-no-model-both
   category: price_vs_mileage_v2
@@ -954,10 +967,10 @@ cases:
 - id: v2-typo-zelim-auto-10000km
   category: typos_no_diacritics
   impact: guard
-  title: "'zelim auto do 10000km' (no model, glued km) asks km or KM"
+  title: "'zelim auto do 10000km' (no model, glued km): lowercase km is mileage, no question (case rule)"
   turns:
     - say: "zelim auto do 10000km"
-      expect: {intent: clarify, note: km_unit}
+      expect: {intent: find, filters: {mileage_max: 10000, budget: null}}
 
 # ═════════════════════════ make / model aliases and slang ═════════════════════════
 - id: v2-alias-merdzo

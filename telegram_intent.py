@@ -411,12 +411,12 @@ def _span_number(value):
     return int(digits) if digits else None
 
 
-def _price_range(folded, original, km_is_price, blocked=()):
+def _price_range(folded, original, blocked=()):
     """A two-sided amount: ('od 50 - 60k' | '50.000 do 60.000 KM' | 'izmedu 50 i 60 hiljada').
 
     Returns (match, kind, low, high) where kind is "price" or "mileage", or None. A shared "k" /
-    "hiljada" applies to both ends ("50-60k" is 50.000-60.000). Lower-case "km" means mileage
-    unless ``km_is_price`` (a correction to a price question); "Km" is left to the one-tap question.
+    "hiljada" applies to both ends ("50-60k" is 50.000-60.000). Only all-lower-case "km"
+    means mileage; any form with an upper-case K ("KM", "Km", "kM") is the currency.
     """
     for match in _PRICE_SPAN.finditer(folded):
         if match.group("sep") in {"i", "and"} and not match.group("lead"):
@@ -424,7 +424,7 @@ def _price_range(folded, original, km_is_price, blocked=()):
         if any(i in blocked for i in range(match.start(), match.end())):
             continue  # part of a year span or a generation ("golf 7"): not an amount
         units = [original[match.start(g):match.end(g)] for g in ("ua", "ub") if match.group(g)]
-        if len(units) == 2 and units[0] != units[1]:
+        if len(units) == 2 and (units[0] == "km") != (units[1] == "km"):
             continue  # "12000 KM do 200000 km": a price and a mileage, not one range
         if units and not match.group("ub") and not match.group("lead") and match.group("sep") in {"do", "to", "until"}:
             continue  # "ispod 200k km do 12k": a mileage, then a price cap, not one range
@@ -441,10 +441,8 @@ def _price_range(folded, original, km_is_price, blocked=()):
         low, high = int(low), int(high)
         if _MILEAGE_WORD_AFTER.match(folded, match.end()):
             kind, bounds = "mileage", MILEAGE_RANGE  # "100 do 200 hiljada kilometara"
-        elif "km" in units and not km_is_price:
+        elif "km" in units:
             kind, bounds = "mileage", MILEAGE_RANGE
-        elif any(unit in {"Km", "kM"} for unit in units) and not km_is_price:
-            continue
         else:
             kind, bounds = "price", PRICE_RANGE
         low, high = sorted((low, high))
@@ -453,11 +451,10 @@ def _price_range(folded, original, km_is_price, blocked=()):
     return None
 
 
-def _extract_filters(folded, original, km_is_price=False):
+def _extract_filters(folded, original):
     """Return Filters plus the original text with recognised spans removed.
 
-    ``km_is_price``: read a lower-case "km" after an amount as a price (KM). Only set when the
-    message corrects a price question and says nothing about mileage.
+    Unit case rule: all-lower-case "km" after an amount is mileage; "KM" / "Km" / "kM" is a price.
     """
     mask = [True] * len(original)
 
@@ -506,8 +503,6 @@ def _extract_filters(folded, original, km_is_price=False):
 
     mileage = mileage_min = None
     budget = price_min = None
-    unit_unclear = None
-    bare_km = None
     low_km = False
     low = re.search(_LOW_KM, folded)
     if low:  # "malo kilometara": a preference, never search text
@@ -526,7 +521,7 @@ def _extract_filters(folded, original, km_is_price=False):
 
     blocked = {i for i, keep in enumerate(mask) if not keep} | _generation_digits(folded)
     for _ in range(2):  # a price range and a mileage range can both be in one message, in either order
-        price_span = _price_range(folded, original, km_is_price, blocked)
+        price_span = _price_range(folded, original, blocked)
         if not (price_span and all(mask[i] for i in range(price_span[0].start(), price_span[0].end()))):
             break
         if price_span[1] == "price" and budget is None:
@@ -537,31 +532,18 @@ def _extract_filters(folded, original, km_is_price=False):
             break
         consume(price_span[0])
         blocked |= set(range(price_span[0].start(), price_span[0].end()))
-    # A number followed by "km" written in lowercase is mileage ("do 20000km"); "KM", "maraka" or
-    # "BAM" is a price. A mixed-case "Km" could be either, so the bot asks instead of guessing.
-    # When correcting a price question (``km_is_price``) a lower-case "km" is read as KM too.
-    # "kilometara" / "hiljada kilometara" always names mileage, whatever the case.
-    # Matched on the folded text ("100 tisuća km" has a "ć"), the unit's case read from the original.
+    # A number followed by "km" written in lowercase is mileage ("do 20000km"); any form with an upper-case
+    # K ("KM", "Km", "kM"), "maraka" or "BAM" is a price. "kilometara" / "hiljada kilometara" always names
+    # mileage, whatever the case. Matched on the folded text ("100 tisuća km" has a "ć"), the unit's case
+    # read from the original.
     for match in re.finditer(rf"(?<![0-9.,]){_AMOUNT}\s*(km|{_KM_WORDS})(?![a-z0-9])", folded):
         if not all(mask[i] for i in range(match.start(), match.end())):
             continue
-        unit = original[match.start(3):match.end(3)]
-        if unit == "KM":
+        if original[match.start(3):match.end(3)].lower() == "km" and original[match.start(3):match.end(3)] != "km":
             continue  # a price
-        if unit.lower() == "km" and unit != "km":
-            if km_is_price or mileage is not None or unit_unclear is not None or mileage_min is not None:
-                continue
-            unit_unclear = _amount(match.group(1), match.group(2).lower() if match.group(2) else None,
-                                   MILEAGE_RANGE)
-            consume(match)
-            continue
-        if unit == "km" and km_is_price:
-            continue
         candidate = _amount(match.group(1), match.group(2).lower() if match.group(2) else None, MILEAGE_RANGE)
         if candidate:
             set_mileage(candidate, match.start())
-            if unit == "km" and mileage == candidate and bare_km is None:
-                bare_km = candidate  # "do 30 000km": mileage only because of the unit's case, see _parse_question
             consume(match)
     unconsumed = "".join(char if keep else " " for char, keep in zip(folded, mask))  # no "low mileage" here
     for pattern in (
@@ -585,7 +567,7 @@ def _extract_filters(folded, original, km_is_price=False):
                                  folded):
             if not all(mask[i] for i in range(match.start(), match.end())):
                 continue
-            if match.group(3) and original[match.start(3):match.end(3)] == "km" and not km_is_price:
+            if match.group(3) and original[match.start(3):match.end(3)] == "km":
                 continue
             candidate = _amount(match.group(1), match.group(2), PRICE_RANGE)
             if candidate:
@@ -621,15 +603,11 @@ def _extract_filters(folded, original, km_is_price=False):
                       include_old=wants_older(folded), price_min=price_min, year_max=year_max,
                       fuel=fuel, transmission=gearbox, new_ok=wants_new(folded),
                       mileage_min=mileage_min, low_km=low_km)
-    _UNCLEAR[0] = unit_unclear
-    _BARE_KM[0] = bare_km
     _UNITLESS[0] = unitless
     return filters, rest
 
 
 _UNITLESS = [None]  # a price cap read from a bare number with no unit or "k" in the last parse
-_BARE_KM = [None]  # amount a lower-case "km" alone made a mileage bound in the last parse
-_UNCLEAR = [None]  # amount whose unit (KM price or km mileage) was unclear in the last parse
 
 
 def _singular(token):
@@ -1418,36 +1396,16 @@ def _model_search(rest, named):
 CORRECTABLE = frozenset({"find", "suggest", "liquidity", "deals"})
 
 
-def km_reads_as_price(previous_filters, folded):
-    """Rule for a correction: "50.000km do 60.000km" means KM when the previous question was about
-    price (and not mileage) and the message itself says nothing about mileage."""
-    return (bool(previous_filters.budget or previous_filters.price_min) and not (previous_filters.mileage_max or previous_filters.mileage_min)
-            and re.search(_MILEAGE_CUES, folded) is None)
-
-
-def _km_range_is_price(context, folded, original):
-    """A bare "50.000km do 60.000km" right after a price question is a price range (M2b in the
-    2026-11-15 sweep): a two-sided mileage range is not something the bot can search anyway."""
-    if context is None or context.kind not in CORRECTABLE or not km_reads_as_price(context.filters, folded):
-        return False
-    span = _price_range(folded, original, False)
-    return bool(span and span[1] == "mileage")
-
-
 def stated_filters(text_value, context=None):
     """The price / year / mileage bounds a message states, read the same way ``parse_question``
     reads them (including the km-as-KM rule for a correction). Used to ground Gemini's reading."""
     original = strip_mentions((text_value or "")[:MAX_QUESTION]).strip()
     folded = fold(original)
-    km_is_price = False
     if context is not None and context.kind in CORRECTABLE and _CORRECTION.search(folded):
         cut = _COMPLAINT.search(folded)
         if cut:
             original, folded = original[:cut.start()], folded[:cut.start()]
-        km_is_price = km_reads_as_price(context.filters, folded)
-    else:
-        km_is_price = _km_range_is_price(context, folded, original)
-    return _extract_filters(folded, original, km_is_price)[0]
+    return _extract_filters(folded, original)[0]
 
 
 def _correct(original, folded, context):
@@ -1455,7 +1413,7 @@ def _correct(original, folded, context):
     cut = _COMPLAINT.search(folded)
     if cut:
         original, folded = original[:cut.start()], folded[:cut.start()]
-    filters, rest = _extract_filters(folded, original, km_reads_as_price(context.filters, folded))
+    filters, rest = _extract_filters(folded, original)
     tokens, generation = generation_hint(_search_tokens(rest))
     named = [token for token in tokens if not token.isdigit()]
     new = replace(filters, search=clean_search(" ".join(named)) if len(named) <= 3 else "")
@@ -1475,7 +1433,7 @@ def _correct_budget(original, folded, context):
 
     Model words in the message are never read (it talks about the results, not a new model). Without an
     amount the previous cap is applied again; without either, the bot asks for the budget."""
-    filters, _ = _extract_filters(folded, original, km_reads_as_price(context.filters, folded))
+    filters, _ = _extract_filters(folded, original)
     new = Filters(budget=filters.budget, price_min=filters.price_min, year_min=filters.year_min,
                   year_max=filters.year_max, mileage_max=filters.mileage_max, mileage_min=filters.mileage_min,
                   fuel=filters.fuel, transmission=filters.transmission)
@@ -1752,9 +1710,7 @@ def _parse_question(text_value, context=None, _restating=False):
             return Intent("trends", days=context.days)
         return Intent("trends", days=days)
 
-    filters, rest = _extract_filters(folded, original, _km_range_is_price(context, folded, original))
-    unclear = _UNCLEAR[0]
-    bare_km = _BARE_KM[0]
+    filters, rest = _extract_filters(folded, original)
     unitless = _UNITLESS[0]
     tokens = _search_tokens(rest)
     tokens, generation = generation_hint(tokens)
@@ -1791,19 +1747,6 @@ def _parse_question(text_value, context=None, _restating=False):
     if (re.search(_PRICE_ASK, folded) and filters.search and not filters.family
             and not (filters.budget or filters.price_min) and not re.search(_LIQUID, folded)):
         return _price_check(filters, folded, bare_year)  # "Audi A3 2016 cijena": that model year +-1, not "from 2016"
-
-    if (bare_km and bare_km <= BARE_KM_ASK_MAX and filters.mileage_max == bare_km and not filters.search and filters.budget is None
-            and filters.mileage_min is None and not filters.low_km and (context is None or context.filters.is_empty())
-            and not re.search(_MILEAGE_CUES, folded)):
-        # "Auto do 30 000km": no model and no word about mileage, so the unit alone cannot say whether the
-        # user means a 30.000 KM price cap or 30.000 km on the clock. One tap decides.
-        kind = ("liquidity",) if re.search(_LIQUID, folded) else ()
-        return Intent("clarify", replace(filters, mileage_max=None), note="km_unit", offset=bare_km, labels=kind)
-
-    if unclear and filters.budget is None and filters.mileage_max is None:
-        # one tap decides: price (KM) or mileage (km)
-        kind = ("liquidity",) if re.search(_LIQUID, folded) else ()
-        return Intent("clarify", filters, note="km_unit", offset=unclear, labels=kind)
 
     if (unitless and filters.budget == unitless and unitless > BARE_KM_ASK_MAX and filters.search
             and filters.mileage_max is None and not re.search(_LIQUID, folded)):

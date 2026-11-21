@@ -64,24 +64,15 @@ def clear_memory():
 # ---- 1. units: "do N km" with no model ------------------------------------------------------------
 
 class UnitTests(unittest.TestCase):
-    def test_a_lone_do_30000km_asks_price_or_mileage_instead_of_capping_mileage(self):
+    def test_a_lone_do_30000km_is_mileage_without_a_model(self):
         intent = parse_question("Auto do 30 000km da nije starije od 10 godina")
-        self.assertEqual(("clarify", "km_unit", 30000), (intent.kind, intent.note, intent.offset))
-        self.assertIsNone(intent.filters.mileage_max)  # not a silent mileage cap
-        self.assertEqual(THIS_YEAR - 10, intent.filters.year_min)  # what else was said is kept
-        message, choices = answer_intent(Mock(), intent, CONFIG, lang="bs")
-        self.assertEqual("Cijena (KM) ili kilometraža? (30.000)", message)
-        self.assertEqual(2, len(choices.rows))  # two buttons: price, mileage
-        price = telegram_bot.parse_refine_callback(choices.rows[0][0][1])
-        mileage = telegram_bot.parse_refine_callback(choices.rows[1][0][1])
-        self.assertEqual((30000, None, THIS_YEAR - 10), (price.budget, price.mileage_max, price.year_min))
-        self.assertEqual((None, 30000, THIS_YEAR - 10), (mileage.budget, mileage.mileage_max, mileage.year_min))
-        message, _ = answer_intent(Mock(), intent, CONFIG, lang="en")
-        self.assertEqual("Price (KM) or mileage? (30.000)", message)
+        self.assertNotEqual("clarify", intent.kind)  # lower-case km is mileage, no question (case rule)
+        self.assertEqual((30000, None, THIS_YEAR - 10),
+                         (intent.filters.mileage_max, intent.filters.budget, intent.filters.year_min))
 
-    def test_a_resale_question_with_a_lone_km_amount_keeps_the_resale_buttons(self):
+    def test_a_resale_question_with_a_lone_km_amount_is_mileage(self):
         intent = parse_question("sta se najlakse proda do 20000km")
-        self.assertEqual(("clarify", "km_unit", ("liquidity",)), (intent.kind, intent.note, intent.labels))
+        self.assertEqual(("liquidity", 20000, None), (intent.kind, intent.filters.mileage_max, intent.filters.budget))
 
     def test_explicit_km_still_parses_as_price_and_explicit_kilometraza_as_mileage(self):
         for message, field in (("Auto do 30 000 KM", "budget"), ("30 000 KM", "budget"), ("do 30000 KM", "budget"),

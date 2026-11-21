@@ -207,12 +207,15 @@ class FuelAndGearboxTests(unittest.TestCase):
 
 
 class FollowUpRangeTests(unittest.TestCase):
-    def test_a_km_range_right_after_a_price_question_is_a_price_range(self):
-        # M2: "auto do 20.000 KM" -> "50.000km do 60.000km" meant KM, not mileage
-        first, second = conversation("auto do 20.000 KM", "50.000km do 60.000km")
+    def test_a_km_range_right_after_a_price_question_follows_the_unit_case(self):
+        # M2: "auto do 20.000 KM" -> "50.000 KM do 60.000 KM" is a price range ...
+        first, second = conversation("auto do 20.000 KM", "50.000 KM do 60.000 KM")
         self.assertEqual(Filters(budget=60000, price_min=50000), second.filters)
-        self.assertTrue(bounds_match(Filters(budget=60000, price_min=50000), "50.000km do 60.000km", first))
-        # without a price question before it, lower-case km is still mileage
+        self.assertTrue(bounds_match(Filters(budget=60000, price_min=50000), "50.000 KM do 60.000 KM", first))
+        # ... but lower-case km is mileage, also right after a price question (case rule, 2026-11-21)
+        mileage = conversation("auto do 20.000 KM", "50.000km do 60.000km")[-1]
+        self.assertEqual(60000, mileage.filters.mileage_max)
+        self.assertIsNone(mileage.filters.price_min)
         self.assertEqual(60000, parse_question("Octavia 50.000km do 60.000km").filters.mileage_max)
         self.assertEqual(150000, conversation("Golf do 20k", "do 150.000 km")[-1].filters.mileage_max)
 
