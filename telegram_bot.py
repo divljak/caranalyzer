@@ -1051,6 +1051,22 @@ _NEAREST_YEARS_SQL = (_FIND_SQL[:_FIND_SQL.index("  ), model_years AS (")] + f""
 YEAR_STEP_SPAN = 3  # the older / newer buttons search this many model years, starting at the nearest one with cars
 
 
+YEAR_ALT_SPANS = (1, 2)  # an exact year with no cars proposes the same model +-1 year, then +-2
+
+
+def _year_alternatives(connection, filters, hints=()):
+    """For an exact-year search that found nothing: (rows, low, high) of the same search for the nearest
+    model years (+-1, else +-2; the requested year is empty already), or ([], None, None) when there are none."""
+    year = filters.year_min
+    low_bound, high_bound = YEAR_RANGE
+    for span in YEAR_ALT_SPANS:
+        low, high = max(low_bound, year - span), min(high_bound, year + span)
+        rows = _find_rows(connection, replace(filters, year_min=low, year_max=high), 0, hints=hints)
+        if rows:
+            return rows, low, high
+    return [], None, None
+
+
 def _nearest_years(connection, filters):
     """(older, newer): the closest model years below and above ``filters``' single year that have cars for
     the rest of the search (None when there are none). Used when "Golf 1995" finds nothing."""
@@ -1089,6 +1105,30 @@ class NoMatch(Html):
     (never rephrased by Gemini, which could hide that nothing was searched)."""
 
 
+def _listing_rows(matches, lang):
+    """(lines, how many rows are not fresh, how many are flagged) for the rows of a find answer."""
+    lines = []
+    older = suspects = 0
+    for item in matches:
+        label = " ".join(value for value in (item["make"], item["model"]) if value) or t(lang, "unparsed_model")
+        year = f" · {item['year']}" if item["year"] else ""
+        # Price and mileage never look alike: 💰 + capital "KM" for the price, 🛣 + lower-case "km" for the road
+        mileage = f" · 🛣 {_thousands(item['mileage'])} km" if item["mileage"] is not None else ""
+        fresh = _is_fresh(item["last_verified_at"])
+        older += not fresh
+        seen = t(lang, "seen_row", age=_age(item["last_verified_at"], lang),
+                 when=_time(item["last_verified_at"], lang))
+        marker = "" if fresh else "⚠ "
+        traits = _row_traits(item, lang)
+        row = (f"• {_car_link(label, item['listing_id'])}{esc(year)} · 💰 <b>{esc(_money(item['price'], lang))}</b>"
+               f"{esc(mileage)}\n  {esc(traits + ' · ') if traits else ''}{marker}{esc(seen)}")
+        if item.get("suspect"):
+            suspects += 1
+            row += f"\n  {esc(t(lang, 'suspect_row'))}"
+        lines.append(row)
+    return lines, older, suspects
+
+
 def find_page(engine, filters, offset=0, lang=DEFAULT_LANGUAGE):
     """Return (Telegram HTML text, total matches, stats) for one page of find results.
 
@@ -1115,6 +1155,7 @@ def find_page(engine, filters, offset=0, lang=DEFAULT_LANGUAGE):
     gearbox_days = FRESH_DAYS
     nearest = None
     year_choice = {}
+    alternatives, alt_low, alt_high = [], None, None
     with engine.begin() as connection:
         _statement_timeout(connection)
         if offset == 0 and filters.search and not _is_known_model(connection, filters.search):
@@ -1138,8 +1179,10 @@ def find_page(engine, filters, offset=0, lang=DEFAULT_LANGUAGE):
                 older_hidden = 0 if filters.include_old else int(probe[0]["all_total"])
             exact_year = bool(filters.year_min and filters.year_min == filters.year_max)
             if exact_year and not older_hidden and not unknown:
-                year_choice = _year_choice_ranges(*_nearest_years(connection, filters))
-            if not older_hidden and not unknown and not filters.transmission and not year_choice:
+                alternatives, alt_low, alt_high = _year_alternatives(connection, filters, hints)
+                if not alternatives:  # nothing within +-2 years either: the nearest older / newer years
+                    year_choice = _year_choice_ranges(*_nearest_years(connection, filters))
+            if not older_hidden and not unknown and not filters.transmission and not year_choice and not alternatives:
                 nearest = _nearest_real(connection, filters)  # "Tesla 2024 do 10k": say it doesn't exist
             if filters.transmission:  # the gearbox is rarely recorded: say what dropping it would find
                 wider = _find_rows(connection, replace(filters, transmission=""), 0, probe=True, hints=hints)
@@ -1170,6 +1213,15 @@ def find_page(engine, filters, offset=0, lang=DEFAULT_LANGUAGE):
             lines.extend(_nearest_lines(filters, nearest, lang))
             stats["nearest"] = replace(nearest[0], include_old=False)
             stats["nearest_how"] = nearest[1]
+        elif alternatives:  # "Golf 2016": none in 2016; the same model from the nearest years, labelled as such
+            lines.append(esc(t(lang, "no_match_year", what=_describe(shown(filters), lang), year=filters.year_min)))
+            alt_total = int(alternatives[0]["total"])
+            lines.append(esc(t(lang, "year_alt", years=f"{alt_low}–{alt_high}", year=filters.year_min,
+                               shown=len(alternatives), total=alt_total)))
+            lines.append("")
+            row_lines, older, suspects = _listing_rows(alternatives, lang)
+            lines.extend(row_lines)
+            stats["year_choice"] = {"alt": (alt_low, alt_high)}  # one button: all of them, paged
         elif year_choice:  # "Golf 1995": none in that year; offer the nearest older / newer years
             lines.append(esc(t(lang, "no_match_year", what=_describe(shown(filters), lang), year=filters.year_min)))
             lines.append(esc(t(lang, "year_ask")))
@@ -1197,23 +1249,8 @@ def find_page(engine, filters, offset=0, lang=DEFAULT_LANGUAGE):
                       "items": tuple((item["listing_id"], item["year"], item["price"],
                                      " ".join(v for v in (item["make"], item["model"]) if v)) for item in matches)})
         lines.append("")
-        for item in matches:
-            label = " ".join(value for value in (item["make"], item["model"]) if value) or t(lang, "unparsed_model")
-            year = f" · {item['year']}" if item["year"] else ""
-            # Price and mileage never look alike: 💰 + capital "KM" for the price, 🛣 + lower-case "km" for the road
-            mileage = f" · 🛣 {_thousands(item['mileage'])} km" if item["mileage"] is not None else ""
-            fresh = _is_fresh(item["last_verified_at"])
-            older += not fresh
-            seen = t(lang, "seen_row", age=_age(item["last_verified_at"], lang),
-                     when=_time(item["last_verified_at"], lang))
-            marker = "" if fresh else "⚠ "
-            traits = _row_traits(item, lang)
-            row = (f"• {_car_link(label, item['listing_id'])}{esc(year)} · 💰 <b>{esc(_money(item['price'], lang))}</b>"
-                   f"{esc(mileage)}\n  {esc(traits + ' · ') if traits else ''}{marker}{esc(seen)}")
-            if item.get("suspect"):
-                suspects += 1
-                row += f"\n  {esc(t(lang, 'suspect_row'))}"
-            lines.append(row)
+        row_lines, older, suspects = _listing_rows(matches, lang)
+        lines.extend(row_lines)
     if older_hidden and not matches:
         lines.append(esc(t(lang, "older_hidden", n=older_hidden)))
     # One compact footer line instead of up to eight notes; what is not shown has a button or a ⚠ on the row.
