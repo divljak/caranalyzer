@@ -303,6 +303,8 @@ STRINGS = {
         "unreal_scope_model": " ({what}, any year and price)",
         "btn_unreal": "🔎 {what}, any price",
         # compare like with like
+        "compare_shared": "Same filters for both: {filters}",
+        "compare_best_h": "Best listings (cheapest plausible, seen in the last 14 days):",
         "compare_years_user": "Compared model years: {years} (as you asked), for both.",
         "compare_years_overlap": "Compared model years: {years}, the years both models have in our data.",
         "compare_years_generation": "Compared model years: {years} ({label}), for both.",
@@ -587,6 +589,8 @@ STRINGS = {
         "unreal_scope_model": " ({what}, sva godišta i cijene)",
         "btn_unreal": "🔎 {what}, sve cijene",
         # compare like with like
+        "compare_shared": "Isti filteri za oba: {filters}",
+        "compare_best_h": "Najbolji oglasi (najjeftiniji vjerodostojni, viđeni u zadnjih 14 dana):",
         "compare_years_user": "Upoređena godišta: {years} (kako si tražio), za oba modela.",
         "compare_years_overlap": "Upoređena godišta: {years}, godišta koja oba modela imaju u našim podacima.",
         "compare_years_generation": "Upoređena godišta: {years} ({label}), za oba modela.",

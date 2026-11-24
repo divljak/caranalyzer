@@ -372,9 +372,9 @@ def _like_pattern(value):
 SHORT_MAKES = frozenset({"vw", "kia", "bmw", "mg", "ds", "uaz", "gaz"})  # a make starts the label: any position
 
 
-def _cohort_stats(connection, label, year_min=None, year_max=None):
-    """Asking-price summary for one model (optionally within model years). New cars at under 1.000 km
-    are left out: they are dealer stock, not used-car prices."""
+def _cohort_stats(connection, label, year_min=None, year_max=None, shared=None):
+    """Asking-price summary for one model (optionally within model years, and the price / mileage / fuel / gearbox
+    bounds in ``shared``). New cars at under 1.000 km are left out: they are dealer stock, not used-car prices."""
     return _one(connection, f"""
       SELECT count(*) AS sample_size,
         count(*) FILTER (WHERE c.price_status='priced' AND c.price>0) AS priced_sample,
@@ -391,8 +391,8 @@ def _cohort_stats(connection, label, year_min=None, year_max=None):
         AND {_LABEL_SQL} LIKE :pattern ESCAPE '\\'
         AND (CAST(:year_min AS integer) IS NULL OR c.year>=CAST(:year_min AS integer))
         AND (CAST(:year_max AS integer) IS NULL OR c.year<=CAST(:year_max AS integer))
-        AND NOT coalesce({_NEW_LIKE.format(p='c')}, false)
-    """, {"pattern": _like_pattern(label), "year_min": year_min, "year_max": year_max})
+        AND NOT coalesce({_NEW_LIKE.format(p='c')}, false){_SHARED_WHERE}
+    """, {"pattern": _like_pattern(label), "year_min": year_min, "year_max": year_max, **_shared_params(shared)})
 
 
 def _cohort_lines(label, result, lang=DEFAULT_LANGUAGE):
@@ -404,6 +404,43 @@ def _cohort_lines(label, result, lang=DEFAULT_LANGUAGE):
     ]
     if result["priced_sample"] < THIN_SAMPLE:
         lines.append(t(lang, "cohort_thin"))
+    return lines
+
+
+COMPARE_BEST = 2  # listings shown under each side of a compare
+COMPARE_MIN_PRICE_SHARE = 0.5  # a "best" listing is not under half the side's median: that is a typo or a wreck
+
+
+def _cohort_best(connection, label, year_min=None, year_max=None, shared=None, limit=COMPARE_BEST):
+    """The cheapest plausible fresh listings of one side: priced, seen in the last 14 days, not flagged as
+    implausible, and not under half the side's median asking price. Same bounds as ``_cohort_stats``."""
+    return _all(connection, f"""
+      WITH side AS (
+        SELECT c.listing_id, c.year, c.price, {_KM} AS mileage, c.last_verified_at
+        FROM car_listings c LEFT JOIN dealer_vehicle_labels l USING(listing_id)
+        WHERE {_RECENT_WHERE}
+          AND c.last_verified_at >= (now() AT TIME ZONE 'UTC') - interval '{FRESH_DAYS} days'
+          AND {_LABEL_SQL} LIKE :pattern ESCAPE '\\'
+          AND (CAST(:year_min AS integer) IS NULL OR c.year>=CAST(:year_min AS integer))
+          AND (CAST(:year_max AS integer) IS NULL OR c.year<=CAST(:year_max AS integer))
+          AND NOT coalesce({_NEW_LIKE.format(p='c')}, false)
+          AND NOT coalesce({_KM_SUSPECT.format(p='c')}, false){_SHARED_WHERE}
+      )
+      SELECT s.listing_id, s.year, s.price, s.mileage, s.last_verified_at
+      FROM side s
+      WHERE s.price >= {COMPARE_MIN_PRICE_SHARE} * (SELECT percentile_cont(.5) WITHIN GROUP (ORDER BY price) FROM side)
+      ORDER BY s.price ASC, s.mileage ASC NULLS LAST, s.listing_id
+      LIMIT CAST(:limit AS integer)
+    """, {"pattern": _like_pattern(label), "year_min": year_min, "year_max": year_max, "limit": limit,
+          **_shared_params(shared)})
+
+
+def _best_lines(items, lang):
+    lines = []
+    for item in items:
+        km = f" · {int(item['mileage']):,} km".replace(",", ".") if item.get("mileage") is not None else ""
+        year = f"{item['year']} · " if item.get("year") else ""
+        lines.append(f"• {year}{_money(item['price'], lang)}{km} · {_listing_url(item['listing_id'])}")
     return lines
 
 
@@ -428,7 +465,7 @@ def _year_spread(connection, search):
     return int(row["low"]), int(row["high"])
 
 
-def _band_medians(connection, search, start, end, width):
+def _band_medians(connection, search, start, end, width, shared=None):
     """{band index: (priced listings, median)} for model years start..end in bands of ``width`` years."""
     rows = _all(connection, f"""
       SELECT (c.year - CAST(:start AS integer)) / CAST(:width AS integer) AS band, count(*) AS n,
@@ -437,9 +474,9 @@ def _band_medians(connection, search, start, end, width):
       WHERE {_RECENT_WHERE}
         AND c.year BETWEEN CAST(:start AS integer) AND CAST(:end AS integer)
         AND {_LABEL_SQL} LIKE :pattern ESCAPE '\\'
-        AND NOT coalesce({_NEW_LIKE.format(p='c')}, false)
+        AND NOT coalesce({_NEW_LIKE.format(p='c')}, false){_SHARED_WHERE}
       GROUP BY 1
-    """, {"pattern": _like_pattern(search), "start": start, "end": end, "width": width})
+    """, {"pattern": _like_pattern(search), "start": start, "end": end, "width": width, **_shared_params(shared)})
     return {int(row["band"]): (int(row["n"]), row["median"]) for row in rows}
 
 
@@ -481,12 +518,13 @@ def _family_models(searches):
             if any(re.search(rf"\b{re.escape(name)}\b", fold(search)) for name in FAMILY_MODELS)]
 
 
-def compare(engine, argument, lang=DEFAULT_LANGUAGE, year_min=None, year_max=None, family=False):
+def compare(engine, argument, lang=DEFAULT_LANGUAGE, year_min=None, year_max=None, family=False, shared=None):
     """Compare two models' asking prices in the same model years. Returns (text, [(search, low, high)]).
 
     The years are the ones the user gave; otherwise a named generation's; otherwise the years both
     models have in the data. The answer says which years were compared and, when the span is wide,
-    shows the medians per band of model years as well.
+    shows the medians per band of model years as well. ``shared`` (Filters) holds the price, mileage, fuel and
+    gearbox bounds that apply to both sides ("golf 6 ili 7 do 12000"); each side also lists its best listings.
     """
     labels = [value.strip() for value in re.split(r"\s*(?:\||\bvs\.?\b)\s*", argument, flags=re.I) if value.strip()]
     if len(labels) != 2:
@@ -505,18 +543,24 @@ def compare(engine, argument, lang=DEFAULT_LANGUAGE, year_min=None, year_max=Non
         spreads = ([_year_spread(connection, search) for search in searches]
                    if not (any(user) or any(low for low, _ in spans)) else [None, None])
         chosen, how, generation_of = _compare_years(spans, user, spreads)
-        results = [_cohort_stats(connection, search, low, high) for search, (low, high) in zip(searches, chosen)]
+        results = [_cohort_stats(connection, search, low, high, shared) for search, (low, high) in zip(searches, chosen)]
+        best = [_cohort_best(connection, search, low, high, shared) if result["priced_sample"] else []
+                for result, (search, (low, high)) in zip(results, zip(searches, chosen))]
         bands = []
         low, high = chosen[0]
         if how != "generations" and low:
             high = high or datetime.now(timezone.utc).year
             width = max(2, -(-(high - low + 1) // COMPARE_MAX_BANDS))
             if high - low + 1 > width:
-                per_model = [_band_medians(connection, search, low, high, width) for search in searches]
+                per_model = [_band_medians(connection, search, low, high, width, shared) for search in searches]
                 for band in range((high - low) // width + 1):
                     start = low + band * width
                     bands.append(((start, min(start + width - 1, high)), [m.get(band, (0, None)) for m in per_model]))
     lines = [t(lang, "compare_title")]
+    no_years = replace(shared, year_min=None, year_max=None) if shared else None  # the years have their own line
+    shared_text = " · ".join(_attr_parts(no_years, lang) + _bound_parts(no_years, lang)) if shared else ""
+    if shared_text:
+        lines.append(t(lang, "compare_shared", filters=shared_text))
     if how == "user":
         lines.append(t(lang, "compare_years_user", years=_years_text(*user, lang)))
     elif how == "overlap":
@@ -527,10 +571,12 @@ def compare(engine, argument, lang=DEFAULT_LANGUAGE, year_min=None, year_max=Non
     elif how == "none" and any(spreads):
         lines.append(t(lang, "compare_years_none"))
     newest = None
-    for label, (low, high), result in zip(labels, chosen, results):
+    for label, (low, high), result, top in zip(labels, chosen, results, best):
         newest = max(filter(None, (newest, _utc(result["newest"]))), default=None)
         shown = f"{label} ({_years_text(low, high, lang)})" if low else label
         lines.extend(["", *_cohort_lines(shown, result, lang)])
+        if top:
+            lines.extend([t(lang, "compare_best_h"), *_best_lines(top, lang)])
     if bands:
         lines.extend(["", t(lang, "compare_bands_h")])
         for (start, end), cells in bands:
@@ -724,6 +770,20 @@ _NEW_LIKE = f"({{p}}.year >= {_THIS_YEAR} - 1 AND {{p}}.mileage BETWEEN 0 AND {N
 _ATTR_WHERE = ("""(CAST(:fuel AS text) = '' OR {p}.fuel_type = CAST(:fuel AS text)
               OR (CAST(:fuel AS text) = 'lpg' AND {p}.fuel_type IN ('lpg','gas')))
             AND (CAST(:transmission AS text) = '' OR {p}.transmission = CAST(:transmission AS text))""")
+
+# Price / mileage / fuel / gearbox bounds a compare applies to both sides (params from ``_shared_params``).
+_SHARED_WHERE = f"""
+        AND (CAST(:budget AS integer) IS NULL OR c.price<=CAST(:budget AS integer))
+        AND (CAST(:price_min AS integer) IS NULL OR c.price>=CAST(:price_min AS integer))
+        AND (CAST(:mileage_max AS integer) IS NULL OR {_KM}<=CAST(:mileage_max AS integer))
+        AND (CAST(:mileage_min AS integer) IS NULL OR {_KM}>=CAST(:mileage_min AS integer))
+        AND {_ATTR_WHERE.format(p='c')}"""
+
+
+def _shared_params(filters):
+    params = _bound_params(filters or Filters())
+    return {key: params[key] for key in ("budget", "price_min", "mileage_max", "mileage_min", "fuel", "transmission")}
+
 
 _FIND_SQL = f"""
   WITH base AS (
@@ -2546,7 +2606,7 @@ def _answer_intent(engine, intent, config, lang=DEFAULT_LANGUAGE):
         return text_value, Choices((buttons,))
     if intent.kind == "compare":
         text_value, used = compare(engine, " | ".join(intent.labels), lang, intent.filters.year_min,
-                                   intent.filters.year_max, family=intent.filters.family)
+                                   intent.filters.year_max, family=intent.filters.family, shared=intent.filters)
         buttons = tuple((f"🔎 {label[:24]}", refine_callback(Filters(search, year_min=low, year_max=high)))
                         for label, (search, low, high) in zip(intent.labels, used or [(l, None, None) for l in intent.labels]))
         return text_value, Choices((buttons,))

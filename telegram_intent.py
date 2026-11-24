@@ -889,6 +889,35 @@ def _chunk_names_car(chunk):
     return any(fold(repair_typo(token, tokens[i - 1] if i else "")) in _CAR_WORDS for i, token in enumerate(tokens))
 
 
+def _shared_model_pair(candidates):
+    """"golf 6 ili 7" -> ("golf 6", "golf 7"): the second side is only a generation of the first side's model.
+
+    Needs exactly two sides, the second one a lone generation number / letter that the model has in
+    GENERATIONS ("golf 7 ili 6", "passat b6 ili b7"). Anything else returns None.
+    """
+    sides = [chunk for chunk in candidates if chunk.strip()]
+    if len(sides) != 2:
+        return None
+    second = _search_tokens(sides[1])
+    if len(second) != 1:
+        return None
+    tokens = _search_tokens(sides[0])
+    for index, token in enumerate(tokens):
+        folded = fold(token)
+        joined = re.fullmatch(r"([a-z]+)([0-9])", folded)
+        if joined and _generation_model(joined.group(1)):  # "golf7"
+            model, number, head, tail = _generation_model(joined.group(1)), joined.group(2), tokens[:index], tokens[index + 1:]
+        elif _generation_model(token) and index + 1 < len(tokens):
+            model, number, head, tail = _generation_model(token), fold(tokens[index + 1]), tokens[:index], tokens[index + 2:]
+        else:
+            continue
+        other = fold(second[0])
+        if tail or number == other or number not in GENERATIONS[model] or other not in GENERATIONS[model]:
+            continue
+        return (clean_search(" ".join(head + [model, number])), clean_search(" ".join(head + [model, other])))
+    return None
+
+
 def _compare_labels(text_value):
     folded = fold(text_value)
     match = re.search(r"\b(?:compare|comparison|uporedi|poredi|usporedi|razlika izmedu)\b(.*)", folded)
@@ -903,6 +932,9 @@ def _compare_labels(text_value):
     elif (re.search(r"\b(?:or|ili)\b", folded) and len(folded.split()) <= 10
           and not _attribute(folded, _FUELS)[1] and not _attribute(folded, _GEARBOXES)[1]):
         candidates = [chunk for part in text_value.split(",") for chunk in _COMPARE_SPLIT.split(part)]
+        pair = _shared_model_pair(candidates)
+        if pair:
+            return pair  # "golf 6 ili 7": two generations of one model
         named = [chunk for chunk in candidates if _search_text(chunk)]
         if len(named) >= 2 and all(_chunk_names_car(chunk) for chunk in named):
             # "golf ili pasat", "golf 7 ili octavia 3 do 20000", "golf, octavia ili leon": cars on every side
@@ -915,6 +947,9 @@ def _compare_labels(text_value):
             # no question mark: only a clear "make model ili make model" pair, never "golf ili nesto"
             if len(candidates) != 2 or any(len(_search_text(chunk).split()) < 2 for chunk in candidates):
                 candidates = []
+    pair = _shared_model_pair(candidates)
+    if pair:
+        return pair  # "uporedi golf 6 i 7", "golf 6 vs 7"
     labels = []
     for chunk in candidates:
         label = _label_text(chunk)
@@ -1614,6 +1649,21 @@ def _mixed_question(text_value, context=None):
     return replace(chosen, filters=filters, labels=chosen.labels + skipped)
 
 
+def _shared_compare_filters(folded, original):
+    """The filters a compare message applies to both sides, and the text left to read the two sides from.
+
+    "golf 6 ili 7 do 12000" -> (budget 12000, "golf 6 ili 7"). The same unit rules as a search apply
+    (unitless "do 12000" is a price, lower-case km mileage, KM currency). Two different fuels or a gearbox left
+    in the text ("golf dizel ili passat benzin") are never shared: the text is then returned unchanged."""
+    filters, rest = _extract_filters(folded, original)
+    filters = replace(filters, search="", family=False, include_old=False, cheapest=False, low_km=False)
+    if not (filters.numeric() or filters.attributes()):
+        return Filters(), original
+    if _attribute(fold(rest), _FUELS)[1] or _attribute(fold(rest), _GEARBOXES)[1]:
+        return replace(filters, fuel="", transmission=""), original
+    return filters, rest
+
+
 def _parse_question(text_value, context=None, _restating=False):
     """Turn one question into an Intent. ``context`` is an Intent from a replied-to answer
     (or, for a correction, the same person's previous question)."""
@@ -1684,18 +1734,20 @@ def _parse_question(text_value, context=None, _restating=False):
 
     years = _stated_years(folded)
     bare_year = bool(years and years[2] is not None and years[2] == years[1])  # "2018", not "od 2018" / a range
+    shared, compare_text = _shared_compare_filters(folded, original)
     if years:
         match, low, high = years
         yearless = original[:match.start()] + " " * (match.end() - match.start()) + original[match.end():]
         labels = _compare_labels(yearless)
         if labels:  # "Octavia ili Passat 2016-2019?": both cohorts in the years the user gave
-            return Intent("compare", Filters(year_min=low, year_max=high, family=wants_family(folded)),
+            return Intent("compare", replace(shared, year_min=low, year_max=high, family=wants_family(folded)),
                           labels=labels)
-    labels = _compare_labels(original)
-    if labels:
-        if wants_family(folded):  # "Octavia vs Golf za porodicu": the answer adds a line about the family list
-            return Intent("compare", Filters(family=True), labels=labels)
-        return Intent("compare", labels=labels)
+    labels = _compare_labels(compare_text)
+    if not labels and compare_text is not original:
+        labels = _compare_labels(original)
+        shared = replace(shared, fuel="", transmission="")
+    if labels:  # shared filters ("do 12000", "dizel", "od 2015") apply to both sides
+        return Intent("compare", replace(shared, family=wants_family(folded)), labels=labels)
     asked = re.search(r"^(?:a\s+)?(?:ajde\s+|hajde\s+)?(?:compare|uporedi\w*|usporedi\w*|poredi\w*)\b(.*)$", folded)
     if asked:  # "uporedi sa octaviom" after a Passat search; "uporedi ih" with nothing to go on
         other = _search_text(original[asked.start(1):])
