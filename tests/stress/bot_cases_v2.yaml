@@ -1279,6 +1279,46 @@ cases:
     - say: "bmw 320 vs audi a4 2015"
       expect: {intent: compare, filters: {year_min: 2015}}
 
+- id: v2-cmp-golf-6-ili-7-budget
+  category: comparisons
+  impact: silent
+  title: "'golf 6 ili 7 do 12000' compares Golf 6 with Golf 7 under a 12.000 KM cap (was: searched golf 7 in Golf 6 years)"
+  turns:
+    - say: "golf 6 ili 7 do 12000"
+      expect: {intent: compare, labels_has: ["golf 6", "golf 7"], filters: {budget: 12000}}
+
+- id: v2-cmp-golf-6-ili-7
+  category: comparisons
+  impact: silent
+  title: "'golf 6 ili 7' (bare second generation) compares two generations"
+  turns:
+    - say: "golf 6 ili 7"
+      expect: {intent: compare, labels_has: ["golf 6", "golf 7"]}
+
+- id: v2-cmp-octavia-ili-golf-km-budget
+  category: comparisons
+  impact: silent
+  title: "'octavia ili golf do 15000 KM': compare, KM is the price cap"
+  turns:
+    - say: "octavia ili golf do 15000 KM"
+      expect: {intent: compare, labels_has: ["octavia", "golf"], filters: {budget: 15000}}
+
+- id: v2-cmp-vs-fuel-budget
+  category: comparisons
+  impact: silent
+  title: "'golf 6 vs golf 7 do 12000 KM dizel': fuel is a shared filter, not part of the second model"
+  turns:
+    - say: "golf 6 vs golf 7 do 12000 KM dizel"
+      expect: {intent: compare, labels_has: ["golf 6", "golf 7"], filters: {budget: 12000, fuel: diesel}}
+
+- id: v2-cmp-generations-lowercase-km
+  category: comparisons
+  impact: silent
+  title: "'golf 6 ili 7 do 120000 km': lowercase km stays mileage in a compare"
+  turns:
+    - say: "golf 6 ili 7 do 120000 km"
+      expect: {intent: compare, labels_has: ["golf 6", "golf 7"], filters: {mileage_max: 120000}}
+
 # ═════════════════════════ new vs used ═════════════════════════
 - id: v2-new-novi-auto
   category: new_vs_used

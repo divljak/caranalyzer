@@ -96,8 +96,20 @@ def _like_matches(pattern, value):
     return re.fullmatch(regex, value, re.S) is not None
 
 
+GOLF_YEARS = "golf_years="  # dataset "golf_years=2014,2015,2017": one Golf per model year, year bounds applied
+
+
 def canned_rows(sql, params, dataset):
     """Listings for the find query only; every other statement is answered empty."""
+    golf_years = None
+    if dataset.startswith(GOLF_YEARS):
+        golf_years = [int(y) for y in dataset[len(GOLF_YEARS):].split(",") if y]
+        dataset = "rows"
+    if golf_years is not None and "AS older" in sql and "AS newer" in sql:  # the nearest model years with cars
+        target = params["target"]
+        older = [y for y in golf_years if y < target]
+        newer = [y for y in golf_years if y > target]
+        return [{"older": max(older) if older else None, "newer": min(newer) if newer else None}]
     if "recent_listings" in sql:  # trends: an aggregate row, so a quiet database still answers
         return [{"sample_size": 120, "priced_sample": 100, "drops": 9, "increases": 4,
                  "newest": datetime.now(timezone.utc) - timedelta(hours=2)}]
@@ -128,11 +140,20 @@ def canned_rows(sql, params, dataset):
         return []
     if dataset == "empty":
         return []
-    listings = [("Volkswagen", "Golf 7", 2016, 17500, 160000),
-                ("Škoda", "Octavia", 2015, 14900, 190000),
-                ("Opel", "Astra", 2012, 8200, 210000)]
+    if golf_years is not None:  # the year bounds of the query are applied, unlike the default canned rows
+        low, high = params.get("year_min"), params.get("year_max")
+        kept = [y for y in sorted(golf_years, reverse=True)
+                if (low is None or y >= low) and (high is None or y <= high)]
+        listings = [("Volkswagen", "Golf", y, 12000 + (y - 2010) * 500, 150000) for y in kept]
+        pattern = params.get("pattern") if params.get("search") else None
+        if pattern:
+            listings = [row for row in listings if _like_matches(pattern, _folded_label(f"{row[0]} {row[1]}"))]
+    else:
+        listings = [("Volkswagen", "Golf 7", 2016, 17500, 160000),
+                    ("Škoda", "Octavia", 2015, 14900, 190000),
+                    ("Opel", "Astra", 2012, 8200, 210000)]
     pattern = params.get("pattern") if params.get("search") else None
-    if pattern:
+    if pattern and golf_years is None:
         # a model search returns only listings whose label matches, as the real LIKE does: the canned ones,
         # else two made-up listings of a matching catalogue model, else nothing ("bembara" finds no car)
         matching = [row for row in listings if _like_matches(pattern, _folded_label(f"{row[0]} {row[1]}"))]
@@ -150,9 +171,9 @@ def canned_rows(sql, params, dataset):
                      "fresh_total": total, "all_total": total, "new_hidden": 0, "hint_hit": False,
                      "hint_total": 0, "total": total,
                      # extra columns a richer row format may read (unused by main today)
-                     "fuel": "Dizel", "fuel_type": "Dizel", "transmission": ["Automatik", "Manuelni", None][i],
-                     "gearbox": ["Automatik", "Manuelni", None][i], "city": ["Sarajevo", "Tuzla", "Mostar"][i],
-                     "location": ["Sarajevo", "Tuzla", "Mostar"][i]})
+                     "fuel": "Dizel", "fuel_type": "Dizel", "transmission": ["Automatik", "Manuelni", None][i % 3],
+                     "gearbox": ["Automatik", "Manuelni", None][i % 3], "city": ["Sarajevo", "Tuzla", "Mostar"][i % 3],
+                     "location": ["Sarajevo", "Tuzla", "Mostar"][i % 3]})
     return rows
 
 
