@@ -143,6 +143,40 @@ class ShortNumberAnswerTests(unittest.TestCase):
         self.assertTrue(reply.startswith("What does 20 mean: model year (2020), price (20.000 KM)"), reply)
 
 
+class YearAlternativeSelectionTests(unittest.TestCase):
+    """_year_alternatives picks the +-1 window, else +-2, else nothing; no database needed."""
+
+    def run_helper(self, cars, year=2016, **extra):
+        calls = []
+
+        def fake_find_rows(connection, filters, offset, probe=False, probe_new=False, hints=()):
+            calls.append((filters.year_min, filters.year_max))
+            return [{"year": y} for y in cars if filters.year_min <= y <= filters.year_max]
+
+        original = telegram_bot._find_rows
+        telegram_bot._find_rows = fake_find_rows
+        try:
+            rows, low, high = telegram_bot._year_alternatives(None, Filters("golf", year_min=year, year_max=year,
+                                                                           **extra))
+        finally:
+            telegram_bot._find_rows = original
+        return [r["year"] for r in rows], low, high, calls
+
+    def test_plus_minus_one_wins_and_stops(self):
+        self.assertEqual(([2015, 2017], 2015, 2017, [(2015, 2017)]), self.run_helper([2014, 2015, 2017, 2018]))
+
+    def test_plus_minus_two_only_when_one_is_empty(self):
+        self.assertEqual(([2018], 2014, 2018, [(2015, 2017), (2014, 2018)]), self.run_helper([2012, 2018]))
+
+    def test_nothing_within_two_years(self):
+        self.assertEqual(([], None, None, [(2015, 2017), (2014, 2018)]), self.run_helper([2012, 2019]))
+
+    def test_the_window_stays_inside_the_years_the_bot_accepts(self):
+        low, high = telegram_bot.YEAR_RANGE
+        self.assertEqual([(low, low + 1), (low, low + 2)], self.run_helper([], year=low)[3])
+        self.assertEqual([(high - 1, high), (high - 2, high)], self.run_helper([], year=high)[3])
+
+
 @unittest.skipUnless(os.getenv("DEALER_TEST_DATABASE_URL"), "Requires disposable PostgreSQL")
 class YearDatabaseTests(unittest.TestCase):
     @classmethod
@@ -194,47 +228,82 @@ class YearDatabaseTests(unittest.TestCase):
         self.assertEqual({"g15", "g17", "g18"}, self.ids(self.answer("Golf 2015-2018")[0]))
         self.assertEqual({"g12", "g14", "g15"}, self.ids(self.answer("Golf do 2015")[0]))
 
-    def test_no_match_in_the_year_offers_older_and_newer(self):
+    def test_no_match_in_the_year_lists_the_neighbouring_years_as_alternatives(self):
         self.seed(self.GOLFS)
         reply, choices = self.answer("Golf 2016")
         self.assertIn("Nema oglasa za „golf · 2016“", reply)
-        self.assertIn("Želite li vidjeti starije ili novije modele?", reply)
-        self.assertEqual(set(), self.ids(reply))
+        self.assertIn("Alternativa, nije 2016", reply)
+        self.assertIn("(2015–2017)", reply)
+        self.assertEqual({"g15", "g17"}, self.ids(reply))  # +-1 only: 2014 and 2018 are not shown
+        self.assertNotIn("Želite li vidjeti starije", reply)
         buttons = keyboard(CONFIG, choices, "bs")["inline_keyboard"][0]
-        self.assertEqual(["⏪ Starije (2013–2015)", "⏩ Novije (2017–2019)"], [b["text"] for b in buttons])
-        older, newer = (parse_refine_callback(b["callback_data"]) for b in buttons)
-        self.assertEqual(("golf", 2013, 2015), (older.search, older.year_min, older.year_max))
-        self.assertEqual(("golf", 2017, 2019), (newer.search, newer.year_min, newer.year_max))
+        self.assertEqual(["🔎 Sve iz 2015–2017"], [b["text"] for b in buttons])
+        alt = parse_refine_callback(buttons[0]["callback_data"])
+        self.assertEqual(("golf", 2015, 2017), (alt.search, alt.year_min, alt.year_max))
 
-    def test_the_buttons_rerun_the_search_for_those_years(self):
+    def test_an_empty_plus_minus_one_widens_to_two(self):
         self.seed(self.GOLFS)
-        _, choices = self.answer("Golf 2016")
-        older, newer = (parse_refine_callback(b["callback_data"])
-                        for b in keyboard(CONFIG, choices, "bs")["inline_keyboard"][0])
-        self.assertEqual({"g14", "g15"}, self.ids(telegram_bot.find_message(self.engine, older, 0, "bs")))
-        self.assertEqual({"g17", "g18"}, self.ids(telegram_bot.find_message(self.engine, newer, 0, "bs")))
+        reply, _ = self.answer("Golf 2019")  # 2018 and 2020 are +-1; 2017 (+-2) is not needed
+        self.assertEqual({"g18", "g20"}, self.ids(reply))
+        self.clean()
+        self.seed([("g12", "Volkswagen", "Golf", 2012, 9000, 200000), ("g18", "Volkswagen", "Golf", 2018, 17000, 110000)])
+        reply, _ = self.answer("Golf 2016")  # +-1 empty, 2018 is +-2
+        self.assertEqual({"g18"}, self.ids(reply))
+        self.assertIn("(2014–2018)", reply)
+        self.assertIn("nije 2016", reply)
 
-    def test_only_the_direction_that_has_cars_is_offered(self):
+    def test_nothing_within_two_years_falls_back_to_the_nearest_year_buttons(self):
         self.seed(self.GOLFS)
-        reply, choices = self.answer("Golf 1995")  # nothing older than the data
+        reply, choices = self.answer("Golf 1995")
+        self.assertEqual(set(), self.ids(reply))
+        self.assertIn("Želite li vidjeti starije ili novije modele?", reply)
         buttons = keyboard(CONFIG, choices, "bs")["inline_keyboard"][0]
         self.assertEqual(["⏩ Novije (2012–2014)"], [b["text"] for b in buttons])
-        self.assertIn("Želite li vidjeti starije ili novije modele?", reply)
         reply, choices = self.answer("Golf 2030")
         buttons = keyboard(CONFIG, choices, "bs")["inline_keyboard"][0]
         self.assertEqual(["⏪ Starije (2018–2020)"], [b["text"] for b in buttons])
+        self.clean()
+        self.seed([("a", "Volkswagen", "Golf", 2005, 4000, 250000), ("b", "Volkswagen", "Golf", 2012, 9000, 200000)])
+        reply, choices = self.answer("Golf 2009")  # 2005 and 2012 are both 3+ years away
+        self.assertEqual(set(), self.ids(reply))
+        buttons = keyboard(CONFIG, choices, "bs")["inline_keyboard"][0]
+        self.assertEqual(["⏪ Starije (2003–2005)", "⏩ Novije (2012–2014)"], [b["text"] for b in buttons])
+
+    def test_the_alternatives_button_reruns_the_search_for_those_years(self):
+        self.seed(self.GOLFS)
+        _, choices = self.answer("Golf 2016")
+        alt = parse_refine_callback(keyboard(CONFIG, choices, "bs")["inline_keyboard"][0][0]["callback_data"])
+        self.assertEqual({"g15", "g17"}, self.ids(telegram_bot.find_message(self.engine, alt, 0, "bs")))
+
+    def test_the_other_filters_carry_into_the_alternatives(self):
+        self.seed(self.GOLFS + [("c17", "Volkswagen", "Golf", 2017, 15500, 140000)])
+        reply, choices = self.answer("Golf 2016 do 15200 KM")
+        self.assertEqual({"g15", "g17"}, self.ids(reply))  # the 15.500 KM car of 2017 is over the budget
+        alt = parse_refine_callback(keyboard(CONFIG, choices, "bs")["inline_keyboard"][0][0]["callback_data"])
+        self.assertEqual(15200, alt.budget)
+
+    def test_an_explicit_range_keeps_the_nearest_year_buttons(self):
+        self.seed(self.GOLFS)
+        reply, _ = self.answer("Golf 2021-2022")
+        self.assertNotIn("Alternativa", reply)
+
+    def test_new_cars_stay_out_of_the_alternatives(self):
+        self.seed([("n1", "Volkswagen", "Golf", THIS_YEAR - 1, 30000, 50), ("u1", "Volkswagen", "Golf", THIS_YEAR - 3,
+                                                                            22000, 40000)])
+        reply, _ = self.answer(f"Golf {THIS_YEAR - 2}")
+        self.assertEqual({"u1"}, self.ids(reply))
 
     def test_no_year_choice_when_the_model_has_no_cars_at_all(self):
         reply, choices = self.answer("Golf 2015")  # empty table
         self.assertNotIn("Želite li", reply)
 
-    def test_the_other_filters_carry_into_the_buttons(self):
-        self.seed(self.GOLFS + [("d19", "Volkswagen", "Golf", 2019, 19000, 90000)])
-        _, choices = self.answer("Golf 2016 do 16000 KM")
+    def test_the_other_filters_carry_into_the_nearest_year_buttons(self):
+        self.seed([("a", "Volkswagen", "Golf", 2005, 4000, 250000), ("b", "Volkswagen", "Golf", 2012, 9000, 200000)])
+        _, choices = self.answer("Golf 2009 do 16000 KM")
         older, newer = (parse_refine_callback(b["callback_data"])
                         for b in keyboard(CONFIG, choices, "bs")["inline_keyboard"][0])
-        self.assertEqual(16000, older.budget)
-        self.assertEqual((2017, 2019, 16000), (newer.year_min, newer.year_max, newer.budget))
+        self.assertEqual((2003, 2005, 16000), (older.year_min, older.year_max, older.budget))
+        self.assertEqual((2012, 2014, 16000), (newer.year_min, newer.year_max, newer.budget))
 
     def test_new_cars_under_1000_km_stay_out_of_an_exact_year_list(self):
         self.seed([("n1", "Volkswagen", "Golf", THIS_YEAR - 1, 30000, 50), ("u1", "Volkswagen", "Golf", THIS_YEAR - 1,

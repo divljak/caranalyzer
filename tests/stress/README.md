@@ -8,6 +8,9 @@ Telegram, no Gemini, no database, no env or Supabase access (`harness.py`).
 - `bot_cases_v2.yaml`: 206 adversarial cases the first suite missed, ids `v2-...` (report
   `docs/qa/bot-stress-suite-v2-2026-11-21.md`).
 
+- `bot_cases_year_rule.yaml`: 9 cases for the exact-year rule (GAR-8), ids `v2-yr-...`; they use the harness dataset
+  `golf_years=2014,2015,...` (one Golf per year, year bounds applied).
+
 ```bash
 # a table of pass/fail per category + every failure with actual vs expected (exit 0)
 python -m tests.stress.runner

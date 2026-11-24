@@ -1,0 +1,96 @@
+# Exact-year rule (GAR-8): a model plus a lone year lists only that year; with none, the same model from
+# +-1 (then +-2) years is proposed as labelled alternatives; nothing within +-2 keeps the older / newer buttons.
+# dataset "golf_years=..." is one Golf per listed model year, with the year bounds of the query applied.
+cases:
+- id: v2-yr-exact-year
+  category: year_rule
+  impact: guard
+  title: "'golf 2015' is exactly 2015 and lists it, with no alternatives"
+  dataset: "golf_years=2014,2015,2017,2018"
+  turns:
+    - say: "Golf 2015"
+      expect: {intent: find, filters: {search: golf, year_min: 2015, year_max: 2015}, reply_has: ["2015"],
+               reply_lacks: ["Alternativa", "2014", "2017", "2018"]}
+
+- id: v2-yr-range-stays-range
+  category: year_rule
+  impact: guard
+  title: "'od 2015' and '2014-2016' stay ranges and list the whole range"
+  dataset: "golf_years=2014,2015,2017,2018"
+  turns:
+    - say: "Golf od 2015"
+      expect: {intent: find, filters: {search: golf, year_min: 2015}, reply_has: ["2015", "2017", "2018"],
+               reply_lacks: ["Alternativa", "2014"]}
+    - say: "Golf 2014-2016"
+      expect: {intent: find, filters: {search: golf, year_min: 2014, year_max: 2016},
+               reply_has: ["2014", "2015"], reply_lacks: ["Alternativa", "2017"]}
+
+- id: v2-yr-short-number-asks
+  category: year_rule
+  impact: guard
+  title: "'golf 20' still asks what 20 means"
+  dataset: "golf_years=2014,2015,2017,2018"
+  turns:
+    - say: "golf 20"
+      expect: {intent: clarify, note: short_number, buttons_min: 3}
+
+- id: v2-yr-no-match-plus-minus-one
+  category: year_rule
+  impact: silent
+  title: "'Golf 2016' with none in 2016 lists 2015 and 2017 as labelled alternatives, not 2014 / 2018"
+  dataset: "golf_years=2014,2015,2017,2018"
+  turns:
+    - say: "Golf 2016"
+      expect: {intent: find, filters: {search: golf, year_min: 2016, year_max: 2016},
+               reply_has: ["Nema oglasa", "Alternativa, nije 2016", "2015", "2017"],
+               reply_lacks: ["2014", "2018", "Želite li vidjeti starije"], buttons_have: ["Sve iz 2015–2017"]}
+
+- id: v2-yr-empty-one-then-two
+  category: year_rule
+  impact: silent
+  title: "nothing within ±1 of 2016: the ±2 window proposes 2018 (and not the far 2012)"
+  dataset: "golf_years=2012,2018"
+  turns:
+    - say: "Golf 2016"
+      expect: {intent: find, reply_has: ["Nema oglasa", "Alternativa, nije 2016", "2014–2018", "2018"],
+               reply_lacks: ["2012", "Želite li vidjeti starije"]}
+
+- id: v2-yr-nothing-within-two-keeps-buttons
+  category: year_rule
+  impact: dead_end
+  title: "'Golf 1995' (nearest golf far away) keeps the older / newer year buttons and lists no cars"
+  dataset: "golf_years=2012,2014,2018"
+  turns:
+    - say: "Golf 1995"
+      expect: {intent: find, reply_has: ["Nema oglasa", "Želite li vidjeti starije ili novije modele?"],
+               reply_lacks: ["Alternativa", "2012", "2014"], buttons_have: ["Novije (2012–2014)"]}
+
+- id: v2-yr-sparse-both-directions
+  category: year_rule
+  impact: dead_end
+  title: "'Golf 2009' with golfs only in 2005 and 2012: no alternatives, both year buttons"
+  dataset: "golf_years=2005,2012"
+  turns:
+    - say: "Golf 2009"
+      expect: {intent: find, reply_lacks: ["Alternativa"], buttons_have: ["Starije (2003–2005)", "Novije (2012–2014)"]}
+
+- id: v2-yr-generation-plus-year-plus-budget
+  category: year_rule
+  impact: silent
+  title: "'golf 7 2016 do 15000 KM' is exactly 2016 plus the budget, not the golf-7 range"
+  dataset: "golf_years=2015,2016,2017"
+  turns:
+    - say: "golf 7 2016 do 15000 KM"
+      expect: {intent: find, filters: {search: golf, year_min: 2016, year_max: 2016, budget: 15000},
+               reply_lacks: ["Alternativa", "2015", "2017"]}
+
+- id: v2-yr-km-case-with-year
+  category: year_rule
+  impact: guard
+  title: "lowercase km is mileage, capital K is currency, next to an exact year"
+  dataset: "golf_years=2015,2016"
+  turns:
+    - say: "golf 2016 do 150000 km"
+      expect: {intent: find, filters: {search: golf, year_min: 2016, year_max: 2016, mileage_max: 150000}}
+    - say: "golf 2016 do 15000 KM"
+      expect: {intent: find, filters: {search: golf, year_min: 2016, year_max: 2016, budget: 15000}}
