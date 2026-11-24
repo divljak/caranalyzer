@@ -23,7 +23,9 @@ from tests.stress.harness import Session
 
 CASES_FILE = pathlib.Path(__file__).with_name("bot_cases.yaml")
 # The v2 cases (ids "v2-...") live in their own file so the first 100 stay exactly as written.
-CASE_FILES = (CASES_FILE, pathlib.Path(__file__).with_name("bot_cases_v2.yaml"))
+# The exact-year rule cases (GAR-8, ids "v2-yr-...") are in a third file for the same reason.
+CASE_FILES = (CASES_FILE, pathlib.Path(__file__).with_name("bot_cases_v2.yaml"),
+              pathlib.Path(__file__).with_name("bot_cases_year_rule.yaml"))
 FILTER_KEYS = ("search", "budget", "price_min", "mileage_max", "mileage_min", "year_min", "year_max", "fuel",
                "transmission", "new_ok", "family", "low_km")
 
