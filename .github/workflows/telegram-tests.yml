@@ -18,6 +18,7 @@ on:
       - database/**
       - supabase/migrations/**
       - tests/test_telegram_*.py
+      - tests/test_dealer_api.py
       - tests/test_run_outcome.py
       - tests/test_collector_health.py
       - requirements*.txt
@@ -79,6 +80,9 @@ jobs:
           tests.test_telegram_group_window tests.test_telegram_chat_setup tests.test_telegram_log
           tests.test_telegram_ranges tests.test_telegram_sweep_fixes tests.test_telegram_sweep_weak
           tests.test_telegram_sweep_16nov tests.test_telegram_answer_quality
+          tests.test_telegram_year_decisions tests.test_telegram_km_case_rule
+          tests.test_telegram_parser_round2 tests.test_telegram_improvements_5
+          tests.test_dealer_api
 
       - name: Run the run-outcome and health-check tests
         run: PYTHONPATH=tests .venv/bin/python -m unittest -v tests.test_run_outcome tests.test_collector_health

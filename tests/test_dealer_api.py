@@ -20,8 +20,15 @@ class DealerEvidenceTests(unittest.TestCase):
         cls.client_context = TestClient(dealer_api.app)
         cls.client = cls.client_context.__enter__()
         cls.ids = ['__dealer_test_1', '__dealer_test_2', '__dealer_test_missing', '__dealer_test_2023']
+        cls.anchor_session = None
         with cls.engine.begin() as c:
             cls.anchor = dealer_api.as_of(c)
+            if cls.anchor is None:
+                # Fresh DB built from the migrations has no completed clean run, so as_of() is None.
+                cls.anchor = datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
+                cls.anchor_session = '__dealer_test_anchor'
+                c.execute(text("""INSERT INTO scraping_logs(session_id,start_time,end_time,status,errors_count)
+                 VALUES (:sid,:t,:t,'completed',0)"""), {'sid':cls.anchor_session,'t':cls.anchor})
             for i, lid in enumerate(cls.ids):
                 c.execute(text("""INSERT INTO car_listings(listing_id,make,model,year,price,price_status,source,collection_method,
                  last_verified_at,first_seen_at,is_active,consecutive_missing_runs,mileage,fuel_type,transmission)
@@ -43,6 +50,8 @@ class DealerEvidenceTests(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         with cls.engine.begin() as c:
+            if cls.anchor_session:
+                c.execute(text('DELETE FROM scraping_logs WHERE session_id=:sid'), {'sid':cls.anchor_session})
             for lid in cls.ids:
                 c.execute(text('DELETE FROM dealer_vehicle_labels WHERE listing_id=:id'), {'id':lid})
                 c.execute(text('DELETE FROM dealer_listing_details WHERE listing_id=:id'), {'id':lid})
@@ -169,6 +178,8 @@ class DealerEvidenceTests(unittest.TestCase):
                 c.execute(text('DELETE FROM listing_snapshots WHERE id=ANY(:ids)'),{'ids':added})
 
     def test_desktop_routes_support_direct_navigation(self):
+        if not (self.module.frontend / 'index.html').exists():
+            self.skipTest('frontend/dist is a build artifact; run `cd frontend && npm run build` to exercise this')
         for path in ['/market','/compare','/following','/models/Škoda/Karoq']:
             response=self.client.get(path)
             self.assertEqual(200,response.status_code,response.text)
