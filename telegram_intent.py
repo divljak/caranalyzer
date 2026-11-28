@@ -238,13 +238,15 @@ hajde ajde ajmo hajmo hajdemo ajdemo uzmemo uzmimo uzmem uzmi uzimamo obzir obzi
 razmatramo gledamo gledajmo gledati platforma platforme platformi platformu platformom prelazi prelazim prelazis prelaziti
 prelazila prelazio prelazilo prelaze premasuje premasi prekoracuje najprodavanije najprodavaniji najprodavanija
 ide idu recimo npr naprimjer znaci dakle sada sad tada opet ponovo onako ovdje ukljucujuci uracunaj uracunati
+bot bote botu botic nemoj nemojte nemam nemamo necu nista smije smiju smjeti prije poslije posle
 """.split())
 
 # Words that start a question or describe a price, never part of a make or model ("prosječno",
 # "najjeftiniji", "normalna"): dropped from the search text whatever their ending.
 _FILLER_PREFIXES = ("regist", "prosjec", "najjeftin", "jeftin", "normaln", "realn", "najpovoljn", "povoljn",
                     "odlicn", "stanj", "ocuvan", "garazir", "uvoz", "servisn",
-                    "prelaz", "premasuj", "prekorac", "razmot", "razmatr", "uracun")  # "u odličnom stanju", "iz uvoza"
+                    "prelaz", "premasuj", "prekorac", "razmot", "razmatr", "uracun",
+                    "preporuc", "povecam", "povecaj", "smanjim", "smanji", "pouzdan", "najpouzdan")  # "u odličnom stanju", "iz uvoza"
 
 _MENTION = re.compile(r"@\w+")
 _MILEAGE_CUES = (r"(?:mileage|kilometraz\w*|kilometers|kilometres|odvozen\w*|prijeden\w*|on the clock|"
@@ -352,12 +354,31 @@ def wants_older(folded):
 
 _RANGE_FROM = r"(?:(?P<lead>od|from|izmedj?u|between)\s*)?"
 _RANGE_SEP = r"\s*(?P<sep>-|–|—|do|to|until|i|and)\s*"
+_NO_PRICE_UNIT = r"(?!\s*(?:k(?![a-z])|km|bam|kam|marak\w*|hiljad\w*|tisuc\w*|thousand|eur\w*|[.,]?000))"
 _YEAR_SPAN = re.compile(
-    _RANGE_FROM + r"\b(?P<a>(?:19|20)[0-9]{2})" + _RANGE_SEP + r"(?P<b>(?:19|20)[0-9]{2})\b"
-    r"(?!\s*(?:k(?![a-z])|km|bam|kam|marak\w*|hiljad\w*|tisuc\w*|thousand|eur\w*|[.,]?000))")
-# "do 2018", "prije 2018", "before 2018", "starije od 2018": the newest model year, not a price
-_YEAR_CEILING = (r"(?:\bdo|\bprije|\bpre|\bbefore|\buntil|\bup to|\bstarij\w*\s+od|\bolder than)\s*"
-                 r"((?:19|20)[0-9]{2})\b(?!\s*(?:k(?![a-z])|km|bam|kam|marak\w*|hiljad\w*|tisuc\w*|thousand|eur\w*|[.,]?000))")
+    _RANGE_FROM + r"\b(?P<a>(?:19|20)[0-9]{2})" + _RANGE_SEP + r"(?P<b>(?:19|20)[0-9]{2})\b" + _NO_PRICE_UNIT)
+# "2015 ili 2016", "2010 2011 2012", "2017, 2018": several model years in a row are the range between the oldest and
+# the newest (never a year and then a price).
+_YEAR_LIST = re.compile(
+    r"(?<![0-9.,])(?:19|20)[0-9]{2}\b(?:(?:\s*[,/]\s*|\s+(?:(?:ili|or|i|and)\s+)?)(?:19|20)[0-9]{2}\b)+"
+    + _NO_PRICE_UNIT)
+_YEAR = r"((?:19|20)[0-9]{2})\b" + _NO_PRICE_UNIT
+# Model-year phrases, first match wins: (pattern, kind). A lone year is that year only ("exact"). "od / from / since"
+# include the year; "prije / before / starije od" and "poslije / nakon / novije od" leave it out (strict), so
+# "prije 2010" is 2009 and older and "novije od 2016" is 2017 and newer; "do 2018" includes 2018.
+_YEAR_BOUNDS = (
+    (r"\b" + _YEAR + r"\s*(?:\+|or newer|or later|and newer|and up|(?:ili|i)\s+(?:novij\w*|mladj?\w*))", "min"),
+    (r"\b" + _YEAR + r"\s*(?:or older|or earlier|and older|(?:ili|i)\s+starij\w*)", "max"),
+    (r"(?:\bprije|\bpre|\bbefore|\bstarij\w*\s+od|\bolder than)\s*" + _YEAR, "before"),
+    (r"(?:\bdo|\buntil|\bup to)\s*" + _YEAR, "max"),
+    (r"(?:\bposlije|\bposle|\bnakon|\biza|\bafter|\bnewer than|\bnovij\w*\s+od|\bmladj?\w*\s+od)\s*" + _YEAR, "after"),
+    (r"(?:\bfrom|\bsince|\bod)\s*" + _YEAR, "min"),
+    (r"\b" + _YEAR, "exact"),
+)
+# "15 godište", "godište 15": the model year 2015 (a two-digit year only next to the word "godište")
+_YEAR_SHORT = (r"(?<![0-9.,])\b([0-9]{2})\s*\.?\s*godist\w*", r"\bgodist\w*\s*(?:je\s*)?([0-9]{2})(?![0-9.,])"
+               r"(?!\s*(?:k(?![a-z])|km|bam|kam|marak\w*|hiljad\w*|tisuc\w*|thousand|eur\w*))")
+_NEGATION_BEFORE = re.compile(r"\b(?:ne|nije|nisu|nikako|nemoj\w*|not|never|no)\b(?:\s+\w+){0,2}\s*$")
 _THOUSANDS = r"k(?![a-z0-9])|h?iljad\w*|tisuc\w*|thousand|soma\b|som\b"
 # "preko 40k", "iznad 30.000 KM", "over 20k": a lower price bound only.
 _NOT_LESS = (r"(?:ne|nikako|no|not|never)\s+(?:manje|ispod|less|under|below|fewer)(?:\s+(?:than|od))?")
@@ -373,13 +394,51 @@ _PRICE_SPAN = re.compile(
 
 
 def _year_range(folded):
-    """('2022 - 2024' | 'od 2022 do 2024' | 'izmedu 2018 i 2020') -> (match, low, high) or None."""
+    """('2022 - 2024' | 'od 2022 do 2024' | 'izmedu 2018 i 2020' | '2015 ili 2016' | '2010 2011 2012')
+    -> (match, low, high) or None."""
     for match in _YEAR_SPAN.finditer(folded):
         if match.group("sep") in {"i", "and"} and not match.group("lead"):
             continue
         low, high = sorted((int(match.group("a")), int(match.group("b"))))
         if YEAR_RANGE[0] <= low <= high <= YEAR_RANGE[1] and low < high:
             return match, low, high
+    for match in _YEAR_LIST.finditer(folded):
+        found = [int(year) for year in re.findall(r"(?:19|20)[0-9]{2}", match.group())]
+        if all(YEAR_RANGE[0] <= year <= YEAR_RANGE[1] for year in found) and min(found) < max(found):
+            return match, min(found), max(found)
+    return None
+
+
+def _year_bound(folded):
+    """(match, low, high) for the one model-year phrase of a message that is not a two-sided range, or None.
+
+    "Golf 2015" is that year only (low == high); "od 2015", "2015+", "2015 ili novije" are (2015, None);
+    "do 2018", "2012 ili stariji" are (None, 2018) / (None, 2012). Strict words leave the year out: "poslije 2015",
+    "nakon 2015", "novije od 2015" -> (2016, None); "prije 2010", "starije od 2010" -> (None, 2009). A negated
+    "ne starije od 2014" is a floor (2014, None). "15 godište" / "godište 15" is 2015 only."""
+    for pattern, kind in _YEAR_BOUNDS:
+        for match in re.finditer(pattern, folded):
+            year = int(match.group(1))
+            if not YEAR_RANGE[0] <= year <= YEAR_RANGE[1]:
+                continue
+            if kind == "before" and _NEGATION_BEFORE.search(folded[:match.start()]):
+                kind = "min"  # "da nije starije od 2014", "ne starije od 2014"
+            if kind == "exact":
+                return match, year, year
+            if kind == "min":
+                return match, year, None
+            if kind == "max":
+                return match, None, year
+            if kind == "before":
+                return match, None, year - 1
+            return match, year + 1, None  # "after"
+    for pattern in _YEAR_SHORT:
+        match = re.search(pattern, folded)
+        if match:
+            short = int(match.group(1))
+            year = 2000 + short if short <= SHORT_NUMBER_MAX else 1900 + short
+            if YEAR_RANGE[0] <= year <= YEAR_RANGE[1]:
+                return match, year, year
     return None
 
 
@@ -407,6 +466,51 @@ def _generation_digits(folded):
     return found
 
 
+_CLASS_LETTERS = frozenset("bceglms")  # Mercedes "e 220", "c 200", "s 350"; a lone "a" is also the word "and"
+_CLASS_LETTERS_ALL = _CLASS_LETTERS | {"a"}
+_MERCEDES_WORDS = frozenset({"mercedes", "benz", "mb", "merc", "mercedez", "mercedesa"})
+_MODEL_NUMBER = re.compile(r"(?<![a-z0-9.,/-])([0-9]{3})(?![0-9])\s*(?:do|to|until)\s*(?=[0-9])")
+
+
+def _is_car_word(word):
+    """True for a make, a model or one of their short forms ("bmw", "vito", "merc"), never a filler or a number."""
+    folded = fold(word)
+    if not folded or folded in _STOPWORDS or any(char.isdigit() for char in folded):
+        return False
+    return _looks_like_a_name(folded)
+
+
+def _model_number_digits(folded, original):
+    """Indexes of a three-digit model number that stands before "do N k": "bmw 320 do 15k KM",
+    "mercedes e 220 do 20k KM", "a 180 do 12k KM", "vito 111 do 15k". The number is part of the model, the price
+    cap is what follows "do". It needs a car word (or a Mercedes class letter) right before it and a real
+    price (1.000 or more, or with "k") after "do"; a lower-case "km" after that is a mileage range instead."""
+    found = set()
+    for match in _MODEL_NUMBER.finditer(folded):
+        before = folded[:match.start()].rstrip()
+        word = re.search(r"([a-z0-9]+)$", before)
+        if not word:
+            continue
+        previous = word.group(1)
+        if len(previous) == 1:
+            if previous not in _CLASS_LETTERS and previous != "a":
+                continue
+            earlier = before[:word.start()].rstrip()
+            if previous == "a" and earlier and not (earlier.split()[-1] in _MERCEDES_WORDS):
+                continue  # "... a 100 do 200": the word "and", then a range
+        elif not _is_car_word(previous):
+            continue
+        amount = re.match(rf"{_AMOUNT}\s*(km|{_KM_WORDS})?(?![a-z0-9])", folded[match.end():])
+        if not amount:
+            continue
+        value = _amount(amount.group(1), amount.group(2), PRICE_RANGE)
+        unit = amount.group(3)
+        if not value or (unit and (unit != "km" or original[match.end() + amount.start(3):][:2] == "km")):
+            continue  # a mileage range: "100 do 200 km", "golf 100 do 200 hiljada kilometara" ("KM" is a price)
+        found.update(range(match.start(1), match.end(1)))
+    return found
+
+
 def _span_number(value):
     """"15.000" -> 15000, "7,5" -> 7.5 (a decimal is only valid with a thousands word), None when empty."""
     decimal = re.fullmatch(r"([0-9]{1,3})[.,]([0-9]{1,2})", value or "")
@@ -423,11 +527,12 @@ def _price_range(folded, original, blocked=()):
     "hiljada" applies to both ends ("50-60k" is 50.000-60.000). Only all-lower-case "km"
     means mileage; any form with an upper-case K ("KM", "Km", "kM") is the currency.
     """
-    for match in _PRICE_SPAN.finditer(folded):
+    # A year, a generation ("golf 7") or a model number ("bmw 320") is never an end of the range: masked with "#", so
+    # the amount after it is still found ("bmw 320 do 15-20k" is 15-20k).
+    text = "".join("#" if i in blocked else char for i, char in enumerate(folded)) if blocked else folded
+    for match in _PRICE_SPAN.finditer(text):
         if match.group("sep") in {"i", "and"} and not match.group("lead"):
             continue
-        if any(i in blocked for i in range(match.start(), match.end())):
-            continue  # part of a year span or a generation ("golf 7"): not an amount
         units = [original[match.start(g):match.end(g)] for g in ("ua", "ub") if match.group(g)]
         if len(units) == 2 and (units[0] == "km") != (units[1] == "km"):
             continue  # "12000 KM do 200000 km": a price and a mileage, not one range
@@ -461,6 +566,17 @@ _NOT_OVER = re.compile(r"\b(?:ne|nikako ne)\s+(?:prelaz\w*|premasuj\w*|prekoracu
                        r"(?:\s+(?:preko|iznad|vise od|vece od|over|above))?(?=\s*(?:oko\s*)?[0-9])")
 
 
+# "golf nikako preko 15k", "bez preko 200000 km", "ne bi preko 15k", "da ne košta više od 12000 KM", "nemoj preko 100000 km":
+# a negation up to three words before "preko / više od / iznad" makes the number a cap, like "do". "bez" only reaches
+# one word ("auto bez štete preko 15k" is not a cap).
+_NEGATION = (r"(?:(?:ne|nikako|nemoj\w*|nemam\w*|necu|nista|nikad|never|not|no|don'?t|do not)"
+             r"(?:\s+(?!(?:ali|a|pa|nego|vec|but|i|ili)\b)\w+){0,3}?|bez(?:\s+(?!(?:ali|a|pa|nego|vec|but)\b)\w+)?)")
+_NEGATED_ABOVE = re.compile(rf"\b{_NEGATION}\s+(?P<cue>preko|iznad|vise od|vece od|over|above|more than)"
+                            r"(?=\s*(?:oko\s*)?[0-9])")
+# "bmw 3/5 do 15-20k": the series pair is the model, not an amount
+_SERIES_PAIR = re.compile(r"\b(?:bmw|serij\w*|series)\s+([1-8]\s*/\s*[1-8])(?![0-9]|\s*(?:k(?![a-z])|km|%))")
+
+
 def _extract_filters(folded, original):
     """Return Filters plus the original text with recognised spans removed.
 
@@ -468,38 +584,32 @@ def _extract_filters(folded, original):
     """
     # Same length, so the indexes into ``original`` stay valid: the phrase now reads as a plain "do".
     folded = _NOT_OVER.sub(lambda m: "do".ljust(len(m.group())), folded)
+    folded = _NEGATED_ABOVE.sub(lambda m: folded[m.start():m.start("cue")] + "do".ljust(len(m.group("cue")))
+                                + folded[m.end("cue"):m.end()], folded)
     mask = [True] * len(original)
 
     def consume(match):
         for index in range(match.start(), match.end()):
             mask[index] = False
 
+    series = _SERIES_PAIR.search(folded)
+    if series:
+        for index in range(series.start(1), series.end(1)):
+            mask[index] = False
     year = year_max = None
-    span = _year_range(folded)
+    span = _year_range(folded) or _year_bound(folded)
     if span:
         consume(span[0])
         year, year_max = span[1], span[2]
-    # A lone year ("Golf 2015") is that model year only; "od 2015", "2015+", "novije od 2015" are a lower bound
-    # and "do 2018", "prije 2018" an upper one. (pattern, bound) where bound is "min", "max" or "exact".
-    for pattern, bound in (() if span else (
-        (r"(?:from|since|after|newer than|od|iza|nakon|novij\w* od|mladj\w* od)\s*((?:19|20)[0-9]{2})\b", "min"),
-        (r"\b((?:19|20)[0-9]{2})\s*(?:\+|or newer|or later|and newer|ili novije|i novije)", "min"),
-        (_YEAR_CEILING, "max"),
-        (r"\b((?:19|20)[0-9]{2})\b(?!\s*(?:k(?![a-z])|km|bam|kam|marak\w*|hiljad\w*|tisuc\w*|thousand|eur\w*))",
-         "exact"),
-    )):
-        match = re.search(pattern, folded)
-        if match:
-            candidate = int(match.group(1))
-            if YEAR_RANGE[0] <= candidate <= YEAR_RANGE[1]:
-                if bound == "max":
-                    year_max = candidate
-                else:
-                    year = candidate
-                    year_max = candidate if bound == "exact" else None
-                consume(match)
-                break
 
+    if year is None and year_max is None:
+        # "stariji od 10 godina": the newest model year is this year minus 10 (not negated: "ne stariji od 8 godina"
+        # is the floor below)
+        older = re.search(r"\b(?:starij\w*\s+od|older than)\s*([0-9]{1,2})\s*(?:god\w*|years?)\b", folded)
+        if (older and 1 <= int(older.group(1)) <= 40
+                and not _NEGATION_BEFORE.search(folded[:older.start()])):
+            year_max = date.today().year - int(older.group(1))
+            consume(older)
     if year is None and year_max is None:
         # "staro do 10 godina", "ne starije od 8 godina", "do 10 godina staro", "up to 10 years old"
         for pattern in (
@@ -531,7 +641,8 @@ def _extract_filters(folded, original):
         elif mileage is None:
             mileage = value
 
-    blocked = {i for i, keep in enumerate(mask) if not keep} | _generation_digits(folded)
+    model_digits = _model_number_digits(folded, original)
+    blocked = {i for i, keep in enumerate(mask) if not keep} | _generation_digits(folded) | model_digits
     for _ in range(2):  # a price range and a mileage range can both be in one message, in either order
         price_span = _price_range(folded, original, blocked)
         if not (price_span and all(mask[i] for i in range(price_span[0].start(), price_span[0].end()))):
@@ -588,12 +699,16 @@ def _extract_filters(folded, original):
                 break
 
     spans = [m for m in re.finditer(rf"(?<![0-9]){_AMOUNT}\s*(km|bam|kam|maraka|marke|marks|eur|euro|kn|kuna|kune|hrk)?(?![a-z])", folded)
-             if all(mask[i] for i in range(m.start(), m.end()))]
+             if all(mask[i] for i in range(m.start(), m.end())) and not model_digits & set(range(m.start(), m.end()))]
     unitless = None
     for match in spans:
         if budget is not None:
             break
         candidate = _amount(match.group(1), match.group(2), PRICE_RANGE)
+        if (candidate and (year is not None or year_max is not None) and not match.group(2) and not match.group(3)
+                and YEAR_RANGE[0] <= candidate <= YEAR_RANGE[1] and len(match.group(1)) == 4
+                and not re.search(r"(?:\bdo|\bispod|\bmax\w*|\bunder|\bbelow|\bup to)\s*$", folded[:match.start()])):
+            continue  # a second model year ("octavia 2016 ili passat 2018"), never a price
         if candidate:
             budget = candidate
             if not match.group(2) and not match.group(3):
@@ -676,7 +791,8 @@ def _lemma(token, previous=""):
 
 def _search_tokens(rest):
     tokens = []
-    for raw in re.split(r"\s+", rest.lower().replace("'", "").replace("\u2019", "")):
+    raws = re.split(r"\s+", rest.lower().replace("'", "").replace("\u2019", ""))
+    for position, raw in enumerate(raws):
         if re.search(r"[<>=(){}]", raw.strip("()[]\"'!?.,:")):
             continue  # markup or code ("<script>", "'1'='1"), never a model name; "(golf)" is still golf
         raw = re.sub(r"^([0-9])[,]([0-9][a-z]?)$", r"\1.\2", raw)  # "3,0" is the engine size 3.0, not "3 0"
@@ -690,6 +806,11 @@ def _search_tokens(rest):
         mark = re.fullmatch(r"mk([0-9])", folded)
         if mark and tokens and _generation_model(tokens[-1]):
             tokens.append(mark.group(1))  # "golf mk7"
+            continue
+        if (folded in _CLASS_LETTERS_ALL and position + 1 < len(raws)
+                and re.fullmatch(r"[0-9]{3}", raws[position + 1].strip(".,!?"))
+                and (folded != "a" or not tokens or fold(tokens[-1]) in _MERCEDES_WORDS)):
+            tokens.append(token)  # "a 180", "mercedes e 220": the class letter is part of the model
             continue
         if re.fullmatch(r"[0-9]{5,}", folded):
             continue  # "do 999999999 KM": an amount out of range is not a model number
@@ -836,6 +957,47 @@ def _drop_unknown_words(tokens, original):
             _is_catalog_word(token) for token in tokens):
         return []
     return tokens
+
+
+# Makes and models people search that the typo catalogue above does not list: never mistaken for noise.
+_OTHER_NAMES = frozenset("""
+porsche lexus mg ds cupra lada zastava yugo jaguar saab rover infiniti daewoo maserati ferrari lamborghini bentley
+hummer ssangyong dodge chrysler cadillac lincoln isuzu daihatsu lotus mclaren alpina abarth trabant wartburg tomos
+cayenne macan panamera boxster cayman carrera stojadin florida koral skala uno cinquecento seicento kalos lanos
+nubira tico sedici ka kuga vw benz mb merc mercedes bmw seat cinquecento tipo punto kadett golf lupo arosa
+quattro xdrive amg sline msport gti gtd gte tdi tsi tdci cdti crdi dci jtd multijet comfortline highline trendline
+variant kombi
+""".split())
+_DRIVE_WORDS = frozenset({"4x4", "4wd", "awd"})  # a drive type, never a model
+
+
+def _name_known(folded):
+    """True when a lower-case ASCII word is, or is clearly short for, a make / model / trim name."""
+    names = set(MAKE_MODELS) | _KNOWN_MODELS | set(GENERATIONS) | _OTHER_NAMES | set(SLANG)
+    if folded in names or _is_catalog_word(folded):
+        return True
+    if _lemma(folded) != folded:
+        return True
+    return len(folded) >= 4 and any(name.startswith(folded) for name in names)  # "merc", "volks", "citro"
+
+
+def _looks_like_a_name(folded):
+    """A word that could be part of a make or model: short ("mg", "ds"), carrying a digit ("320d", "2.0"), or known."""
+    return len(folded) <= 3 or any(char.isdigit() for char in folded) or _name_known(folded)
+
+
+def drop_noise_words(tokens, filters, folded):
+    """With a hard filter (price, year, mileage, fuel, gearbox, body) and no word that could be a make or model,
+    the leftover words are conversation ("limit 10k KM za auto", "najpouzdaniji dizel do 15k", "4x4 do 15k"):
+    nothing to search by, so the filters alone run. A real or unlisted-but-plausible name keeps every word
+    ("mg do 9000 KM", "merc do 15000 KM", "lexus do 20000 KM"); no filter keeps them all too."""
+    if not tokens:
+        return tokens
+    if not (filters.numeric() or filters.fuel or filters.transmission or re.search(_BODY, folded)):
+        return tokens
+    if any(_looks_like_a_name(fold(token)) for token in tokens if fold(token) not in _DRIVE_WORDS):
+        return tokens
+    return []
 
 
 def model_hint(label):
@@ -1032,7 +1194,7 @@ def looks_like_followup(text_value):
     if re.search(r"^(?:ajde\s+|hajde\s+)?(?:compare|uporedi\w*|usporedi\w*|poredi\w*)\b", folded):
         return True  # "uporedi sa octaviom": with the car just searched
     filters, rest = _extract_filters(folded, original)
-    if _search_tokens(rest):
+    if drop_noise_words(_search_tokens(rest), filters, folded):
         return False
     # "do 12000", "dizel", "nešto jeftinije", "može i skuplje", "koliko košta": the last search, changed
     return bool(filters.numeric() or filters.include_old or filters.attributes() or re.search(_RELATIVE, folded)
@@ -1273,28 +1435,10 @@ _DEAL_CHEAPEST = r"\b(?:najjeftin\w*|cheapest)\b"
 DEAL_WEEK_DAYS = 7
 DEAL_DEFAULT_DAYS = 14  # same window as the shortlist's "priced well below similar listings"
 
-_YEAR_SINGLE = (
-    (r"(?:from|since|after|newer than|od|iza|nakon|novij\w* od|mladj\w* od)\s*((?:19|20)[0-9]{2})\b", False),
-    (r"\b((?:19|20)[0-9]{2})\s*(?:\+|or newer|or later|and newer|ili novije|i novije)", False),
-    (_YEAR_CEILING, "max"),
-    (r"\b((?:19|20)[0-9]{2})\b", True),
-)
-
-
 def _stated_years(folded):
     """(match, low, high) for the model years a message names: "2016-2019", "od 2018" (open end),
     or a bare "2018" (that year only). None when it names none."""
-    span = _year_range(folded)
-    if span:
-        return span
-    for pattern, exact in _YEAR_SINGLE:
-        match = re.search(pattern, folded)
-        if match and YEAR_RANGE[0] <= int(match.group(1)) <= YEAR_RANGE[1]:
-            year = int(match.group(1))
-            if exact == "max":
-                return match, None, year
-            return match, year, (year if exact else None)
-    return None
+    return _year_range(folded) or _year_bound(folded)
 
 
 SHORT_NUMBER_MAX = 30  # "golf 20" could be 2020; "golf 31" or higher is never offered as a year
@@ -1487,6 +1631,7 @@ def _correct(original, folded, context):
         original, folded = original[:cut.start()], folded[:cut.start()]
     filters, rest = _extract_filters(folded, original)
     tokens, generation = generation_hint(_search_tokens(rest))
+    tokens = drop_noise_words(tokens, filters, folded)
     named = [token for token in tokens if not token.isdigit()]
     new = replace(filters, search=clean_search(" ".join(named)) if len(named) <= 3 else "")
     if generation and not (new.year_min or new.year_max):  # "pogrešno, golf 6 ne 7": that generation's years
@@ -1808,6 +1953,7 @@ def _parse_question(text_value, context=None, _restating=False):
     tokens, generation = generation_hint(tokens)
     tokens = [repair_typo(token, tokens[i - 1] if i else "") for i, token in enumerate(tokens)]
     tokens = _drop_unknown_words(tokens, original)
+    tokens = drop_noise_words(tokens, filters, folded)
     if not (generation or filters.year_min or filters.year_max):
         tokens, short_number, is_year = short_model_number(tokens, folded)
         if short_number and is_year:  # "passat 08": only a year can start with 0
