@@ -1,0 +1,112 @@
+# Production bugs (Bosnian, 28 Nov 2026): filler words became a model ("platformi prelazi", "hajde uzmemo obzir") and
+# "ne prelazi preko 30k KM" was read as a price floor. Ids "v2-fb-...".
+cases:
+- id: v2-fb-best-selling-max-30k
+  category: filler_budget
+  impact: visible
+  title: "'Koja auta se najbolje prodaju na platformi a da cijena ne prelazi preko 30k KM': no model, cap 30000, most listed"
+  turns:
+    - say: "Koja auta se najbolje prodaju na platformi a da cijena ne prelazi preko 30k KM"
+      expect: {intent: suggest, filters: {search: "", budget: 30000, price_min: null}}
+
+- id: v2-fb-ne-prelazi-30k
+  category: filler_budget
+  impact: visible
+  title: "'ne prelazi 30k KM' is a cap, not a model called 'prelazi'"
+  turns:
+    - say: "najbolje se prodaju auta, cijena ne prelazi 30k KM"
+      expect: {intent: suggest, filters: {search: "", budget: 30000, price_min: null}}
+
+- id: v2-fb-ispod-30000
+  category: filler_budget
+  impact: guard
+  title: "'ispod 30.000 KM' is a cap"
+  turns:
+    - say: "koja auta se najbolje prodaju na platformi ispod 30.000 KM"
+      expect: {intent: suggest, filters: {search: "", budget: 30000, price_min: null}}
+
+- id: v2-fb-do-30k
+  category: filler_budget
+  impact: guard
+  title: "'do 30k KM' is a cap"
+  turns:
+    - say: "koja auta se najbolje prodaju do 30k KM"
+      expect: {intent: suggest, filters: {search: "", budget: 30000, price_min: null}}
+
+- id: v2-fb-max-30k
+  category: filler_budget
+  impact: guard
+  title: "'max 30k KM' is a cap"
+  turns:
+    - say: "koja auta se najbolje prodaju na platformi, max 30k KM"
+      expect: {intent: suggest, filters: {search: "", budget: 30000, price_min: null}}
+
+- id: v2-fb-preko-is-still-a-floor
+  category: filler_budget
+  impact: guard
+  title: "plain 'preko 30k KM' stays a floor"
+  turns:
+    - say: "golf preko 30k KM"
+      expect: {intent: find, filters: {search: golf, price_min: 30000}}
+
+- id: v2-fb-followup-range-refines-most-listed
+  category: filler_budget
+  impact: visible
+  title: "'Ok hajde da uzmemo u obzir od 20.000KM do 30.000 KM' keeps the most-listed question, new range, no model"
+  turns:
+    - say: "Koja auta se najbolje prodaju na platformi a da cijena ne prelazi preko 30k KM"
+      expect: {intent: suggest, filters: {budget: 30000}}
+    - say: "Ok hajde da uzmemo u obzir od 20.000KM do 30.000 KM"
+      expect: {intent: suggest, filters: {search: "", price_min: 20000, budget: 30000}}
+
+- id: v2-fb-followup-range-narrower
+  category: filler_budget
+  impact: silent
+  title: "a range-only follow-up with filler changes the range of the previous most-listed question"
+  turns:
+    - say: "najbolje se prodaju auta do 30k KM"
+      expect: {intent: suggest, filters: {budget: 30000}}
+    - say: "hajde da razmotrimo od 10.000 KM do 15.000 KM"
+      expect: {intent: suggest, filters: {search: "", price_min: 10000, budget: 15000}}
+
+- id: v2-fb-followup-range-no-state
+  category: filler_budget
+  impact: visible
+  title: "the same follow-up with no earlier question just answers the most-listed models in that range"
+  turns:
+    - say: "Ok hajde da uzmemo u obzir od 20.000KM do 30.000 KM"
+      expect: {intent: suggest, filters: {search: "", price_min: 20000, budget: 30000}}
+
+- id: v2-fb-filler-only-no-model
+  category: filler_budget
+  impact: visible
+  title: "filler-only leftovers never become a model"
+  turns:
+    - say: "hajde uzmemo u obzir do 25.000 KM"
+      expect: {intent: suggest, filters: {search: "", budget: 25000}}
+
+- id: v2-fb-unknown-words-not-a-model
+  category: filler_budget
+  impact: silent
+  title: "unknown words in a sentence are not a model unless they fuzzy-match one"
+  turns:
+    - say: "ok hajde pokazi mi nesto zanimljivo tipa blabla xyzqw do 20000 KM"
+      expect: {intent: find, filters: {search: "", budget: 20000}}
+
+- id: v2-fb-fuzzy-model-kept
+  category: filler_budget
+  impact: guard
+  title: "a misspelt real model in a conversational sentence is still the model"
+  turns:
+    - say: "ok hajde da uzmemo u obzir pasat do 20000 KM"
+      expect: {intent: find, filters: {search: passat, budget: 20000}}
+
+- id: v2-fb-km-case-guard
+  category: filler_budget
+  impact: guard
+  title: "lowercase km is still mileage, capital K is still currency"
+  turns:
+    - say: "golf do 200000 km"
+      expect: {intent: find, filters: {search: golf, mileage_max: 200000}}
+    - say: "golf do 30000 KM"
+      expect: {intent: find, filters: {search: golf, budget: 30000}}
