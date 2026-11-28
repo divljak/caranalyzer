@@ -234,12 +234,17 @@ voznju voznja skuplje skuplji skuplja skupljeg skuplju povoljnije povoljniji pov
 preslo presli prede predje predjeno predeno predena vozen vozeno navozeno mozda prvi prva prvo prve prva dva tri
 drugi druga drugo drugu ostali ostale ostalo other another wanted pls plz please thanks
 marka marku marke marki posao poslu
+hajde ajde ajmo hajmo hajdemo ajdemo uzmemo uzmimo uzmem uzmi uzimamo obzir obzira obzirom razmotri razmotrimo razmotrite
+razmatramo gledamo gledajmo gledati platforma platforme platformi platformu platformom prelazi prelazim prelazis prelaziti
+prelazila prelazio prelazilo prelaze premasuje premasi prekoracuje najprodavanije najprodavaniji najprodavanija
+ide idu recimo npr naprimjer znaci dakle sada sad tada opet ponovo onako ovdje ukljucujuci uracunaj uracunati
 """.split())
 
 # Words that start a question or describe a price, never part of a make or model ("prosječno",
 # "najjeftiniji", "normalna"): dropped from the search text whatever their ending.
 _FILLER_PREFIXES = ("regist", "prosjec", "najjeftin", "jeftin", "normaln", "realn", "najpovoljn", "povoljn",
-                    "odlicn", "stanj", "ocuvan", "garazir", "uvoz", "servisn")  # "u odličnom stanju", "iz uvoza"
+                    "odlicn", "stanj", "ocuvan", "garazir", "uvoz", "servisn",
+                    "prelaz", "premasuj", "prekorac", "razmot", "razmatr", "uracun")  # "u odličnom stanju", "iz uvoza"
 
 _MENTION = re.compile(r"@\w+")
 _MILEAGE_CUES = (r"(?:mileage|kilometraz\w*|kilometers|kilometres|odvozen\w*|prijeden\w*|on the clock|"
@@ -451,11 +456,18 @@ def _price_range(folded, original, blocked=()):
     return None
 
 
+# "da cijena ne prelazi (preko) 30k KM", "ne ide preko 30k": an upper bound, even though "preko" alone is a floor.
+_NOT_OVER = re.compile(r"\b(?:ne|nikako ne)\s+(?:prelaz\w*|premasuj\w*|prekoracuj\w*|ide|idu|bude|bila|bilo|bi bila)"
+                       r"(?:\s+(?:preko|iznad|vise od|vece od|over|above))?(?=\s*(?:oko\s*)?[0-9])")
+
+
 def _extract_filters(folded, original):
     """Return Filters plus the original text with recognised spans removed.
 
     Unit case rule: all-lower-case "km" after an amount is mileage; "KM" / "Km" / "kM" is a price.
     """
+    # Same length, so the indexes into ``original`` stay valid: the phrase now reads as a plain "do".
+    folded = _NOT_OVER.sub(lambda m: "do".ljust(len(m.group())), folded)
     mask = [True] * len(original)
 
     def consume(match):
@@ -799,6 +811,31 @@ def repair_typo(token, previous=""):
                            - difflib.SequenceMatcher(None, folded, close[1]).ratio() > 0.05):
         return close[0]
     return token
+
+
+def _is_catalog_word(token):
+    """True when a token is, or is a near miss of, a make / model / generation name (or carries a digit,
+    like "320d", "a4", "x5"). Anything else left over in a sentence is conversation, not a car."""
+    folded = fold(token)
+    if any(char.isdigit() for char in folded):
+        return True
+    names = set(MAKE_MODELS) | _KNOWN_MODELS | set(GENERATIONS)
+    if folded in names or any(len(name) >= 4 and folded.startswith(name) for name in names):
+        return True
+    return len(folded) >= 4 and bool(difflib.get_close_matches(folded, COMMON_NAMES, n=1, cutoff=TYPO_CUTOFF))
+
+
+UNKNOWN_WORDS_MIN_SENTENCE = 4  # words; a short message ("Kuga", "renault astre") still goes to the database
+
+
+def _drop_unknown_words(tokens, original):
+    """In a sentence, leftover words that match no make / model (even fuzzily) are never a model:
+    "hajde uzmemo obzir", "platformi prelazi". A single word ("mg", "merc") or a short message keeps its
+    words for the database search: it may be an alias or a model the catalogue lacks."""
+    if len(tokens) >= 2 and len(original.split()) >= UNKNOWN_WORDS_MIN_SENTENCE and not any(
+            _is_catalog_word(token) for token in tokens):
+        return []
+    return tokens
 
 
 def model_hint(label):
@@ -1664,6 +1701,9 @@ def _shared_compare_filters(folded, original):
     return filters, rest
 
 
+_CONSIDER = re.compile(r"\b(?:uzm\w+\s+u\s+obzir|u obzir|razmot\w+|razmatr\w+|consider\w*)\b")
+
+
 def _parse_question(text_value, context=None, _restating=False):
     """Turn one question into an Intent. ``context`` is an Intent from a replied-to answer
     (or, for a correction, the same person's previous question)."""
@@ -1767,6 +1807,7 @@ def _parse_question(text_value, context=None, _restating=False):
     tokens = _search_tokens(rest)
     tokens, generation = generation_hint(tokens)
     tokens = [repair_typo(token, tokens[i - 1] if i else "") for i, token in enumerate(tokens)]
+    tokens = _drop_unknown_words(tokens, original)
     if not (generation or filters.year_min or filters.year_max):
         tokens, short_number, is_year = short_model_number(tokens, folded)
         if short_number and is_year:  # "passat 08": only a year can start with 0
@@ -1857,6 +1898,11 @@ def _parse_question(text_value, context=None, _restating=False):
         # "a od 2020?" in reply to a shortlist: same question, narrower bounds
         return Intent(context.kind, merge_filters(context.filters, filters),
                       days=context.days if context.kind == "deals" else 7)
+
+    if (not context and filters.budget and not filters.search and not filters.family and _CONSIDER.search(folded)
+            and not _names_a_car(folded)):
+        # "uzmimo u obzir od 20.000 do 30.000 KM" with no earlier question to refine: the most listed models
+        return Intent("suggest", replace(filters, include_old=False))
 
     if not filters.is_empty():
         if (filters.search and not filters.family and not filters.numeric() and re.search(_STATS, folded)):

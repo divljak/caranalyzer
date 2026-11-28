@@ -1,6 +1,6 @@
 # Bot stress suite
 
-306 realistic Bosnian / Serbian / Croatian (and mixed, Cyrillic, English) questions and multi-turn conversations
+319 realistic Bosnian / Serbian / Croatian (and mixed, Cyrillic, English) questions and multi-turn conversations
 for the Garaža Telegram bot, with the expected intent, filters and behaviour for each. Fully offline: no
 Telegram, no Gemini, no database, no env or Supabase access (`harness.py`).
 
@@ -10,6 +10,8 @@ Telegram, no Gemini, no database, no env or Supabase access (`harness.py`).
 
 - `bot_cases_year_rule.yaml`: 9 cases for the exact-year rule (GAR-8), ids `v2-yr-...`; they use the harness dataset
   `golf_years=2014,2015,...` (one Golf per year, year bounds applied).
+
+- `bot_cases_filler_budget.yaml`: 13 cases for filler words / "ne prelazi preko 30k KM" (28 Nov 2026), ids `v2-fb-...`.
 
 ```bash
 # a table of pass/fail per category + every failure with actual vs expected (exit 0)
