@@ -1,0 +1,468 @@
+# Parser audit, top 4 bugs (28 Nov 2026): a model number before 'do Nk', a negation before 'preko', several model years / 'stariji od',
+# unknown leftover words becoming a model. Ids "v2-ah-...". 'prije / stariji od' leave the named year out, 'poslije / novije od' too.
+cases:
+- id: v2-ah-modelno-0
+  category: audit_high
+  impact: visible
+  title: "'bmw 320 do 15k KM': the number is part of the model"
+  turns:
+    - say: 'bmw 320 do 15k KM'
+      expect: {"intent": "find", "filters": {"search": "bmw 320", "budget": 15000, "price_min": null}}
+
+- id: v2-ah-modelno-1
+  category: audit_high
+  impact: visible
+  title: "'mercedes e 220 do 20k KM': the number is part of the model"
+  turns:
+    - say: 'mercedes e 220 do 20k KM'
+      expect: {"intent": "find", "filters": {"search": "mercedes e 220", "budget": 20000, "price_min": null}}
+
+- id: v2-ah-modelno-2
+  category: audit_high
+  impact: visible
+  title: "'a 180 do 12k KM': the number is part of the model"
+  turns:
+    - say: 'a 180 do 12k KM'
+      expect: {"intent": "find", "filters": {"search": "a 180", "budget": 12000, "price_min": null}}
+
+- id: v2-ah-modelno-3
+  category: audit_high
+  impact: visible
+  title: "'vito 111 do 15k': the number is part of the model"
+  turns:
+    - say: 'vito 111 do 15k'
+      expect: {"intent": "find", "filters": {"search": "vito 111", "budget": 15000, "price_min": null}}
+
+- id: v2-ah-modelno-4
+  category: audit_high
+  impact: visible
+  title: "'bmw 3/5 do 15–20k': the number is part of the model"
+  turns:
+    - say: 'bmw 3/5 do 15–20k'
+      expect: {"intent": "find", "filters": {"search": "bmw", "budget": 20000, "price_min": 15000}}
+
+- id: v2-ah-modelno-520d-guard
+  category: audit_high
+  impact: guard
+  title: "'bmw 520d do 18k' keeps working"
+  turns:
+    - say: 'bmw 520d do 18k'
+      expect: {"intent": "find", "filters": {"search": "bmw 520d", "budget": 18000, "price_min": null}}
+
+- id: v2-ah-modelno-a3-guard
+  category: audit_high
+  impact: guard
+  title: "'audi a3 do 12k' keeps working"
+  turns:
+    - say: 'audi a3 do 12k'
+      expect: {"intent": "find", "filters": {"search": "audi a3", "budget": 12000, "price_min": null}}
+
+- id: v2-ah-range-guard-0
+  category: audit_high
+  impact: guard
+  title: "'10 do 15k' is a genuine price range"
+  turns:
+    - say: '10 do 15k'
+      expect: {"intent": "find", "filters": {"search": "", "budget": 15000, "price_min": 10000}}
+
+- id: v2-ah-range-guard-1
+  category: audit_high
+  impact: guard
+  title: "'10-15k' is a genuine price range"
+  turns:
+    - say: '10-15k'
+      expect: {"intent": "find", "filters": {"search": "", "budget": 15000, "price_min": 10000}}
+
+- id: v2-ah-range-guard-2
+  category: audit_high
+  impact: guard
+  title: "'od 10 do 15k' is a genuine price range"
+  turns:
+    - say: 'od 10 do 15k'
+      expect: {"intent": "find", "filters": {"search": "", "budget": 15000, "price_min": 10000}}
+
+- id: v2-ah-modelno-mileage-guard
+  category: audit_high
+  impact: guard
+  title: "'golf 100 do 150 hiljada km' is a mileage range, not a model number"
+  turns:
+    - say: 'golf 100 do 150 hiljada km'
+      expect: {"intent": "find", "filters": {"search": "golf", "mileage_min": 100000, "mileage_max": 150000, "budget": null, "price_min": null}}
+
+- id: v2-ah-neg-0
+  category: audit_high
+  impact: visible
+  title: "'golf nikako preko 15k KM' is a cap"
+  turns:
+    - say: 'golf nikako preko 15k KM'
+      expect: {"intent": "find", "filters": {"search": "golf", "budget": 15000, "price_min": null}}
+
+- id: v2-ah-neg-1
+  category: audit_high
+  impact: visible
+  title: "'golf bez preko 15k KM' is a cap"
+  turns:
+    - say: 'golf bez preko 15k KM'
+      expect: {"intent": "find", "filters": {"search": "golf", "budget": 15000, "price_min": null}}
+
+- id: v2-ah-neg-2
+  category: audit_high
+  impact: visible
+  title: "'golf ne bi preko 15k KM' is a cap"
+  turns:
+    - say: 'golf ne bi preko 15k KM'
+      expect: {"intent": "find", "filters": {"search": "golf", "budget": 15000, "price_min": null}}
+
+- id: v2-ah-neg-3
+  category: audit_high
+  impact: visible
+  title: "'golf ne želim preko 15k KM' is a cap"
+  turns:
+    - say: 'golf ne želim preko 15k KM'
+      expect: {"intent": "find", "filters": {"search": "golf", "budget": 15000, "price_min": null}}
+
+- id: v2-ah-neg-4
+  category: audit_high
+  impact: visible
+  title: "'golf ništa preko 15k KM' is a cap"
+  turns:
+    - say: 'golf ništa preko 15k KM'
+      expect: {"intent": "find", "filters": {"search": "golf", "budget": 15000, "price_min": null}}
+
+- id: v2-ah-neg-5
+  category: audit_high
+  impact: visible
+  title: "'golf nemoj preko 15k KM' is a cap"
+  turns:
+    - say: 'golf nemoj preko 15k KM'
+      expect: {"intent": "find", "filters": {"search": "golf", "budget": 15000, "price_min": null}}
+
+- id: v2-ah-neg-6
+  category: audit_high
+  impact: visible
+  title: "'golf ne smije preko 15k KM' is a cap"
+  turns:
+    - say: 'golf ne smije preko 15k KM'
+      expect: {"intent": "find", "filters": {"search": "golf", "budget": 15000, "price_min": null}}
+
+- id: v2-ah-neg-vise-od
+  category: audit_high
+  impact: visible
+  title: "'da ne košta više od 15k KM' is a cap"
+  turns:
+    - say: 'da ne košta više od 15k KM'
+      expect: {"intent": "find", "filters": {"search": "", "budget": 15000, "price_min": null}}
+
+- id: v2-ah-neg-hocu-auto
+  category: audit_high
+  impact: visible
+  title: "'Hoću auto koji ne košta više od 12000 KM' is a cap"
+  turns:
+    - say: 'Hoću auto koji ne košta više od 12000 KM'
+      expect: {"intent": "find", "filters": {"search": "", "budget": 12000, "price_min": null}}
+
+- id: v2-ah-neg-km-nemoj
+  category: audit_high
+  impact: visible
+  title: "'golf nemoj preko 100000 km' is a mileage cap"
+  turns:
+    - say: 'golf nemoj preko 100000 km'
+      expect: {"intent": "find", "filters": {"search": "golf", "mileage_max": 100000, "mileage_min": null}}
+
+- id: v2-ah-neg-km-followup
+  category: audit_high
+  impact: visible
+  title: "'a bez preko 200000 km' after a Golf search caps the mileage and keeps Golf"
+  turns:
+    - say: 'golf do 15000 KM'
+      expect: {"intent": "find", "filters": {"search": "golf", "budget": 15000}}
+    - say: 'a bez preko 200000 km'
+      expect: {"intent": "find", "filters": {"search": "golf", "budget": 15000, "mileage_max": 200000, "mileage_min": null}}
+
+- id: v2-ah-neg-preko-guard
+  category: audit_high
+  impact: guard
+  title: "plain 'preko 30k KM' stays a floor"
+  turns:
+    - say: 'preko 30k KM'
+      expect: {"intent": "find", "filters": {"search": "", "price_min": 30000, "budget": null}}
+
+- id: v2-ah-years-multi-0
+  category: audit_high
+  impact: silent
+  title: "'golf 2015 ili 2016' is a year range, never a price"
+  turns:
+    - say: 'golf 2015 ili 2016'
+      expect: {"intent": "find", "filters": {"search": "golf", "year_min": 2015, "year_max": 2016, "budget": null, "price_min": null}}
+
+- id: v2-ah-years-multi-1
+  category: audit_high
+  impact: silent
+  title: "'golf 7 2017 ili 2018 dizel' is a year range, never a price"
+  turns:
+    - say: 'golf 7 2017 ili 2018 dizel'
+      expect: {"intent": "find", "filters": {"search": "golf", "year_min": 2017, "year_max": 2018, "budget": null, "price_min": null}}
+
+- id: v2-ah-years-multi-2
+  category: audit_high
+  impact: silent
+  title: "'golf 6 2010 2011 2012' is a year range, never a price"
+  turns:
+    - say: 'golf 6 2010 2011 2012'
+      expect: {"intent": "find", "filters": {"search": "golf", "year_min": 2010, "year_max": 2012, "budget": null, "price_min": null}}
+
+- id: v2-ah-years-followup
+  category: audit_high
+  impact: silent
+  title: "'a 2014 ili 2017?' after a Golf search is a year range"
+  turns:
+    - say: 'golf do 15000 KM'
+      expect: {"intent": "find", "filters": {"search": "golf", "budget": 15000}}
+    - say: 'a 2014 ili 2017?'
+      expect: {"intent": "find", "filters": {"search": "golf", "budget": 15000, "year_min": 2014, "year_max": 2017}}
+
+- id: v2-ah-years-stariji-godina
+  category: audit_high
+  impact: visible
+  title: "'stariji od 10 godina' is year_max = this year - 10"
+  turns:
+    - say: 'stariji od 10 godina'
+      expect: {"intent": "find", "filters": {"year_max": "Y-10", "year_min": null}}
+
+- id: v2-ah-years-stariji-od-2010
+  category: audit_high
+  impact: silent
+  title: "'golf stariji od 2010' is 2009 and older"
+  turns:
+    - say: 'golf stariji od 2010'
+      expect: {"intent": "find", "filters": {"search": "golf", "year_max": 2009, "year_min": null}}
+
+- id: v2-ah-years-prije-2010
+  category: audit_high
+  impact: visible
+  title: "'golf prije 2010' is 2009 and older"
+  turns:
+    - say: 'golf prije 2010'
+      expect: {"intent": "find", "filters": {"search": "golf", "year_max": 2009, "year_min": null}}
+
+- id: v2-ah-years-novije-od-2016
+  category: audit_high
+  impact: visible
+  title: "'golf novije od 2016' is 2017 and newer"
+  turns:
+    - say: 'golf novije od 2016'
+      expect: {"intent": "find", "filters": {"search": "golf", "year_min": 2017, "year_max": null}}
+
+- id: v2-ah-years-poslije-2015
+  category: audit_high
+  impact: visible
+  title: "'golf poslije 2015' is 2016 and newer, 'poslije' is not a model word"
+  turns:
+    - say: 'golf poslije 2015'
+      expect: {"intent": "find", "filters": {"search": "golf", "year_min": 2016, "year_max": null}}
+
+- id: v2-ah-years-ili-mladji
+  category: audit_high
+  impact: visible
+  title: "'golf 2016 ili mlađi' is 2016 and newer"
+  turns:
+    - say: 'golf 2016 ili mlađi'
+      expect: {"intent": "find", "filters": {"search": "golf", "year_min": 2016, "year_max": null}}
+
+- id: v2-ah-years-ili-stariji
+  category: audit_high
+  impact: visible
+  title: "'golf 2012 ili starije' is 2012 and older"
+  turns:
+    - say: 'golf 2012 ili starije'
+      expect: {"intent": "find", "filters": {"search": "golf", "year_max": 2012, "year_min": null}}
+
+- id: v2-ah-years-godiste-15
+  category: audit_high
+  impact: visible
+  title: "'golf 15 godište' is 2015"
+  turns:
+    - say: 'golf 15 godište'
+      expect: {"intent": "find", "filters": {"search": "golf", "year_min": 2015, "year_max": 2015}}
+
+- id: v2-ah-years-godiste-15b
+  category: audit_high
+  impact: visible
+  title: "'golf godište 15' is 2015"
+  turns:
+    - say: 'golf godište 15'
+      expect: {"intent": "find", "filters": {"search": "golf", "year_min": 2015, "year_max": 2015}}
+
+- id: v2-ah-years-godiste-2015
+  category: audit_high
+  impact: guard
+  title: "'golf godište 2015' is 2015"
+  turns:
+    - say: 'golf godište 2015'
+      expect: {"intent": "find", "filters": {"search": "golf", "year_min": 2015, "year_max": 2015}}
+
+- id: v2-ah-years-exact-guard
+  category: audit_high
+  impact: guard
+  title: "'Golf 2015' is exactly 2015"
+  turns:
+    - say: 'Golf 2015'
+      expect: {"intent": "find", "filters": {"search": "golf", "year_min": 2015, "year_max": 2015}}
+
+- id: v2-ah-years-golf-20-guard
+  category: audit_high
+  impact: guard
+  title: "'golf 20' still asks for clarification"
+  turns:
+    - say: 'golf 20'
+      expect: {"intent": "clarify", "filters": {"search": "golf"}, "note": "short_number"}
+
+- id: v2-ah-years-ne-starije-guard
+  category: audit_high
+  impact: guard
+  title: "'golf ne starije od 10 godina' stays a floor"
+  turns:
+    - say: 'golf ne starije od 10 godina'
+      expect: {"intent": "find", "filters": {"search": "golf", "year_min": "Y-10", "year_max": null}}
+
+- id: v2-ah-noise-limit
+  category: audit_high
+  impact: dead_end
+  title: "'limit 10k KM za auto' runs a filter-only search"
+  turns:
+    - say: 'limit 10k KM za auto'
+      expect: {"intent": "find", "filters": {"search": "", "budget": 10000}, "reply_lacks": ["Nisam prepoznao", "ne poklapa"]}
+
+- id: v2-ah-noise-budzet-preporucujes
+  category: audit_high
+  impact: dead_end
+  title: "'budžet 12000 KM šta mi preporučuješ' has no dead end"
+  turns:
+    - say: 'budžet 12000 KM šta mi preporučuješ'
+      expect: {"intent": ["find", "suggest"], "filters": {"search": "", "budget": 12000}, "reply_lacks": ["Nisam prepoznao", "ne poklapa"]}
+
+- id: v2-ah-noise-pouzdaniji-dizel
+  category: audit_high
+  impact: dead_end
+  title: "'koji je najpouzdaniji dizel do 15k KM' runs a diesel search"
+  turns:
+    - say: 'koji je najpouzdaniji dizel do 15k KM'
+      expect: {"intent": "find", "filters": {"search": "", "budget": 15000, "fuel": "diesel"}, "reply_lacks": ["Nisam prepoznao", "ne poklapa"]}
+
+- id: v2-ah-noise-4x4
+  category: audit_high
+  impact: dead_end
+  title: "'4x4 do 15k KM' runs a filter-only search"
+  turns:
+    - say: '4x4 do 15k KM'
+      expect: {"intent": "find", "filters": {"search": "", "budget": 15000}, "reply_lacks": ["Nisam prepoznao", "ne poklapa"]}
+
+- id: v2-ah-noise-followup-range-passat
+  category: audit_high
+  impact: dead_end
+  title: "'Ok sad pokaži od 10.000 KM do 15.000 KM' keeps Passat"
+  turns:
+    - say: 'passat do 15000 KM'
+      expect: {"intent": "find", "filters": {"search": "passat", "budget": 15000}}
+    - say: 'Ok sad pokaži od 10.000 KM do 15.000 KM'
+      expect: {"intent": "find", "filters": {"search": "passat", "price_min": 10000, "budget": 15000}, "reply_lacks": ["Nisam prepoznao"]}
+
+- id: v2-ah-noise-followup-povecamo
+  category: audit_high
+  impact: dead_end
+  title: "'a ako povećamo budžet na 20k' keeps Golf with the new cap"
+  turns:
+    - say: 'golf do 15000 KM'
+      expect: {"intent": "find", "filters": {"search": "golf", "budget": 15000}}
+    - say: 'a ako povećamo budžet na 20k'
+      expect: {"intent": "find", "filters": {"search": "golf", "budget": 20000}, "reply_lacks": ["Nisam prepoznao", "ne poklapa"]}
+
+- id: v2-ah-noise-hajde-passat
+  category: audit_high
+  impact: cosmetic
+  title: "'hajde pokaži passat' has no 'Nisam prepoznao' note"
+  turns:
+    - say: 'hajde pokaži passat'
+      expect: {"intent": "find", "filters": {"search": "passat"}, "reply_lacks": ["Nisam prepoznao"]}
+
+- id: v2-ah-noise-hej-bot-golf
+  category: audit_high
+  impact: cosmetic
+  title: "'Hej bot, treba mi golf 6 dizel' has no 'Nisam prepoznao' note"
+  turns:
+    - say: 'Hej bot, treba mi golf 6 dizel'
+      expect: {"intent": "find", "filters": {"search": "golf", "fuel": "diesel", "year_min": 2008, "year_max": 2013}, "reply_lacks": ["Nisam prepoznao"]}
+
+- id: v2-ah-noise-mg-guard
+  category: audit_high
+  impact: guard
+  title: "'mg under 9000 KM' keeps the make word"
+  turns:
+    - say: 'mg under 9000 KM'
+      expect: {"intent": "find", "filters": {"search": "mg", "budget": 9000}}
+
+- id: v2-ah-noise-merc-guard
+  category: audit_high
+  impact: guard
+  title: "'merc do 15000 KM' keeps the make word"
+  turns:
+    - say: 'merc do 15000 KM'
+      expect: {"intent": "find", "filters": {"search": "merc", "budget": 15000}}
+
+- id: v2-ah-noise-lexus-guard
+  category: audit_high
+  impact: guard
+  title: "'lexus do 20000 KM' keeps a make the catalogue lacks"
+  turns:
+    - say: 'lexus do 20000 KM'
+      expect: {"intent": "find", "filters": {"search": "lexus", "budget": 20000}}
+
+- id: v2-ah-guard-compare-golf-6-ili-7
+  category: audit_high
+  impact: guard
+  title: "'golf 6 ili 7 do 12000' still compares"
+  turns:
+    - say: 'golf 6 ili 7 do 12000'
+      expect: {"intent": "compare", "filters": {"budget": 12000}}
+
+- id: v2-ah-guard-unitless-do-12000
+  category: audit_high
+  impact: guard
+  title: "'golf do 12000' (unitless) is still a price cap"
+  turns:
+    - say: 'golf do 12000'
+      expect: {"intent": "find", "filters": {"search": "golf", "budget": 12000}}
+
+- id: v2-ah-guard-km-case
+  category: audit_high
+  impact: guard
+  title: "'golf do 150000 km' lower-case km is mileage, 'golf do 15000 KM' is currency"
+  turns:
+    - say: 'golf do 150000 km'
+      expect: {"intent": "find", "filters": {"search": "golf", "mileage_max": 150000, "budget": null}}
+    - say: 'golf do 15000 KM'
+      expect: {"intent": "find", "filters": {"search": "golf", "budget": 15000, "mileage_max": null}}
+
+- id: v2-ah-guard-ne-prelazi-preko
+  category: audit_high
+  impact: guard
+  title: "'golf ne prelazi preko 30k KM' stays a cap (PR #63)"
+  turns:
+    - say: 'golf ne prelazi preko 30k KM'
+      expect: {"intent": "find", "filters": {"search": "golf", "budget": 30000, "price_min": null}}
+
+- id: v2-ah-guard-najprodavaniji
+  category: audit_high
+  impact: guard
+  title: 'most-listed route stays (PR #63)'
+  turns:
+    - say: 'Koja auta se najbolje prodaju na platformi a da cijena ne prelazi preko 30k KM'
+      expect: {"intent": "suggest", "filters": {"search": "", "budget": 30000}}
+
+- id: v2-ah-guard-price-check-window
+  category: audit_high
+  impact: guard
+  title: "'koliko košta Golf 2015 prosječno' keeps the +-1 year window"
+  turns:
+    - say: 'koliko košta Golf 2015 prosječno'
+      expect: {"intent": "price_check", "filters": {"year_min": 2014, "year_max": 2016}}

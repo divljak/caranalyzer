@@ -1,6 +1,6 @@
 # Bot stress suite
 
-319 realistic Bosnian / Serbian / Croatian (and mixed, Cyrillic, English) questions and multi-turn conversations
+392 realistic Bosnian / Serbian / Croatian (and mixed, Cyrillic, English) questions and multi-turn conversations
 for the Garaža Telegram bot, with the expected intent, filters and behaviour for each. Fully offline: no
 Telegram, no Gemini, no database, no env or Supabase access (`harness.py`).
 
@@ -12,6 +12,12 @@ Telegram, no Gemini, no database, no env or Supabase access (`harness.py`).
   `golf_years=2014,2015,...` (one Golf per year, year bounds applied).
 
 - `bot_cases_filler_budget.yaml`: 13 cases for filler words / "ne prelazi preko 30k KM" (28 Nov 2026), ids `v2-fb-...`.
+
+- `bot_cases_audit_high.yaml`: 57 cases for the top 4 parser-audit bugs (28 Nov 2026), ids `v2-ah-...`: a model number
+  before "do 15k" ("bmw 320 do 15k KM"), a negation before "preko / više od" ("golf nikako preko 15k KM"), several
+  model years / "stariji od 2010" / "poslije 2015" / "15 godište", and unknown leftover words that became a model
+  ("limit 10k KM za auto", "4x4 do 15k KM"), plus regression guards. Year bounds: "do 2018" includes 2018;
+  "prije 2010" / "starije od 2010" mean 2009 and older, "poslije 2015" / "novije od 2015" mean 2016 and newer.
 
 ```bash
 # a table of pass/fail per category + every failure with actual vs expected (exit 0)

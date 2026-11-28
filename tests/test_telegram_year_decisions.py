@@ -1,7 +1,7 @@
 """Ogi's year decisions, 17 Nov 2026.
 
 1. "Golf 2015" is exactly 2015. With no match the bot offers older / newer years as two buttons.
-   Ranges ("od 2015", "2015+", "novije od 2015", "2015-2018") stay ranges.
+   Ranges ("od 2015", "2015+", "novije od 2015", "2015-2018") stay ranges ("novije od" / "prije" leave the named year out).
 2. A bare short number ("golf 20") is asked about (year, price or mileage), never guessed. Clear forms
    ("20k KM", "20.000 KM", "200 KS") are read as before.
 3. A 2025+ car under 1.000 km is still "new" and left out of used lists; "za porodicu" in compares is a known gap.
@@ -45,10 +45,10 @@ class ExactYearParserTests(unittest.TestCase):
 
     def test_explicit_ranges_stay_ranges(self):
         for message, low, high in (("golf od 2015", 2015, None), ("golf 2015+", 2015, None),
-                                   ("golf novije od 2015", 2015, None), ("golf 2015 ili novije", 2015, None),
+                                   ("golf novije od 2015", 2016, None), ("golf 2015 ili novije", 2015, None),
                                    ("golf from 2015", 2015, None), ("golf 2015-2018", 2015, 2018),
                                    ("golf od 2015 do 2018", 2015, 2018), ("golf između 2015 i 2018", 2015, 2018),
-                                   ("golf do 2018", None, 2018), ("golf prije 2018", None, 2018)):
+                                   ("golf do 2018", None, 2018), ("golf prije 2018", None, 2017)):
             self.assertEqual(("golf", low, high), years(message), message)
 
     def test_a_price_after_do_is_not_a_year_ceiling(self):

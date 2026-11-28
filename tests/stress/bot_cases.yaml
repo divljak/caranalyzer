@@ -187,7 +187,7 @@ cases:
   turns:
     - say: "do 30000km novije od 2018"
       covers: [1]
-      expect: {intent: find, filters: {mileage_max: 30000, year_min: 2018, budget: null}}
+      expect: {intent: find, filters: {mileage_max: 30000, year_min: 2019, budget: null}}
 
 # ───────────────────────── budgets and corrections ─────────────────────────
 - id: budget-correction-budzet-je
@@ -488,7 +488,7 @@ cases:
   title: "'novija od 2018'"
   turns:
     - say: "octavia novija od 2018"
-      expect: {intent: find, filters: {search: octavia, year_min: 2018}}
+      expect: {intent: find, filters: {search: octavia, year_min: 2019}}
 
 - id: year-od-do
   category: years_age
